@@ -1,7 +1,7 @@
 [project]
 name = "biffo-plugin-marketing"
 version = "0.1.0"
-description = "Example Biffo plugin — replace this with your own plugin's name and description"
+description = "Campaign studio — research, positioning, channel planning, generation and attribution for platform marketing."
 requires-python = ">=3.13"
 dependencies = [
   # biffo-plugin-sdk has a real release path as of biffo-template's
@@ -20,8 +20,15 @@ dependencies = [
   # the real release exists. Use a local `[tool.uv.sources]` override until
   # then — see the README's "biffo-plugin-sdk dependency" section, which
   # documents both options and says which to delete once 1.0.0 is live.
-  "biffo-plugin-sdk>=1.0,<2.0",
+  # [user-serving] brings FastAPI and the `require_group` gate the admin
+  # surface mounts behind; [sigv4] signs this plugin's own outbound calls to
+  # Core's internal API so it is granted `system:marketing` rather than the
+  # host's role identity (ADR-0021 section 1a). Same pins as idea-scout, the
+  # other user-facing plugin.
+  "biffo-plugin-sdk[sigv4,user-serving]>=1.1,<2.0",
   "aws-lambda-powertools[tracer]>=3.4.0",
+  # Already present for the SDK; also used by admin_app to call Core directly —
+  # one hop, rather than the host calling itself through the public path.
   "httpx>=0.28.1",
 ]
 
