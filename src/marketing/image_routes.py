@@ -55,8 +55,8 @@ require_admin = require_group("admin")
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
-_STORAGE_PATH = "/internal/plugins/me/storage"
-_LEDGER_PATH = "/internal/media-generations"
+_STORAGE_PATH = "/api/v1/internal/plugins/me/storage"
+_LEDGER_PATH = "/api/v1/internal/media-generations"
 
 #: A plain client's own upload timeout, matching `admin_app._CORE_TIMEOUT`'s
 #: reasoning: generous enough that a cold start or a slow provider does not
