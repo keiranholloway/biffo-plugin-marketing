@@ -37,6 +37,7 @@ learned that the same way.
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,34 @@ async def config() -> dict[str, Any]:
     }
 
 
+def _validated_campaign_id(campaign_id: str) -> str:
+    """``campaign_id`` as a UUID, or a 404.
+
+    **This is an SSRF guard, not tidiness.** ``campaign_id`` arrives from the
+    URL path and is interpolated into the Core API URL by ``_core``. This
+    Lambda SigV4-signs its own calls to Core's *internal* API as
+    ``system:marketing`` (ADR-0021 §1a), so a value carrying ``../`` or a host
+    separator does not merely 404 — it steers a credentialed request at an
+    endpoint this plugin was never granted for. CodeQL flagged exactly this
+    ("Partial server-side request forgery") on the first version of the mint
+    route.
+
+    Validating rather than escaping, because the set of legal values is known
+    exactly: ``marketing_campaign.id`` is a ``String(36)`` UUID written by
+    Core. Anything else is not a campaign this plugin could act on, so 404 is
+    both the honest answer and the one that leaks least.
+    """
+    try:
+        parsed = uuid.UUID(campaign_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found."
+        ) from None
+    # str(UUID) re-renders canonically, so nothing the caller wrote survives
+    # into the URL even if it parsed.
+    return str(parsed)
+
+
 class MintRequest(BaseModel):
     """One link to mint: a channel, optionally a variant, organic or paid."""
 
@@ -123,6 +152,8 @@ async def mint_links(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No public base URL is configured for this deployment.",
         )
+
+    campaign_id = _validated_campaign_id(campaign_id)
 
     campaign = await _core("GET", f"/campaigns/{campaign_id}", admin.token)
     if campaign.status_code == status.HTTP_404_NOT_FOUND:

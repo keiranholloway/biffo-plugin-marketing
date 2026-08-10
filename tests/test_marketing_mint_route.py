@@ -169,3 +169,58 @@ def test_an_unconfigured_deployment_says_so_rather_than_minting_a_broken_url(
 def test_an_empty_batch_is_rejected(ctx) -> None:
     client, _ = ctx
     assert client.post(f"/campaigns/{_CAMPAIGN}/links", json={"links": []}).status_code == 422
+
+
+# ── SSRF ─────────────────────────────────────────────────────────────────
+# `campaign_id` comes from the URL path and is interpolated into the Core API
+# URL. This Lambda SigV4-signs its calls to Core's INTERNAL API as
+# `system:marketing`, so an unvalidated value does not merely 404 — it steers a
+# credentialed request. CodeQL caught this on the first version of the route
+# ("Partial server-side request forgery", admin_app.py:188).
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "..%2f..%2finternal%2fadmin",
+        "x/../../api/v1/internal/agents",
+        "evil.example",
+        "@evil.example",
+        "http://evil.example/",
+        "%2e%2e%2f%2e%2e%2f",
+        "1234",
+        "",
+    ],
+    ids=[
+        "encoded-traversal",
+        "path-traversal",
+        "bare-host",
+        "userinfo-host-swap",
+        "absolute-url",
+        "double-encoded-traversal",
+        "not-a-uuid",
+        "empty",
+    ],
+)
+def test_a_campaign_id_that_is_not_a_uuid_reaches_core_not_at_all(ctx, hostile: str) -> None:
+    """Nothing the caller wrote may reach the Core URL.
+
+    Asserted as "Core was never called" rather than "the response was 404":
+    a 404 could equally mean the request went out and Core rejected it, which
+    is precisely the outcome this guard exists to prevent.
+    """
+    client, core = ctx
+    resp = client.post(f"/campaigns/{hostile}/links", json={"links": [{"channel": "linkedin"}]})
+
+    assert resp.status_code in (404, 405), resp.status_code
+    assert core.created == [], "a hostile campaign_id reached Core"
+
+
+def test_a_valid_uuid_is_re_rendered_canonically(ctx) -> None:
+    """Even a value that parses is rewritten, so no caller formatting survives."""
+    client, core = ctx
+    upper = _CAMPAIGN.upper()
+    client.post(f"/campaigns/{upper}/links", json={"links": [{"channel": "linkedin"}]})
+
+    assert core.created, "a valid campaign_id should still mint"
+    assert core.created[0]["campaign_id"] == _CAMPAIGN, "the id should be canonical lowercase"
