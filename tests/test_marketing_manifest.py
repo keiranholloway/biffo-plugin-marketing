@@ -57,14 +57,43 @@ def test_the_admin_surface_is_declared_and_points_at_a_real_app() -> None:
     assert ingress["app"] == "marketing.admin_app:app"
 
 
-def test_no_user_ingress_yet() -> None:
-    """Iteration 1 is the admin surface only.
+def test_the_user_surface_is_declared_and_points_at_a_real_app() -> None:
+    """Surface B (franchise units) — mirrors
+    `test_the_admin_surface_is_declared_and_points_at_a_real_app` exactly.
 
-    Asserted rather than assumed: declaring `user_ingress` would mount a
-    franchise-unit surface that does not exist, and the failure would be a 500
-    for whoever found it first.
+    `required_group` is `founder`, not a bespoke name: both `idea-scout` and
+    `ideation` gate their own `user_ingress` on the same group, and
+    `modules/cloud/aws/auth/main.tf` describes it as "Approved product user"
+    generically, not as anything Idea-Scout-specific.
     """
-    assert "user_ingress" not in _raw(), "user_ingress is iteration 2, not this one"
+    ingress = _raw().get("user_ingress")
+    assert ingress, "user_ingress is absent — the unit surface would never mount"
+    assert ingress["required_group"] == "founder"
+    assert ingress["app"] == "marketing.user_app:app"
+
+
+def test_founder_readable_tables_stay_read_only_for_founders() -> None:
+    """`marketing_campaign`/`marketing_artefact`/`marketing_asset`/
+    `marketing_link` open `list`/`read` to any authenticated caller (`[]`) so
+    `user_app.py` can read them — but `create`/`update`/`delete` must stay
+    `admin`-only on every one of them, and `marketing_click` must stay
+    admin-only on every operation (see `user_app.py`'s module docstring for
+    why). A regression here would let a `founder`-group caller write through
+    the generic CRUD path directly, which no route in `user_app.py` needs or
+    should have."""
+    tables = {t["name"]: t for t in _raw()["tables"]}
+    for name in ("marketing_campaign", "marketing_artefact", "marketing_asset", "marketing_link"):
+        perms = tables[name]["permissions"]
+        assert perms["list"]["required_role"] == [], f"{name}.list should be open"
+        assert perms["read"]["required_role"] == [], f"{name}.read should be open"
+        for op in ("create", "update", "delete"):
+            assert perms[op]["required_role"] == ["admin"], f"{name}.{op} must stay admin-only"
+
+    click_perms = tables["marketing_click"]["permissions"]
+    for op in ("list", "read", "create", "update", "delete"):
+        assert click_perms[op]["required_role"] == ["admin"], (
+            f"marketing_click.{op} must stay admin-only"
+        )
 
 
 @pytest.mark.parametrize("table", _raw()["tables"], ids=lambda t: t["name"])
