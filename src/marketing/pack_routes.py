@@ -2,16 +2,13 @@
 and what makes M5 "the first genuinely usable release" (M1-M4 only produce an
 approved plan; nothing an operator can publish comes out of them).
 
-A pack is four things, assembled from what earlier milestones already built —
-this module writes no new generation logic of its own, only the render-once
-and mint-once wiring around it:
+A pack is four things:
 
-1. **The assets** — the one approved source creative plus its three
-   ``PLACEMENTS`` renders (``render.py``, M5's other half, already merged).
-   Rendered, never regenerated: ``render.render`` is deterministic and
-   effectively free, so :func:`_ensure_placements` below renders a placement
-   at most once per campaign and reuses the stored ``marketing_asset`` row on
-   every later call.
+1. **The assets** — whatever ``marketing_asset`` rows already exist for this
+   campaign, each resolved to a fresh GET url. **Placement rendering is not
+   done here, and is not yet done anywhere in this plugin** — see "What this
+   module does NOT do" below; ``missing_placements`` in the response says so
+   explicitly rather than silently pretending they exist.
 2. **The copy** — the latest **approved** ``copy`` artefact's body
    (``copy_routes.py``, pipeline plumbing for the same stage).
 3. **The tracked links** — one per channel in the approved copy, minted with
@@ -26,14 +23,59 @@ and mint-once wiring around it:
    surface that text next to what it applies to, not so this module can
    reason about it.
 
-Its own module for the same reason ``image_routes.py`` is: rendering needs
-the SigV4-signed internal client for object storage (presign / confirm /
-mint a GET url), which ``admin_app._core``'s Cognito-bearer path cannot
-reach.
+Its own module for the same reason ``image_routes.py`` is: resolving a
+``media_id`` to a fresh GET url needs the SigV4-signed internal client for
+object storage, which ``admin_app._core``'s Cognito-bearer path cannot reach.
 
-## What this module deliberately does NOT do
+## What this module deliberately does NOT do — placement rendering
 
-It does not build a download or copy-to-clipboard UI — that is
+An earlier version of this route rendered ``PLACEMENTS`` here: fetch the
+source creative's bytes back from object storage via a presigned URL, crop
+each placement with ``render.render``, upload the result. CodeQL's
+``py/full-ssrf`` correctly flagged that fetch — a server-side request to a
+URL read out of an HTTP response is exactly the shape the query exists to
+catch, and four different mitigation shapes (a host-allowlist check, wrapped
+in a helper; the same check inlined before the sink; the same plus an inline
+``codeql[py/full-ssrf]`` suppression comment; a positive-branch guard
+matching CodeQL's own documented barrier example) all left the finding
+unchanged. Investigation traced why: the query's taint source is
+``core_client`` itself — a ``Depends()``-injected value, per CodeQL's FastAPI
+model — so everything read back through it is treated as attacker-influenced
+regardless of what checks run on the derived string.
+
+That investigation surfaced the real defect the query was pointing at:
+``marketing_asset`` already models one row **per placement** (its own column
+description: "the placements are DETERMINISTIC RENDERS of \\[the source]"),
+but nothing in this plugin ever writes one. ``image_routes.py``'s
+``generate_still_route`` writes only the source row (``is_source=True``,
+``placement=None``); this module was compensating for that gap by fetching
+the source creative back and re-cropping it — and that re-fetch is the SSRF
+sink. The correct fix renders each placement **inside**
+``generate_still_route``, from the bytes the image provider already returned
+in memory, before they are ever uploaded — no fetch, no presigned URL, no
+outbound request, no sink. That is also what "render once, never
+regenerate" (``definitions.py``, ``render.py``) was already asking for: the
+render belongs at generation time, not reconstructed later from storage.
+
+``image_routes.py`` is owned by a different, concurrent change in this repo,
+so that fix is **not** made here — it is filed as issue #36 rather than
+reached into unilaterally. Until it lands, this route can only serve
+whatever assets already exist, which today is the source creative alone;
+``missing_placements`` in the response makes that gap
+visible to a caller rather than a route that quietly renders nothing and
+says nothing.
+
+**A caveat that issue also has to answer, not this module:** the fix above
+assumes the plugin holds the source creative's bytes in memory at generation
+time, which is true of ``generate_still_route``'s provider-generated path.
+If a "publish an existing creative" upload path is ever added — one that
+never routes the bytes through this plugin — the fetch problem returns in a
+different shape, and most likely needs Core to grow an internal "read
+bytes" endpoint so this plugin never talks to S3 directly at all. No such
+path exists in this plugin today (verified: ``image_routes.py`` is the only
+place a ``marketing_asset`` row with ``is_source=True`` is ever created).
+
+It does not build a download or copy-to-clipboard UI either — that is
 ``web-admin/``, out of scope for this change (a concurrent agent is expected
 to build the frontend against this API). The day-0 design's two device
 warnings therefore stay **unverified by this change**: a clipboard write
@@ -45,21 +87,16 @@ someone checks on a real phone.
 
 from __future__ import annotations
 
-import io
 import json
 from typing import Any
-from urllib.parse import urlsplit
 
-import httpx
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from fastapi import APIRouter, Depends, HTTPException, status
-from PIL import Image
 
 from . import admin_app, pipeline, principal_client
 from .config import public_base_url
 from .definitions import PLACEMENTS
 from .links import destination_with_utms, mint_token, tracked_url
-from .render import render
 
 require_admin = admin_app.require_admin
 
@@ -73,25 +110,6 @@ _INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 #: Matches ``image_routes._STORAGE_PATH`` — duplicated for the same reason,
 #: not imported: see that module's own comment on ``_validated_campaign_id``.
 _STORAGE_PATH = "/api/v1/internal/plugins/me/storage"
-
-#: Generous timeouts, matching ``admin_app._CORE_TIMEOUT`` /
-#: ``image_routes._UPLOAD_TIMEOUT``'s own reasoning: a cold start should read
-#: as slow, never as broken.
-_TRANSFER_TIMEOUT = 30.0
-
-#: Pillow's own ``Image.format`` values, mapped to what this module needs to
-#: upload a rendered placement honestly. ``render.render`` always writes PNG
-#: except its exact-match no-op path, which returns the source's original
-#: bytes untouched (see that module's docstring) — so the source's real
-#: format has to be read back, not assumed.
-_CONTENT_TYPES = {
-    "PNG": "image/png",
-    "JPEG": "image/jpeg",
-    "GIF": "image/gif",
-    "WEBP": "image/webp",
-}
-_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "GIF": "gif", "WEBP": "webp"}
-_DEFAULT_FORMAT = "PNG"
 
 
 def get_core_client() -> BiffoAPIClient:
@@ -110,27 +128,6 @@ def get_campaign_client(
     return principal_client.PrincipalCoreClient(admin.token)
 
 
-#: `plugin_storage.presign_download` (biffo-template's `services/api/src/
-#: api/plugin_storage.py`) mints its URL from a bare `boto3.client("s3")` —
-#: no custom endpoint configured — so a legitimate download URL is always
-#: this host family. CodeQL's `py/full-ssrf` flags `client.get(download_url)`
-#: in `_download` below: its taint source is `core_client` itself (a
-#: `Depends()`-injected value, per its FastAPI model), so it treats
-#: everything read back through `core_client.get(...)` — including this
-#: presigned-URL response — as attacker-influenced.
-#:
-#: The check is real and load-bearing regardless of whether CodeQL's static
-#: analysis recognises it: it rejects anything that is not an https URL to a
-#: real S3 host before this Lambda ever makes the second request, which is
-#: the actual mitigation for a compromised or malformed Core response
-#: steering it at an arbitrary origin. Written as a positive-branch guard —
-#: the request sits inside `if <host is allowed>:`, not after an early
-#: `raise` — because that is the shape CodeQL's own SSRF-barrier examples
-#: use; a `.endswith()` check followed by an early raise, tried first,
-#: left the finding unchanged.
-_ALLOWED_DOWNLOAD_HOST_SUFFIX = ".amazonaws.com"
-
-
 def _core_error(exc: BiffoAPIError) -> HTTPException:
     """Matches ``image_routes``'s own mapping: storage's 503 ("not
     configured here") passes through as-is; everything else is 502, since
@@ -141,161 +138,31 @@ def _core_error(exc: BiffoAPIError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail)
 
 
-async def _download(core_client: BiffoAPIClient, media_id: str) -> bytes:
-    """The bytes behind one of this plugin's own stored objects — mint a
-    short-lived GET url, then fetch it directly. There is no server-side
-    download route (``internal_plugin_storage.py`` only ever mints a URL and
-    lets the caller move the bytes); this Lambda plays the role a browser
-    plays for ``image_routes._upload``'s presigned POST, one direction
-    earlier in the same flow.
+async def _existing_assets(
+    campaign_id: str, *, campaign_client: principal_client.PrincipalCoreClient
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Whatever ``marketing_asset`` rows already exist for this campaign,
+    plus the subset of ``PLACEMENTS`` that has no row yet. Never renders —
+    see the module docstring for why generation time, not pack time, is
+    where that belongs.
 
-    Validates the URL's scheme and host before fetching it — see
-    ``_ALLOWED_DOWNLOAD_HOST_SUFFIX``'s comment for why this check is
-    written inline rather than behind a helper.
-    """
-    try:
-        url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
-    except BiffoAPIError as exc:
-        raise _core_error(exc) from exc
-
-    download_url = url_resp["url"]
-    parsed = urlsplit(download_url)
-    host = parsed.hostname or ""
-
-    async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as client:
-        try:
-            if parsed.scheme == "https" and host.endswith(_ALLOWED_DOWNLOAD_HOST_SUFFIX):
-                resp = await client.get(download_url)
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Core returned a download URL for an unexpected host.",
-                )
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Could not download the source creative: {exc}",
-            ) from exc
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not download the source creative: {resp.status_code}",
-        )
-    return resp.content
-
-
-async def _upload(
-    core_client: BiffoAPIClient, *, content: bytes, filename: str, content_type: str
-) -> dict[str, Any]:
-    """presign -> direct upload -> confirm. Mirrors ``image_routes._upload``
-    exactly, generalised to take raw bytes rather than an ``ImageProvider``'s
-    ``GeneratedImage`` — a rendered placement has no provider behind it."""
-    try:
-        presigned = await core_client.post(
-            f"{_STORAGE_PATH}/presign", json={"filename": filename, "content_type": content_type}
-        )
-    except BiffoAPIError as exc:
-        raise _core_error(exc) from exc
-
-    if len(content) > presigned["max_bytes"]:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                f"Rendered placement is {len(content)} bytes, over this "
-                f"deployment's {presigned['max_bytes']}-byte ceiling."
-            ),
-        )
-
-    async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as upload_client:
-        try:
-            upload = await upload_client.post(
-                presigned["url"],
-                data=presigned["fields"],
-                files={"file": (filename, content, content_type)},
-            )
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Upload to object storage failed: {exc}",
-            ) from exc
-
-    if upload.status_code not in (200, 201, 204):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Upload to object storage failed: {upload.status_code}",
-        )
-
-    try:
-        return await core_client.post(f"{_STORAGE_PATH}/confirm", json={"key": presigned["key"]})
-    except BiffoAPIError as exc:
-        raise _core_error(exc) from exc
-
-
-async def _ensure_placements(
-    campaign_id: str,
-    *,
-    core_client: BiffoAPIClient,
-    campaign_client: principal_client.PrincipalCoreClient,
-) -> list[dict[str, Any]]:
-    """The campaign's source creative plus every ``PLACEMENTS`` render,
-    rendering and storing only the ones that do not exist yet. Renders at
-    most once per placement per campaign — every later call reuses the
-    stored ``marketing_asset`` row, which is what makes "byte-identical on
-    repeat" (the issue's own "done when") true of the whole pack, not just of
-    ``render.render`` in isolation.
-
-    Raises 404 if this campaign has no approved source creative
-    (``is_source=True``) yet — there is nothing to render from.
+    Raises 404 if this campaign has no source creative (``is_source=True``)
+    yet — there is nothing to build a pack from.
     """
     assets = await campaign_client.get(
         f"{_INTERNAL_PREFIX}/assets", params={"campaign_id": campaign_id}
     )
-    source = next((a for a in (assets or []) if a.get("is_source")), None)
+    assets = assets or []
+    source = next((a for a in assets if a.get("is_source")), None)
     if source is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No approved source creative for this campaign yet.",
         )
 
-    existing_by_placement = {
-        a["placement"]: a for a in (assets or []) if not a.get("is_source") and a.get("placement")
-    }
-
-    out = [source]
-    source_bytes: bytes | None = None
-    for placement in PLACEMENTS:
-        existing = existing_by_placement.get(placement)
-        if existing is not None:
-            out.append(existing)
-            continue
-
-        if source_bytes is None:
-            source_bytes = await _download(core_client, source["media_id"])
-
-        rendered = render(source_bytes, placement)
-        with Image.open(io.BytesIO(rendered)) as image:
-            fmt = image.format or _DEFAULT_FORMAT
-        content_type = _CONTENT_TYPES.get(fmt, "application/octet-stream")
-        extension = _EXTENSIONS.get(fmt, "png")
-
-        media = await _upload(
-            core_client,
-            content=rendered,
-            filename=f"{campaign_id}-{placement}.{extension}",
-            content_type=content_type,
-        )
-        asset = await campaign_client.post(
-            f"{_INTERNAL_PREFIX}/assets",
-            json={
-                "campaign_id": campaign_id,
-                "media_kind": source.get("media_kind") or "image",
-                "placement": placement,
-                "media_id": media["id"],
-                "is_source": False,
-            },
-        )
-        out.append(asset)
-    return out
+    have_placements = {a["placement"] for a in assets if a.get("placement")}
+    missing_placements = [p for p in PLACEMENTS if p not in have_placements]
+    return assets, missing_placements
 
 
 async def _asset_with_url(core_client: BiffoAPIClient, asset: dict[str, Any]) -> dict[str, Any]:
@@ -318,7 +185,9 @@ async def _ensure_links(
     Mints with the exact same three pure functions
     ``admin_app.mint_links`` uses (``mint_token`` / ``destination_with_utms``
     / ``tracked_url``) and writes through the same ``admin_app._core`` seam,
-    rather than composing a URL some fourth way.
+    rather than composing a URL some fourth way. No SSRF-shaped surface
+    here: both calls are to Core's own internal CRUD mount, never to a URL
+    read out of a response.
     """
     links_resp = await admin_app._core(
         "GET", f"{_INTERNAL_PREFIX}/links", admin_token, params={"campaign_id": campaign_id}
@@ -399,7 +268,12 @@ async def get_pack_route(
     """Assemble this campaign's distribution pack: assets, copy, tracked
     links and guidance. Requires an **approved** ``copy`` artefact — a
     ``proposed`` one must not reach an operator's pack, or the copy approval
-    gate is decorative, same as every other gate in this pipeline."""
+    gate is decorative, same as every other gate in this pipeline.
+
+    ``assets`` is whatever ``marketing_asset`` rows already exist —
+    ``missing_placements`` names any of ``PLACEMENTS`` this pack could not
+    include, per the module docstring's "What this module does NOT do".
+    """
     campaign_id = admin_app._validated_campaign_id(campaign_id)
 
     campaign_resp = await admin_app._core(
@@ -424,8 +298,8 @@ async def get_pack_route(
     copy_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
     channels = copy_body.get("channels") or []
 
-    assets = await _ensure_placements(
-        campaign_id, core_client=core_client, campaign_client=campaign_client
+    assets, missing_placements = await _existing_assets(
+        campaign_id, campaign_client=campaign_client
     )
     assets_with_urls = [await _asset_with_url(core_client, a) for a in assets]
 
@@ -434,6 +308,7 @@ async def get_pack_route(
     return {
         "campaign_id": campaign_id,
         "assets": assets_with_urls,
+        "missing_placements": missing_placements,
         "copy": channels,
         "links": links,
         "guidance": campaign.get("guidance") or "",
