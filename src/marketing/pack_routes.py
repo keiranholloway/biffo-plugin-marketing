@@ -117,19 +117,17 @@ def get_campaign_client(
 #: in `_download` below: its taint source is `core_client` itself (a
 #: `Depends()`-injected value, per its FastAPI model), so it treats
 #: everything read back through `core_client.get(...)` — including this
-#: presigned-URL response — as attacker-influenced, and it does not model an
-#: inline `.endswith()` host check as a barrier (confirmed empirically: an
-#: identical guard, both wrapped in a helper and written inline immediately
-#: before the sink, left the finding unchanged across two iterations).
+#: presigned-URL response — as attacker-influenced.
 #:
-#: The check below is real and load-bearing regardless: it rejects anything
-#: that is not an https URL to a real S3 host before this Lambda ever makes
-#: the second request, which is the actual mitigation for a compromised or
-#: malformed Core response steering it at an arbitrary origin. The
-#: `codeql[py/full-ssrf]` suppression at the call site records that this
-#: specific, reviewed finding is mitigated in code rather than open —
-#: `cli/src/lib/core-version.ts` in biffo-template is the estate's existing
-#: precedent for this exact suppression comment shape.
+#: The check is real and load-bearing regardless of whether CodeQL's static
+#: analysis recognises it: it rejects anything that is not an https URL to a
+#: real S3 host before this Lambda ever makes the second request, which is
+#: the actual mitigation for a compromised or malformed Core response
+#: steering it at an arbitrary origin. Written as a positive-branch guard —
+#: the request sits inside `if <host is allowed>:`, not after an early
+#: `raise` — because that is the shape CodeQL's own SSRF-barrier examples
+#: use; a `.endswith()` check followed by an early raise, tried first,
+#: left the finding unchanged.
 _ALLOWED_DOWNLOAD_HOST_SUFFIX = ".amazonaws.com"
 
 
@@ -162,21 +160,17 @@ async def _download(core_client: BiffoAPIClient, media_id: str) -> bytes:
 
     download_url = url_resp["url"]
     parsed = urlsplit(download_url)
-    if parsed.scheme != "https" or not (parsed.hostname or "").endswith(
-        _ALLOWED_DOWNLOAD_HOST_SUFFIX
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Core returned a download URL for an unexpected host.",
-        )
+    host = parsed.hostname or ""
 
     async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as client:
         try:
-            # codeql[py/full-ssrf] — see `_ALLOWED_DOWNLOAD_HOST_SUFFIX`'s
-            # comment above: the scheme+host check immediately above this
-            # block already rejects anything but an https URL on a real S3
-            # host, so this specific finding is mitigated, not open.
-            resp = await client.get(download_url)
+            if parsed.scheme == "https" and host.endswith(_ALLOWED_DOWNLOAD_HOST_SUFFIX):
+                resp = await client.get(download_url)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Core returned a download URL for an unexpected host.",
+                )
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
