@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from marketing import admin_app, pipeline
 from marketing.definitions import RESEARCH_SYNTHESIS_AGENT_NAME
 
-_CAMPAIGN = "b3f1c0de-0000-4000-8000-000000000002"
+_CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000cd"
 
 
 class _FakeCore:
