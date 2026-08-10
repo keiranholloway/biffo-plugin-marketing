@@ -98,6 +98,17 @@ This module shells out to whatever ``ffmpeg`` resolves to on ``PATH``
 in. That is infrastructure this milestone did not add — flagged here
 deliberately rather than discovered at deploy time.
 
+**Needs ffmpeg >= 5.1** — the ``-fps_mode`` option this module passes was
+added in that release (it replaces the older, deprecated ``-vsync``). Several
+widely-used community Lambda ffmpeg layers bundle older static builds that
+predate it; whichever layer gets attached must be checked against this
+before relying on it, or `assemble()` fails every call in production with a
+`VideoAssemblyError` despite passing every test here against a newer local
+binary. Not version-checked at runtime — a fast, loud failure on the very
+first real call is an acceptable way to discover a wrong layer, and probing
+`ffmpeg -version` output on every call would cost real latency for a
+condition that, once the right layer is attached, never recurs.
+
 ## Frame preparation, not just cropping
 
 ``render.py`` is reused for the crop — this module never recomputes an
@@ -142,6 +153,16 @@ _DEFAULT_SECONDS_PER_FRAME = 3.0
 #: epoch is arbitrary — only fixedness matters.
 _FIXED_CREATION_TIME = "1970-01-01T00:00:00.000000Z"
 
+#: A stuck ffmpeg process (pathological input, a wedged bundled binary) must
+#: not block `assemble()` forever — without this, the failure mode is the
+#: Lambda's own function timeout killing the process, which surfaces as an
+#: opaque infra-level timeout instead of the diagnosable `VideoAssemblyError`
+#: this module otherwise guarantees. Generous relative to any clip this
+#: milestone produces (a handful of stills, single-digit seconds each,
+#: single-threaded medium-preset libx264) so a slow-but-healthy encode is
+#: never mistaken for a hang.
+_FFMPEG_TIMEOUT_S = 120
+
 _CAPTION_FONT_SIZE = 28
 _CAPTION_MARGIN = 16
 _CAPTION_TEXT_COLOR = (255, 255, 255, 255)
@@ -155,8 +176,20 @@ class FfmpegNotFoundError(RuntimeError):
 
 
 class VideoAssemblyError(RuntimeError):
-    """ffmpeg ran and exited non-zero. Carries its stderr tail so the actual
+    """ffmpeg ran and either exited non-zero or ran past `_FFMPEG_TIMEOUT_S`
+    and was killed. Carries its stderr tail (or "timed out") so the actual
     encoder failure is visible, not just "ffmpeg failed"."""
+
+
+class InvalidCreativeError(ValueError):
+    """One of `creative_bytes` is not decodable as an image at all (a
+    truncated upload, a wrong content-type). Deliberately a `ValueError`
+    subclass — `assemble`'s documented contract already includes `ValueError`
+    for bad input (an empty list), and undecodable bytes is the same kind of
+    caller mistake, not a new category. Raised instead of letting Pillow's
+    own `UnidentifiedImageError`/`OSError` escape unwrapped, which would be
+    an exception type nothing in this module's documented contract mentions.
+    """
 
 
 def _ffmpeg_path() -> str:
@@ -197,6 +230,30 @@ def _draw_caption(image: Image.Image, text: str) -> None:
     )
 
 
+def _to_opaque_rgb(source: Image.Image) -> Image.Image:
+    """`source` as opaque RGB, compositing any alpha channel over black
+    rather than dropping it.
+
+    mp4/H.264 has no alpha channel, so an RGB frame is required either way —
+    but `Image.convert("RGB")` on an image with transparency (`RGBA`, `LA`,
+    or a palette image with an alpha info entry) does a raw channel copy: it
+    keeps whatever RGB values were stored under the transparent pixels, which
+    for most encoders/tools is undefined content, not "the colour that should
+    show through". A source with real transparency would then render as
+    visibly wrong output — silently, since nothing about a raw channel copy
+    raises. Compositing over a fixed black background (matching the black
+    used for even-dimension padding just below) makes the "what shows where
+    the source was transparent" choice explicit and deterministic instead of
+    inheriting whatever bytes happened to be there.
+    """
+    if source.mode in ("RGBA", "LA") or (source.mode == "P" and "transparency" in source.info):
+        rgba = source.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (0, 0, 0))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return source.convert("RGB")
+
+
 def _prepare_frame(creative_bytes: bytes, placement: str, *, text: str | None) -> bytes:
     """One placement-cropped, even-dimensioned, optionally captioned PNG
     frame, ready for ffmpeg's ``image2``/concat input.
@@ -205,10 +262,41 @@ def _prepare_frame(creative_bytes: bytes, placement: str, *, text: str | None) -
     byte-identical no-op path — ffmpeg's input needs even dimensions (see the
     module docstring), which `render.py` does not promise, so this cannot
     skip the round-trip the way `render.render` itself does.
+
+    Raises `InvalidCreativeError` if `creative_bytes` (after `render_placement`
+    has cropped or passed it through) is not decodable as an image at all —
+    Pillow's own `UnidentifiedImageError`/`OSError` on a truncated or
+    non-image input is deliberately not left to escape unwrapped (see that
+    error's own docstring).
+
+    Not handled, deliberately out of scope for this milestone, same posture
+    `render.py` takes for EXIF orientation: Adobe-inverted CMYK JPEGs. A CMYK
+    source that already matches `placement`'s ratio takes `render.render`'s
+    no-op path unchanged, and this function's `.convert()` then uses
+    Pillow's non-Adobe-aware CMYK interpretation — visibly wrong colours, not
+    a crash, and not new: `render.py`'s own no-op path already hands back
+    such bytes unmodified for any other consumer to interpret.
     """
-    cropped = render_placement(creative_bytes, placement)
-    with Image.open(io.BytesIO(cropped)) as source:
-        frame = source.convert("RGB")
+    try:
+        # `render_placement` (render.render) is where the FIRST decode
+        # happens — it opens `creative_bytes` itself to read width/height —
+        # so an undecodable creative fails there, not in the `Image.open`
+        # below. Both calls are covered by the same try/except: Pillow
+        # raises `UnidentifiedImageError` (an `OSError` subclass) for
+        # unrecognised bytes, and a plain `OSError` for a truncated file it
+        # partially recognised — both are "this isn't a usable image", not a
+        # bug in this module or in `render.py`.
+        cropped = render_placement(creative_bytes, placement)
+        with Image.open(io.BytesIO(cropped)) as source:
+            frame = _to_opaque_rgb(source)
+    except OSError as exc:
+        # Deliberately just `OSError`, not `ValueError` too:
+        # `UnknownPlacementError` (raised by `render_placement` for a bad
+        # `placement`) is a `ValueError` subclass with nothing to do with
+        # decoding, and must propagate unwrapped for `assemble`'s documented
+        # contract to hold. `PIL.UnidentifiedImageError` — the actual
+        # bad-bytes case this except exists for — is an `OSError` subclass.
+        raise InvalidCreativeError(f"Could not decode a creative as an image: {exc}") from exc
 
     width, height = frame.size
     even_width, even_height = _even(width), _even(height)
@@ -253,15 +341,24 @@ def assemble(
     Deterministic: the same arguments produce byte-identical mp4 bytes, every
     time (see the module docstring's Determinism section).
 
-    Raises `ValueError` for an empty `creative_bytes`,
-    `marketing.render.UnknownPlacementError` for a `placement` outside
-    `definitions.PLACEMENTS` (raised by the first call to `render_placement`
+    Raises `ValueError` for an empty `creative_bytes` or a non-positive
+    `seconds_per_frame`, `InvalidCreativeError` (a `ValueError` subclass) for
+    a creative that is not decodable as an image, `marketing.render.
+    UnknownPlacementError` for a `placement` outside `definitions.PLACEMENTS`
+    (raised by the first call to `render_placement` inside `_prepare_frame`
     below — not re-checked here, so there is exactly one place that decides
     what a valid placement is), `FfmpegNotFoundError` if no ffmpeg binary is
-    available, and `VideoAssemblyError` if ffmpeg runs and fails.
+    available, and `VideoAssemblyError` if ffmpeg runs and fails or runs
+    past `_FFMPEG_TIMEOUT_S`.
     """
     if not creative_bytes:
         raise ValueError("assemble() needs at least one still to compose.")
+    if seconds_per_frame <= 0:
+        # Silently clamped to one frame by `_concat_file_text`'s `max(1,
+        # round(...))` otherwise — a near-zero or negative value is far more
+        # likely a caller's sign error than an intentional flash-frame, and
+        # `creative_bytes` already gets this same fail-fast treatment above.
+        raise ValueError(f"seconds_per_frame must be positive, got {seconds_per_frame!r}.")
 
     ffmpeg = _ffmpeg_path()
 
@@ -322,9 +419,23 @@ def assemble(
         # function created itself under `tmp_path` — nothing here comes from
         # the caller unescaped (placement/text only ever reach Pillow, never
         # the shell), and shell=True is never used.
-        result = subprocess.run(  # noqa: S603
-            command, cwd=tmp_path, capture_output=True, check=False
-        )
+        try:
+            result = subprocess.run(  # noqa: S603
+                command,
+                cwd=tmp_path,
+                capture_output=True,
+                check=False,
+                timeout=_FFMPEG_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Without this, a wedged ffmpeg blocks assemble() until whatever
+            # calls it times out first — a Lambda's own function timeout,
+            # opaquely, instead of this module's own named error. See
+            # `_FFMPEG_TIMEOUT_S`'s comment for why this bound is generous.
+            raise VideoAssemblyError(
+                f"ffmpeg did not finish within {_FFMPEG_TIMEOUT_S}s and was killed."
+            ) from exc
+
         if result.returncode != 0:
             stderr_tail = result.stderr.decode("utf-8", errors="replace")[-4000:]
             raise VideoAssemblyError(f"ffmpeg exited {result.returncode}: {stderr_tail}")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import shutil
+from typing import cast
 
 import pytest
 from PIL import Image
@@ -27,6 +28,7 @@ from marketing.definitions import PLACEMENTS
 from marketing.render import UnknownPlacementError, _center_crop_box
 from marketing.video_assembly import (
     FfmpegNotFoundError,
+    InvalidCreativeError,
     VideoAssemblyError,
     _concat_file_text,
     _even,
@@ -82,6 +84,40 @@ def _probe(mp4_bytes: bytes) -> dict[str, str]:
         key, _, value = line.partition("=")
         fields[key] = value
     return fields
+
+
+def _first_frame_colors(mp4_bytes: bytes) -> set[tuple[int, int, int]]:
+    """The distinct RGB colours present in the encoded video's first frame,
+    extracted via ffmpeg back to a PNG and read with Pillow — for asserting
+    what the encoder actually wrote, not just what was asked for."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg is not None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        video_path = Path(tmp) / "in.mp4"
+        video_path.write_bytes(mp4_bytes)
+        frame_path = Path(tmp) / "frame.png"
+        subprocess.run(  # noqa: S603
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                str(frame_path),
+            ],
+            capture_output=True,
+            check=True,
+        )
+        with Image.open(frame_path) as img:
+            return {cast("tuple[int, int, int]", pixel) for pixel in img.convert("RGB").getdata()}
 
 
 # --- Determinism: the property the whole module rests on -------------------
@@ -202,6 +238,39 @@ def test_an_empty_creative_list_raises_rather_than_producing_nothing() -> None:
         assemble([], "feed_1x1")
 
 
+def test_undecodable_creative_bytes_raise_invalid_creative_error() -> None:
+    """Not a PIL.UnidentifiedImageError/OSError escaping unwrapped — wrapped
+    into this module's own documented error type."""
+    with pytest.raises(InvalidCreativeError):
+        assemble([b"this is not an image"], "feed_1x1")
+
+
+@pytest.mark.parametrize("seconds_per_frame", [0.0, -1.0, -0.001])
+def test_non_positive_seconds_per_frame_raises(seconds_per_frame: float) -> None:
+    stills = [_png_bytes(100, 100, (0, 0, 0))]
+    with pytest.raises(ValueError, match="seconds_per_frame must be positive"):
+        assemble(stills, "feed_1x1", seconds_per_frame=seconds_per_frame)
+
+
+def test_transparent_source_is_composited_over_black_not_channel_dropped() -> None:
+    """A raw `.convert('RGB')` on an RGBA image keeps whatever RGB values sit
+    under the transparent pixels — for a freshly-created `Image.new('RGBA',
+    ..., (0, 0, 0, 0))` that happens to be black anyway, so this test uses a
+    transparent pixel whose RGB channels are deliberately something else
+    (white) to prove the encoded frame shows the composited background
+    (black, matching the even-padding colour) and not the stored-but-hidden
+    white."""
+    transparent_white = Image.new("RGBA", (300, 300), (255, 255, 255, 0))
+    buffer = io.BytesIO()
+    transparent_white.save(buffer, format="PNG")
+
+    out = assemble([buffer.getvalue()], "feed_1x1", seconds_per_frame=0.25)
+    probe_colors = _first_frame_colors(out)
+
+    assert (255, 255, 255) not in probe_colors, "transparent white must not leak through"
+    assert (0, 0, 0) in probe_colors, "transparent pixels must composite onto the black background"
+
+
 # --- Failure modes this module names explicitly -----------------------
 
 
@@ -229,6 +298,29 @@ def test_ffmpeg_failure_surfaces_as_video_assembly_error(monkeypatch: pytest.Mon
 
     stills = [_png_bytes(100, 100, (0, 0, 0))]
     with pytest.raises(VideoAssemblyError):
+        assemble(stills, "feed_1x1")
+
+
+def test_ffmpeg_timeout_surfaces_as_video_assembly_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged ffmpeg must not block assemble() forever — simulated by
+    making `subprocess.run` itself raise `TimeoutExpired`, proving the
+    `except` around it actually fires rather than only being reachable in
+    theory. Not exercised by actually waiting `_FFMPEG_TIMEOUT_S` seconds:
+    that would make this the slowest test in the suite for no extra
+    coverage."""
+    import subprocess
+
+    import marketing.video_assembly as video_assembly_module
+
+    def _raise_timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(
+            cmd=["ffmpeg"], timeout=video_assembly_module._FFMPEG_TIMEOUT_S
+        )
+
+    monkeypatch.setattr(video_assembly_module.subprocess, "run", _raise_timeout)
+
+    stills = [_png_bytes(100, 100, (0, 0, 0))]
+    with pytest.raises(VideoAssemblyError, match="did not finish"):
         assemble(stills, "feed_1x1")
 
 
