@@ -340,9 +340,7 @@ async def advance_research(
         if not synthesis_run.is_terminal:
             return None  # synthesis is running; nothing to do yet
         if not synthesis_run.succeeded:
-            raise RunNotSucceededError(
-                "The research-synthesis run did not complete successfully."
-            )
+            raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
         return extract_research_synthesis(synthesis_run.messages)
 
     # No synthesis run yet: either research is still in flight (the normal

@@ -175,9 +175,7 @@ class CallToAction(BaseModel):
 
     text: str = Field(description="The CTA copy.")
     rationale: str = Field(description="Why this CTA fits the segment(s) and pillar(s) it serves.")
-    sources: list[Source] = Field(
-        min_length=1, description="Research sources supporting this CTA."
-    )
+    sources: list[Source] = Field(min_length=1, description="Research sources supporting this CTA.")
 
 
 class Positioning(BaseModel):

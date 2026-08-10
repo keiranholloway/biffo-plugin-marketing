@@ -491,8 +491,7 @@ async def approve_artefact_route(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Only a 'proposed' artefact can be approved "
-                f"(status: {artefact.get('status')})."
+                f"Only a 'proposed' artefact can be approved (status: {artefact.get('status')})."
             ),
         )
 
@@ -521,8 +520,7 @@ async def reject_artefact_route(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Only a 'proposed' artefact can be rejected "
-                f"(status: {artefact.get('status')})."
+                f"Only a 'proposed' artefact can be rejected (status: {artefact.get('status')})."
             ),
         )
 
