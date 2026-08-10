@@ -48,6 +48,7 @@ from __future__ import annotations
 import io
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
@@ -109,6 +110,30 @@ def get_campaign_client(
     return principal_client.PrincipalCoreClient(admin.token)
 
 
+#: `plugin_storage.presign_download` (biffo-template's `services/api/src/
+#: api/plugin_storage.py`) mints its URL from a bare `boto3.client("s3")` —
+#: no custom endpoint configured — so a legitimate download URL is always
+#: this host family. CodeQL flags the `client.get(...)` below in `_download`
+#: as a full server-side request forgery: the URL text is data-flow-tainted
+#: by `campaign_id`, several hops upstream, and nothing before this line
+#: proved the string is safe to fetch. This is that proof — reject anything
+#: that is not an https URL to a real S3 host before ever making the
+#: request, so a malformed or unexpected Core response cannot steer this
+#: Lambda at an arbitrary origin.
+_ALLOWED_DOWNLOAD_HOST_SUFFIX = ".amazonaws.com"
+
+
+def _validate_download_url(url: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme != "https" or not host.endswith(_ALLOWED_DOWNLOAD_HOST_SUFFIX):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Core returned a download URL for an unexpected host.",
+        )
+    return url
+
+
 def _core_error(exc: BiffoAPIError) -> HTTPException:
     """Matches ``image_routes``'s own mapping: storage's 503 ("not
     configured here") passes through as-is; everything else is 502, since
@@ -133,7 +158,7 @@ async def _download(core_client: BiffoAPIClient, media_id: str) -> bytes:
 
     async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as client:
         try:
-            resp = await client.get(url_resp["url"])
+            resp = await client.get(_validate_download_url(url_resp["url"]))
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -34,7 +34,7 @@ from marketing.definitions import PLACEMENTS
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000c5"
 _SOURCE_MEDIA_ID = "media-source"
-_DOWNLOAD_URL = "https://s3.example.invalid/signed-get-source"
+_DOWNLOAD_URL = "https://bucket.s3.eu-west-1.amazonaws.com/signed-get-source"
 _PRESIGN_URL = "https://s3.example.invalid/upload"
 _BASE_URL = "https://dev.example.invalid"
 
@@ -185,7 +185,10 @@ class _FakeStorageClient:
         prefix = f"{pack_routes._STORAGE_PATH}/"
         if path.startswith(prefix) and path.endswith("/url"):
             media_id = path[len(prefix) : -len("/url")]
-            return {"url": f"https://s3.example.invalid/signed-get-{media_id}", "expires_in": 300}
+            return {
+                "url": f"https://bucket.s3.eu-west-1.amazonaws.com/signed-get-{media_id}",
+                "expires_in": 300,
+            }
         raise AssertionError(f"unexpected GET {path}")
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
@@ -310,6 +313,54 @@ def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) ->
 
     assert resp.status_code == 404
     assert "source creative" in resp.json()["detail"].lower()
+
+
+# ── SSRF guard on the download URL (CodeQL: full server-side request forgery) ──
+
+
+def test_validate_download_url_accepts_a_real_s3_host() -> None:
+    url = "https://bucket.s3.eu-west-1.amazonaws.com/key"
+    assert pack_routes._validate_download_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://bucket.s3.eu-west-1.amazonaws.com/key",  # not https
+        "https://evil.example.com/key",  # not an S3 host at all
+        "https://amazonaws.com.evil.example.com/key",  # suffix-match trick
+    ],
+)
+def test_validate_download_url_rejects_anything_else(url: str) -> None:
+    with pytest.raises(HTTPException) as exc:
+        pack_routes._validate_download_url(url)
+    assert exc.value.status_code == 502
+
+
+def test_502s_when_core_returns_a_download_url_for_an_unexpected_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route-level proof, not just the unit check: a storage response
+    naming a URL outside the S3 host family must never reach `httpx.get` —
+    this is what CodeQL's "full server-side request forgery" finding on
+    `_download` actually asks for."""
+    core = _FakeCore(copy_artefact=_copy_artefact(_CHANNELS))
+    monkeypatch.setattr(admin_app, "_core", core)
+
+    class _MaliciousStorageClient(_FakeStorageClient):
+        async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            if path == f"{pack_routes._STORAGE_PATH}/{_SOURCE_MEDIA_ID}/url":
+                return {"url": "https://internal.example.invalid/steal", "expires_in": 300}
+            return await super().get(path, params)
+
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(
+        _app(core_client=_MaliciousStorageClient(), campaign_client=campaign_client)
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 502
 
 
 # ── the happy path: render, upload, mint, assemble ──────────────────────────
