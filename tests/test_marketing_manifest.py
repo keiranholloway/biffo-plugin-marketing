@@ -102,6 +102,29 @@ def test_every_route_names_a_table_this_manifest_declares(route: dict) -> None:
 
 
 @pytest.mark.parametrize("route", _raw()["api_routes"], ids=lambda r: f"{r['method']} {r['path']}")
+def test_every_route_path_is_derived_from_its_table_name(route: dict) -> None:
+    """The collection segment must be the table's own name, pluralised.
+
+    This exists because ``marketing_asset`` shipped as ``/asets`` — a typo in a
+    hand-written manifest, in a file with a test suite already asserting types,
+    auto-columns, foreign keys and verb/operation pairing. **Nothing asserted
+    the path**, so a wrong one was invisible: the route still named a real
+    table, still paired its verb correctly, and still passed every check here.
+
+    A path is the one part of a manifest a human types twice and a machine never
+    reconciles — Core mounts whatever is written, so a typo is not an error, it
+    is just a differently-named endpoint that the UI then has to match. Deriving
+    it removes the second copy.
+    """
+    collection = route["path"].split("/")[1]
+    expected = route["table"].removeprefix("marketing_") + "s"
+    assert collection == expected, (
+        f"{route['method']} {route['path']} serves {route['table']!r}, "
+        f"so its collection segment should be /{expected}, not /{collection}"
+    )
+
+
+@pytest.mark.parametrize("route", _raw()["api_routes"], ids=lambda r: f"{r['method']} {r['path']}")
 def test_route_verbs_match_their_operation(route: dict) -> None:
     """Core pairs these strictly; a mismatch is a config error at install."""
     expected = {"list": "GET", "read": "GET", "create": "POST", "delete": "DELETE"}
