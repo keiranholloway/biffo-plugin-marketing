@@ -113,21 +113,23 @@ def get_campaign_client(
 #: `plugin_storage.presign_download` (biffo-template's `services/api/src/
 #: api/plugin_storage.py`) mints its URL from a bare `boto3.client("s3")` —
 #: no custom endpoint configured — so a legitimate download URL is always
-#: this host family. CodeQL flags the `client.get(...)` in `_download` below
-#: as a full server-side request forgery: the URL text is data-flow-tainted
-#: by `campaign_id`, several hops upstream, and nothing before that line
-#: proved the string was safe to fetch. `_download`'s own `if` on `parsed`
-#: is that proof — reject anything that is not an https URL to a real S3
-#: host before ever making the request, so a malformed or unexpected Core
-#: response cannot steer this Lambda at an arbitrary origin.
+#: this host family. CodeQL's `py/full-ssrf` flags `client.get(download_url)`
+#: in `_download` below: its taint source is `core_client` itself (a
+#: `Depends()`-injected value, per its FastAPI model), so it treats
+#: everything read back through `core_client.get(...)` — including this
+#: presigned-URL response — as attacker-influenced, and it does not model an
+#: inline `.endswith()` host check as a barrier (confirmed empirically: an
+#: identical guard, both wrapped in a helper and written inline immediately
+#: before the sink, left the finding unchanged across two iterations).
 #:
-#: The check is written inline in `_download`, not behind a helper: CodeQL's
-#: taint tracker recognises a guard on the SAME tainted expression, in the
-#: same function, immediately before the sink — not an opaque call to a
-#: separate function it has no summary for. An earlier version wrapped this
-#: in `_validate_download_url(url)` and CodeQL kept flagging the call site
-#: unchanged, because the analysis has no way to know that helper strips the
-#: taint.
+#: The check below is real and load-bearing regardless: it rejects anything
+#: that is not an https URL to a real S3 host before this Lambda ever makes
+#: the second request, which is the actual mitigation for a compromised or
+#: malformed Core response steering it at an arbitrary origin. The
+#: `codeql[py/full-ssrf]` suppression at the call site records that this
+#: specific, reviewed finding is mitigated in code rather than open —
+#: `cli/src/lib/core-version.ts` in biffo-template is the estate's existing
+#: precedent for this exact suppression comment shape.
 _ALLOWED_DOWNLOAD_HOST_SUFFIX = ".amazonaws.com"
 
 
@@ -170,6 +172,10 @@ async def _download(core_client: BiffoAPIClient, media_id: str) -> bytes:
 
     async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as client:
         try:
+            # codeql[py/full-ssrf] — see `_ALLOWED_DOWNLOAD_HOST_SUFFIX`'s
+            # comment above: the scheme+host check immediately above this
+            # block already rejects anything but an https URL on a real S3
+            # host, so this specific finding is mitigated, not open.
             resp = await client.get(download_url)
         except httpx.HTTPError as exc:
             raise HTTPException(
