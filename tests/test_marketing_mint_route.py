@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from marketing import admin_app
 
-_CAMPAIGN = "b3f1c0de-0000-4000-8000-000000000001"
+_CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000ab"
 # A token a caller tries to choose for themselves. Named rather than inlined so
 # ruff's hardcoded-credential rule (S105) does not fire on a value whose entire
 # purpose is to be REJECTED.

@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from marketing.links import destination_with_utms, mint_token, tracked_url
 
-_CAMPAIGN = "b3f1c0de-0000-4000-8000-000000000001"
+_CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000ab"
 
 
 def test_a_token_is_unguessable_and_fits_its_column() -> None:
