@@ -1,5 +1,5 @@
-"""Research + positioning orchestration (M3) — fan-out/fan-in over Core's
-agent-run seam, and the citation-enforcement guard that turns a research run
+"""Research + positioning + channel-plan orchestration (M3 + M4) — fan-out/fan-in
+over Core's agent-run seam, and the citation-enforcement guard that turns a run
 with no evidence into a hard failure rather than a beautifully formatted
 document.
 
@@ -14,26 +14,36 @@ actually built (a plain ``SignedCoreClient``, ADR-0009/ADR-0021 §1a).
 **The zero-citation guard is the milestone, not a detail.** Biffo's agent
 ``web_search`` is silently unavailable on dev (an empty Brave key), and an
 agent given a tool it cannot use does not error — it fabricates. Structurally,
-a ``ResearchFinding``/``Segment``/``MessagePillar``/``CallToAction`` cannot be
-built with an empty ``sources`` list (``definitions.py``'s
-``Field(min_length=1)``) — but an agent can still honestly report *zero*
-findings, or Core's transcript can carry no usable tool call at all, and both
-of those are still "nothing to show an operator". ``extract_research_synthesis``
-and ``extract_positioning`` catch that aggregate case: a run whose entire
-output cites nothing raises :class:`NoCitationsError` rather than returning an
-artefact body an admin route could propose.
+a ``ResearchFinding``/``Segment``/``MessagePillar``/``CallToAction``/
+``ChannelRecommendation`` cannot be built with an empty ``sources`` list
+(``definitions.py``'s ``Field(min_length=1)``) — but an agent can still
+honestly report *zero* findings, or Core's transcript can carry no usable tool
+call at all, and both of those are still "nothing to show an operator".
+``extract_research_synthesis``, ``extract_positioning`` and
+``extract_channel_plan`` catch that aggregate case: a run whose entire output
+cites nothing raises :class:`NoCitationsError` rather than returning an
+artefact body an admin route could propose. M4 (issue #3) is that same guard
+applied one stage further down the chain, for the same reason stated there: a
+channel recommendation with no evidence is the most confident-sounding
+fabrication in the pipeline, because channel advice reads as generic wisdom
+whether or not anyone researched it.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .definitions import (
+    CHANNEL_PLAN_AGENT_NAME,
+    CHANNEL_PLAN_INSTRUCTIONS,
+    CHANNEL_PLAN_TOOL_NAME,
+    DEFAULT_CHANNEL_PLAN_MODEL,
     DEFAULT_POSITIONING_MODEL,
     DEFAULT_RESEARCH_MODEL,
     DEFAULT_SYNTHESIS_MODEL,
@@ -45,10 +55,13 @@ from .definitions import (
     RESEARCH_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_AGENT_NAME,
     RESEARCH_SYNTHESIS_TOOL_NAME,
+    ChannelPlan,
     Positioning,
     ResearchFindingSet,
     ResearchSynthesis,
     Source,
+    channel_plan_definition,
+    channel_plan_tool_schema,
     findings_tool_schema,
     positioning_definition,
     positioning_tool_schema,
@@ -127,6 +140,39 @@ def _total_citations(*source_lists: list[Source]) -> int:
     return sum(len(sources) for sources in source_lists)
 
 
+def _extract_cited_artefact[T: BaseModel](
+    messages: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    model_cls: type[T],
+    citation_groups: Callable[[T], list[list[Source]]],
+    malformed_message: str,
+    no_citations_message: str,
+) -> T:
+    """The shared skeleton behind :func:`extract_research_synthesis`,
+    :func:`extract_positioning` and :func:`extract_channel_plan`: fetch the
+    last call to ``tool_name``, validate it against ``model_cls``, and
+    enforce the zero-citation guard over ``citation_groups(result)``.
+
+    Kept as one implementation rather than three near-identical copies
+    precisely because the guard is "the milestone, not a detail" (this
+    module's docstring) — three copies is three places a change to the guard
+    itself (or a fix to it) can drift out of step.
+    """
+    data = _tool_call_arguments(messages, tool_name)
+    if data is None:
+        raise MalformedOutputError(malformed_message)
+    try:
+        result = model_cls.model_validate(data)
+    except ValidationError as exc:
+        raise MalformedOutputError(str(exc)) from exc
+
+    total = _total_citations(*citation_groups(result))
+    if total == 0:
+        raise NoCitationsError(no_citations_message)
+    return result
+
+
 def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthesis:
     """The research-synthesis agent's output, or a hard failure.
 
@@ -136,23 +182,19 @@ def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthe
     finding little, there is no redundancy at the synthesis step: nothing else
     produces the ``research`` artefact, so there is nothing to degrade to.
     """
-    data = _tool_call_arguments(messages, RESEARCH_SYNTHESIS_TOOL_NAME)
-    if data is None:
-        raise MalformedOutputError(
+    return _extract_cited_artefact(
+        messages,
+        tool_name=RESEARCH_SYNTHESIS_TOOL_NAME,
+        model_cls=ResearchSynthesis,
+        citation_groups=lambda r: [f.sources for f in r.findings],
+        malformed_message=(
             f"the research-synthesis run produced no {RESEARCH_SYNTHESIS_TOOL_NAME} tool call"
-        )
-    try:
-        synthesis = ResearchSynthesis.model_validate(data)
-    except ValidationError as exc:
-        raise MalformedOutputError(str(exc)) from exc
-
-    total = _total_citations(*(f.sources for f in synthesis.findings))
-    if total == 0:
-        raise NoCitationsError(
+        ),
+        no_citations_message=(
             "The research run fetched zero URLs. Nothing was found to cite, so no "
             "artefact was produced — try running research again."
-        )
-    return synthesis
+        ),
+    )
 
 
 def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
@@ -160,30 +202,46 @@ def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
     failure modes as :func:`extract_research_synthesis`, for the same reason:
     a positioning claim is exactly as fabricable as a research finding, and an
     operator reviewing it needs the same guarantee."""
-    data = _tool_call_arguments(messages, POSITIONING_TOOL_NAME)
-    if data is None:
-        raise MalformedOutputError(
-            f"the positioning run produced no {POSITIONING_TOOL_NAME} tool call"
-        )
-    try:
-        positioning = Positioning.model_validate(data)
-    except ValidationError as exc:
-        raise MalformedOutputError(str(exc)) from exc
-
-    total = _total_citations(
-        *(s.sources for s in positioning.segments),
-        *(p.sources for p in positioning.pillars),
-        *(c.sources for c in positioning.ctas),
-    )
-    if total == 0:
-        raise NoCitationsError(
+    return _extract_cited_artefact(
+        messages,
+        tool_name=POSITIONING_TOOL_NAME,
+        model_cls=Positioning,
+        citation_groups=lambda r: [
+            *(s.sources for s in r.segments),
+            *(p.sources for p in r.pillars),
+            *(c.sources for c in r.ctas),
+        ],
+        malformed_message=f"the positioning run produced no {POSITIONING_TOOL_NAME} tool call",
+        no_citations_message=(
             "The positioning run cited nothing from the approved research. Nothing "
             "was produced — try running positioning again."
-        )
-    return positioning
+        ),
+    )
 
 
-def flatten_citations(output: ResearchSynthesis | Positioning) -> list[dict[str, Any]]:
+def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
+    """The channel-plan agent's output, or a hard failure — the same two
+    failure modes as :func:`extract_positioning`, for the same reason (M4,
+    issue #3): a channel recommendation is exactly as fabricable as a
+    positioning claim, and arguably the most confident-sounding one in the
+    whole pipeline, because channel advice reads as generic wisdom whether or
+    not anyone researched it."""
+    return _extract_cited_artefact(
+        messages,
+        tool_name=CHANNEL_PLAN_TOOL_NAME,
+        model_cls=ChannelPlan,
+        citation_groups=lambda r: [c.sources for c in r.channels],
+        malformed_message=f"the channel-plan run produced no {CHANNEL_PLAN_TOOL_NAME} tool call",
+        no_citations_message=(
+            "The channel-plan run cited nothing from the approved positioning. Nothing "
+            "was produced — try running channel planning again."
+        ),
+    )
+
+
+def flatten_citations(
+    output: ResearchSynthesis | Positioning | ChannelPlan,
+) -> list[dict[str, Any]]:
     """Every :class:`Source` across an artefact's structured output,
     deduplicated by URL in first-seen order — what is written to
     ``marketing_artefact.citations``.
@@ -195,12 +253,21 @@ def flatten_citations(output: ResearchSynthesis | Positioning) -> list[dict[str,
     """
     if isinstance(output, ResearchSynthesis):
         groups: list[list[Source]] = [f.sources for f in output.findings]
-    else:
+    elif isinstance(output, Positioning):
         groups = [
             *(s.sources for s in output.segments),
             *(p.sources for p in output.pillars),
             *(c.sources for c in output.ctas),
         ]
+    elif isinstance(output, ChannelPlan):
+        groups = [c.sources for c in output.channels]
+    else:
+        # Exhaustive over this function's own type hint — a new artefact type
+        # reaching here without a branch of its own must fail loudly rather
+        # than silently reusing another stage's `.channels`/`.segments`
+        # shape (issue found in review: the pre-M4 version of this function
+        # had exactly one `else`, quietly assumed to mean "positioning").
+        raise TypeError(f"flatten_citations: unsupported artefact output type {type(output)!r}")
     seen: set[str] = set()
     flat: list[dict[str, Any]] = []
     for sources in groups:
@@ -405,6 +472,44 @@ async def advance_positioning(gateway: AgentGateway, *, run_id: str) -> Position
     if not view.succeeded:
         raise RunNotSucceededError("The positioning run did not complete successfully.")
     return extract_positioning(view.messages)
+
+
+async def start_channel_plan(
+    gateway: AgentGateway,
+    *,
+    positioning_body: dict[str, Any],
+    channel_plan_model: str = DEFAULT_CHANNEL_PLAN_MODEL,
+) -> tuple[str, str]:
+    """Request the single channel-plan agent (M4), given the *approved*
+    positioning artefact's body as its whole input.
+
+    Mirrors :func:`start_positioning` exactly, one stage further down the
+    chain: a single-run chain, not fanned out, because nothing fans in on it.
+    """
+    causation_id = str(uuid.uuid4())
+    run_id = await gateway.request_agent_run(
+        agent_name=CHANNEL_PLAN_AGENT_NAME,
+        definition=channel_plan_definition(
+            model=channel_plan_model,
+            instructions=CHANNEL_PLAN_INSTRUCTIONS,
+        ),
+        output_tool=channel_plan_tool_schema(),
+        input_payload={"positioning": positioning_body},
+        causation_id=causation_id,
+    )
+    return causation_id, run_id
+
+
+async def advance_channel_plan(gateway: AgentGateway, *, run_id: str) -> ChannelPlan | None:
+    """Read the channel-plan run, advancing nothing else — mirrors
+    :func:`advance_positioning`: a single run, not a chain, so there is no
+    fan-in to discover."""
+    view = await gateway.get_agent_run(run_id=run_id)
+    if view is None or not view.is_terminal:
+        return None
+    if not view.succeeded:
+        raise RunNotSucceededError("The channel-plan run did not complete successfully.")
+    return extract_channel_plan(view.messages)
 
 
 def require_approved(status: str, *, what: str) -> None:

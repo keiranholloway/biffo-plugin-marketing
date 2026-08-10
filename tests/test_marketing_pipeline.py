@@ -1,16 +1,19 @@
-"""The citation-enforcement guard (M3) — the milestone, not a detail.
+"""The citation-enforcement guard (M3, extended to channel planning in M4) —
+the milestone, not a detail.
 
 Biffo's agent `web_search` is silently unavailable on dev (an empty Brave
 key), and an agent given a tool it cannot use does not error — it fabricates.
 Audience research is precisely where that is invisible: plausible, confident,
-well-structured, and entirely invented.
+well-structured, and entirely invented. Channel planning (issue #3) is
+arguably worse: "run paid social" reads as correct whether or not anyone
+researched it, because it is indistinguishable from generic marketing advice.
 
-These tests are the fail-first proof for the guard: `extract_research_synthesis`
-and `extract_positioning` must refuse to hand back an artefact whose entire
-output cites nothing, rather than let it through as a "thin but valid" result.
-Written before `marketing.pipeline` existed, so the first commit in this
-milestone's history fails on `ModuleNotFoundError` — the second commit is the
-implementation that makes it pass.
+These tests are the fail-first proof for the guard: `extract_research_synthesis`,
+`extract_positioning` and `extract_channel_plan` must refuse to hand back an
+artefact whose entire output cites nothing, rather than let it through as a
+"thin but valid" result. Written before `marketing.pipeline` existed, so the
+first commit in this milestone's history fails on `ModuleNotFoundError` — the
+second commit is the implementation that makes it pass.
 """
 
 from __future__ import annotations
@@ -22,9 +25,11 @@ import pytest
 from marketing.pipeline import (
     MalformedOutputError,
     NoCitationsError,
+    extract_channel_plan,
     extract_positioning,
     extract_research_findings,
     extract_research_synthesis,
+    flatten_citations,
 )
 
 
@@ -64,6 +69,15 @@ def test_positioning_with_no_segments_pillars_or_ctas_raises_no_citations() -> N
 
     with pytest.raises(NoCitationsError):
         extract_positioning(messages)
+
+
+def test_channel_plan_with_no_channels_raises_no_citations() -> None:
+    """Same guard, the channel-plan half (M4, issue #3): an empty channel list
+    cites nothing and must not be proposed to an operator as evidenced."""
+    messages = _tool_call("submit_channel_plan", {"channels": []})
+
+    with pytest.raises(NoCitationsError):
+        extract_channel_plan(messages)
 
 
 # ── The guard does not fire on genuine content ───────────────────────────────
@@ -113,6 +127,36 @@ def test_positioning_with_a_grounded_segment_succeeds() -> None:
     assert positioning.segments[0].name == "Multi-location operators"
 
 
+def test_channel_plan_with_organic_and_paid_channels_succeeds() -> None:
+    """Both motions are representable in one call, and citations are checked
+    in aggregate across the whole list, not per-motion."""
+    messages = _tool_call(
+        "submit_channel_plan",
+        {
+            "channels": [
+                {
+                    "channel": "Instagram Reels",
+                    "motion": "organic",
+                    "rank": 1,
+                    "rationale": "Multi-location operators already discuss this there.",
+                    "sources": [{"url": "https://example.com/thread", "note": "A forum thread."}],
+                },
+                {
+                    "channel": "Google Search ads",
+                    "motion": "paid",
+                    "rank": 1,
+                    "rationale": "Captures the specific search intent the research surfaced.",
+                    "sources": [{"url": "https://example.com/thread", "note": "A forum thread."}],
+                },
+            ]
+        },
+    )
+
+    plan = extract_channel_plan(messages)
+
+    assert {c.motion for c in plan.channels} == {"organic", "paid"}
+
+
 # ── Missing or malformed tool calls are a different failure ─────────────────
 
 
@@ -129,6 +173,11 @@ def test_positioning_with_no_tool_call_raises_malformed() -> None:
         extract_positioning([{"role": "assistant", "content": "Here is my positioning..."}])
 
 
+def test_channel_plan_with_no_tool_call_raises_malformed() -> None:
+    with pytest.raises(MalformedOutputError):
+        extract_channel_plan([{"role": "assistant", "content": "Here is my channel plan..."}])
+
+
 def test_research_finding_cannot_be_built_with_empty_sources() -> None:
     """The structural half of the guard, exercised directly: unlike idea-scout's
     `Finding.sources` (which defaults to `[]`), a `ResearchFinding` with no
@@ -139,6 +188,18 @@ def test_research_finding_cannot_be_built_with_empty_sources() -> None:
 
     with pytest.raises(ValidationError):
         ResearchFinding(signal="x", why_it_matters="y", sources=[])
+
+
+def test_channel_recommendation_cannot_be_built_with_empty_sources() -> None:
+    """Same structural half of the guard, for `ChannelRecommendation` (M4)."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import ChannelRecommendation
+
+    with pytest.raises(ValidationError):
+        ChannelRecommendation(
+            channel="Instagram Reels", motion="organic", rank=1, rationale="x", sources=[]
+        )
 
 
 # ── extract_research_findings — per-angle, degrades rather than fails ────────
@@ -187,3 +248,46 @@ def test_extract_research_findings_returns_the_set_when_valid() -> None:
     assert result is not None
     assert result.angle == "audience"
     assert result.findings[0].sources[0].url == "https://example.com/z"
+
+
+# ── flatten_citations — dispatches on the result TYPE, not a `kind` string ───
+
+
+def test_flatten_citations_of_a_channel_plan_dedupes_by_url() -> None:
+    plan = extract_channel_plan(
+        _tool_call(
+            "submit_channel_plan",
+            {
+                "channels": [
+                    {
+                        "channel": "Instagram Reels",
+                        "motion": "organic",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/dup", "note": "a"}],
+                    },
+                    {
+                        "channel": "Google Search ads",
+                        "motion": "paid",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/dup", "note": "b"}],
+                    },
+                ]
+            },
+        )
+    )
+
+    citations = flatten_citations(plan)
+
+    assert citations == [{"url": "https://example.com/dup", "note": "a"}]
+
+
+def test_flatten_citations_raises_on_an_unsupported_output_type() -> None:
+    """A defensive check, not a reachable path today: every real caller only
+    ever passes what `extract_research_synthesis`/`extract_positioning`/
+    `extract_channel_plan` return. Exercised directly so a fourth artefact
+    type added here without its own branch fails loudly instead of quietly
+    reusing `ChannelPlan`'s `.channels` shape."""
+    with pytest.raises(TypeError):
+        flatten_citations(object())  # type: ignore[arg-type]
