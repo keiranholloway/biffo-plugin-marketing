@@ -43,7 +43,11 @@ from .definitions import (
     CHANNEL_PLAN_AGENT_NAME,
     CHANNEL_PLAN_INSTRUCTIONS,
     CHANNEL_PLAN_TOOL_NAME,
+    COPY_AGENT_NAME,
+    COPY_INSTRUCTIONS,
+    COPY_TOOL_NAME,
     DEFAULT_CHANNEL_PLAN_MODEL,
+    DEFAULT_COPY_MODEL,
     DEFAULT_POSITIONING_MODEL,
     DEFAULT_RESEARCH_MODEL,
     DEFAULT_SYNTHESIS_MODEL,
@@ -56,12 +60,15 @@ from .definitions import (
     RESEARCH_SYNTHESIS_AGENT_NAME,
     RESEARCH_SYNTHESIS_TOOL_NAME,
     ChannelPlan,
+    CopySet,
     Positioning,
     ResearchFindingSet,
     ResearchSynthesis,
     Source,
     channel_plan_definition,
     channel_plan_tool_schema,
+    copy_definition,
+    copy_tool_schema,
     findings_tool_schema,
     positioning_definition,
     positioning_tool_schema,
@@ -239,8 +246,27 @@ def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
     )
 
 
+def extract_copy(messages: list[dict[str, Any]]) -> CopySet:
+    """The copy agent's output, or a hard failure — the same two failure
+    modes as :func:`extract_channel_plan` (M5, issue #4): copy is exactly as
+    fabricable as a channel recommendation, and arguably the most
+    publishable-looking one in the whole pipeline, since prose reads as
+    correct whether or not any pillar or CTA actually backs it."""
+    return _extract_cited_artefact(
+        messages,
+        tool_name=COPY_TOOL_NAME,
+        model_cls=CopySet,
+        citation_groups=lambda r: [c.sources for c in r.channels],
+        malformed_message=f"the copy run produced no {COPY_TOOL_NAME} tool call",
+        no_citations_message=(
+            "The copy run cited nothing from the approved positioning. Nothing "
+            "was produced — try running copy generation again."
+        ),
+    )
+
+
 def flatten_citations(
-    output: ResearchSynthesis | Positioning | ChannelPlan,
+    output: ResearchSynthesis | Positioning | ChannelPlan | CopySet,
 ) -> list[dict[str, Any]]:
     """Every :class:`Source` across an artefact's structured output,
     deduplicated by URL in first-seen order — what is written to
@@ -260,6 +286,8 @@ def flatten_citations(
             *(c.sources for c in output.ctas),
         ]
     elif isinstance(output, ChannelPlan):
+        groups = [c.sources for c in output.channels]
+    elif isinstance(output, CopySet):
         groups = [c.sources for c in output.channels]
     else:
         # Exhaustive over this function's own type hint — a new artefact type
@@ -510,6 +538,44 @@ async def advance_channel_plan(gateway: AgentGateway, *, run_id: str) -> Channel
     if not view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
     return extract_channel_plan(view.messages)
+
+
+async def start_copy(
+    gateway: AgentGateway,
+    *,
+    positioning_body: dict[str, Any],
+    channel_plan_body: dict[str, Any],
+    copy_model: str = DEFAULT_COPY_MODEL,
+) -> tuple[str, str]:
+    """Request the single copy agent (M5, issue #4), given the *approved*
+    positioning AND the *approved* channel-plan artefacts' bodies as its
+    input — positioning for the message pillars/CTAs copy is grounded in,
+    channel plan for which channels to write for.
+
+    Mirrors :func:`start_channel_plan` exactly, one stage further down the
+    chain: a single-run chain, not fanned out, because nothing fans in on it.
+    """
+    causation_id = str(uuid.uuid4())
+    run_id = await gateway.request_agent_run(
+        agent_name=COPY_AGENT_NAME,
+        definition=copy_definition(model=copy_model, instructions=COPY_INSTRUCTIONS),
+        output_tool=copy_tool_schema(),
+        input_payload={"positioning": positioning_body, "channel_plan": channel_plan_body},
+        causation_id=causation_id,
+    )
+    return causation_id, run_id
+
+
+async def advance_copy(gateway: AgentGateway, *, run_id: str) -> CopySet | None:
+    """Read the copy run, advancing nothing else — mirrors
+    :func:`advance_channel_plan`: a single run, not a chain, so there is no
+    fan-in to discover."""
+    view = await gateway.get_agent_run(run_id=run_id)
+    if view is None or not view.is_terminal:
+        return None
+    if not view.succeeded:
+        raise RunNotSucceededError("The copy run did not complete successfully.")
+    return extract_copy(view.messages)
 
 
 def require_approved(status: str, *, what: str) -> None:

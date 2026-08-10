@@ -282,10 +282,11 @@ async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response
 #: below, `pipeline.flatten_citations`'s dispatch on the result *type* (not
 #: `kind` — it never sees the string), and each stage's own starter route
 #: (`start_research_route`/`start_positioning_route` here,
-#: `start_channel_plan_route` in `channel_plan_routes.py`). Everything else
-#: — `get_artefact_route`/`approve_artefact_route`/`reject_artefact_route` —
+#: `start_channel_plan_route` in `channel_plan_routes.py`, `start_copy_route`
+#: in `copy_routes.py`). Everything else —
+#: `get_artefact_route`/`approve_artefact_route`/`reject_artefact_route` —
 #: is generic over any kind in this tuple.
-_PIPELINE_ARTEFACT_KINDS = ("research", "positioning", "channel_plan")
+_PIPELINE_ARTEFACT_KINDS = ("research", "positioning", "channel_plan", "copy")
 if not set(_PIPELINE_ARTEFACT_KINDS) <= set(ARTEFACT_KINDS):
     raise RuntimeError(
         "_PIPELINE_ARTEFACT_KINDS must stay a subset of definitions.ARTEFACT_KINDS "
@@ -412,6 +413,7 @@ def _pipeline_error_to_http(exc: pipeline.PipelineError) -> HTTPException:
 _SINGLE_RUN_ADVANCERS: dict[str, Callable[..., Any]] = {
     "positioning": pipeline.advance_positioning,
     "channel_plan": pipeline.advance_channel_plan,
+    "copy": pipeline.advance_copy,
 }
 
 
@@ -676,6 +678,23 @@ def build_app() -> FastAPI:
     from .results_routes import router as results_router
 
     app.include_router(results_router)
+
+    # Copy generation (M5, issue #4) — same reasoning and same lazy-import
+    # shape as channel_plan_router just above: `copy_routes` reaches back
+    # into this module for the same shared helpers.
+    from .copy_routes import router as copy_router
+
+    app.include_router(copy_router)
+
+    # The distribution pack (M5, issue #4) — renders placements from the
+    # approved source creative, mints any tracked links the approved copy's
+    # channels still need, and assembles the whole pack. Its own module for
+    # the same reason `image_routes.py` is: it needs the SigV4-signed
+    # internal client for object storage, which this file's `_core` cannot
+    # reach (that is Cognito-bearer only).
+    from .pack_routes import router as pack_router
+
+    app.include_router(pack_router)
 
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.

@@ -218,28 +218,37 @@ def test_already_fixed_paths_stay_fixed(filename: str, prefix: str) -> None:
 
 def test_the_internal_prefix_constant_agrees_across_every_copy() -> None:
     """Guard vs. authority: `_find_violations` above only checks that a path
-    starts with `/api/v1/` — it never checks that the four independent
+    starts with `/api/v1/` — it never checks that the independent
     `_INTERNAL_PREFIX` copies this file's own docstring explains
     (`admin_app.py`, `channel_plan_routes.py`, `image_routes.py`,
-    `results_routes.py`, each forced local because the AST walk resolves a
-    named constant only within the file that defines it) actually agree with
-    each other or with the real mounted path. Verified empirically before
-    this test was written: a single-character typo in one copy
-    (`marketting` for `marketing`) sends every call in that file to an
-    unmounted path while the rest of this suite — including
+    `results_routes.py`, `copy_routes.py`, `pack_routes.py`, each forced
+    local because the AST walk resolves a named constant only within the
+    file that defines it) actually agree with each other or with the real
+    mounted path. Verified empirically before this test was written: a
+    single-character typo in one copy (`marketting` for `marketing`) sends
+    every call in that file to an unmounted path while the rest of this
+    suite — including
     `test_every_core_call_path_is_api_v1_except_the_known_pending_ones`
     above — stays green, because `/api/v1/internal/plugins/marketting/...`
     still starts with `/api/v1/`. This is a two-line disagreement check, not
     a redesign: the guard reads the SHAPE of each path; this reads whether
-    the sources of that shape's prefix still say the same thing. A new file
-    gaining its own `_INTERNAL_PREFIX` copy (`results_routes.py`, M8) belongs
-    here the same day it's added — this list is the class fix, not a
-    one-time sweep.
+    every source of that shape's prefix still says the same thing. A new
+    file gaining its own `_INTERNAL_PREFIX` copy belongs here the same day
+    it's added — this list is the class fix, not a one-time sweep.
     """
-    from marketing import admin_app, channel_plan_routes, image_routes, results_routes
+    from marketing import (
+        admin_app,
+        channel_plan_routes,
+        copy_routes,
+        image_routes,
+        pack_routes,
+        results_routes,
+    )
 
     canonical = "/api/v1/internal/plugins/marketing"
     assert admin_app._INTERNAL_PREFIX == canonical
     assert channel_plan_routes._INTERNAL_PREFIX == canonical
     assert image_routes._INTERNAL_PREFIX == canonical
     assert results_routes._INTERNAL_PREFIX == canonical
+    assert copy_routes._INTERNAL_PREFIX == canonical
+    assert pack_routes._INTERNAL_PREFIX == canonical

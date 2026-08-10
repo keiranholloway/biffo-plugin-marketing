@@ -16,6 +16,7 @@ import pytest
 from marketing import pipeline
 from marketing.definitions import (
     CHANNEL_PLAN_AGENT_NAME,
+    COPY_AGENT_NAME,
     POSITIONING_AGENT_NAME,
     RESEARCH_AGENT_NAMES,
     RESEARCH_SYNTHESIS_AGENT_NAME,
@@ -355,6 +356,94 @@ async def test_advance_channel_plan_raises_when_the_run_failed() -> None:
 
     with pytest.raises(pipeline.RunNotSucceededError):
         await pipeline.advance_channel_plan(gateway, run_id=run_id)
+
+
+# ── start_copy / advance_copy (M5, issue #4) ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_start_copy_requests_one_run_carrying_both_upstream_bodies() -> None:
+    gateway = _FakeGateway()
+    positioning_body = {"segments": [], "pillars": [], "ctas": []}
+    channel_plan_body = {"channels": []}
+
+    causation_id, run_id = await pipeline.start_copy(
+        gateway, positioning_body=positioning_body, channel_plan_body=channel_plan_body
+    )
+
+    assert len(gateway.requested) == 1
+    requested = gateway.requested[0]
+    assert requested.agent_name == COPY_AGENT_NAME
+    assert requested.causation_id == causation_id
+    assert requested.input_payload == {
+        "positioning": positioning_body,
+        "channel_plan": channel_plan_body,
+    }
+    assert run_id  # a real id was returned
+
+
+@pytest.mark.asyncio
+async def test_advance_copy_returns_none_while_running() -> None:
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_copy(
+        gateway, positioning_body={}, channel_plan_body={}
+    )
+
+    result = await pipeline.advance_copy(gateway, run_id=run_id)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_advance_copy_returns_the_copy_once_succeeded() -> None:
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_copy(
+        gateway, positioning_body={}, channel_plan_body={}
+    )
+    gateway.complete(
+        run_id,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "submit_copy",
+                            "arguments": {
+                                "channels": [
+                                    {
+                                        "channel": "Instagram Reels",
+                                        "motion": "organic",
+                                        "headline": "h",
+                                        "body": "b",
+                                        "cta": "c",
+                                        "sources": [{"url": "https://example.com/y", "note": "n"}],
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ],
+            }
+        ],
+    )
+
+    result = await pipeline.advance_copy(gateway, run_id=run_id)
+
+    assert isinstance(result, pipeline.CopySet)
+    assert result.channels[0].channel == "Instagram Reels"
+
+
+@pytest.mark.asyncio
+async def test_advance_copy_raises_when_the_run_failed() -> None:
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_copy(
+        gateway, positioning_body={}, channel_plan_body={}
+    )
+    gateway.complete(run_id, status="failed")
+
+    with pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_copy(gateway, run_id=run_id)
 
 
 # ── require_approved ──────────────────────────────────────────────────────────

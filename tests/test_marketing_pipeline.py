@@ -26,6 +26,7 @@ from marketing.pipeline import (
     MalformedOutputError,
     NoCitationsError,
     extract_channel_plan,
+    extract_copy,
     extract_positioning,
     extract_research_findings,
     extract_research_synthesis,
@@ -78,6 +79,15 @@ def test_channel_plan_with_no_channels_raises_no_citations() -> None:
 
     with pytest.raises(NoCitationsError):
         extract_channel_plan(messages)
+
+
+def test_copy_with_no_channels_raises_no_citations() -> None:
+    """Same guard, the copy half (M5, issue #4): an empty channel list cites
+    nothing and must not be proposed to an operator as publish-ready."""
+    messages = _tool_call("submit_copy", {"channels": []})
+
+    with pytest.raises(NoCitationsError):
+        extract_copy(messages)
 
 
 # ── The guard does not fire on genuine content ───────────────────────────────
@@ -157,6 +167,30 @@ def test_channel_plan_with_organic_and_paid_channels_succeeds() -> None:
     assert {c.motion for c in plan.channels} == {"organic", "paid"}
 
 
+def test_copy_with_a_grounded_channel_succeeds() -> None:
+    messages = _tool_call(
+        "submit_copy",
+        {
+            "channels": [
+                {
+                    "channel": "Instagram Reels",
+                    "motion": "organic",
+                    "headline": "Run every site the same way, finally.",
+                    "body": "One dashboard, every location, no more group chats.",
+                    "cta": "See how it works",
+                    "sources": [{"url": "https://example.com/thread", "note": "A forum thread."}],
+                }
+            ]
+        },
+    )
+
+    copy = extract_copy(messages)
+
+    assert len(copy.channels) == 1
+    assert copy.channels[0].channel == "Instagram Reels"
+    assert copy.channels[0].sources[0].url == "https://example.com/thread"
+
+
 # ── Missing or malformed tool calls are a different failure ─────────────────
 
 
@@ -176,6 +210,11 @@ def test_positioning_with_no_tool_call_raises_malformed() -> None:
 def test_channel_plan_with_no_tool_call_raises_malformed() -> None:
     with pytest.raises(MalformedOutputError):
         extract_channel_plan([{"role": "assistant", "content": "Here is my channel plan..."}])
+
+
+def test_copy_with_no_tool_call_raises_malformed() -> None:
+    with pytest.raises(MalformedOutputError):
+        extract_copy([{"role": "assistant", "content": "Here is my copy..."}])
 
 
 def test_research_finding_cannot_be_built_with_empty_sources() -> None:
@@ -199,6 +238,23 @@ def test_channel_recommendation_cannot_be_built_with_empty_sources() -> None:
     with pytest.raises(ValidationError):
         ChannelRecommendation(
             channel="Instagram Reels", motion="organic", rank=1, rationale="x", sources=[]
+        )
+
+
+def test_channel_copy_cannot_be_built_with_empty_sources() -> None:
+    """Same structural half of the guard, for `ChannelCopy` (M5)."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import ChannelCopy
+
+    with pytest.raises(ValidationError):
+        ChannelCopy(
+            channel="Instagram Reels",
+            motion="organic",
+            headline="h",
+            body="b",
+            cta="c",
+            sources=[],
         )
 
 
@@ -279,6 +335,38 @@ def test_flatten_citations_of_a_channel_plan_dedupes_by_url() -> None:
     )
 
     citations = flatten_citations(plan)
+
+    assert citations == [{"url": "https://example.com/dup", "note": "a"}]
+
+
+def test_flatten_citations_of_copy_dedupes_by_url() -> None:
+    copy = extract_copy(
+        _tool_call(
+            "submit_copy",
+            {
+                "channels": [
+                    {
+                        "channel": "Instagram Reels",
+                        "motion": "organic",
+                        "headline": "h1",
+                        "body": "b1",
+                        "cta": "c1",
+                        "sources": [{"url": "https://example.com/dup", "note": "a"}],
+                    },
+                    {
+                        "channel": "Google Search ads",
+                        "motion": "paid",
+                        "headline": "h2",
+                        "body": "b2",
+                        "cta": "c2",
+                        "sources": [{"url": "https://example.com/dup", "note": "b"}],
+                    },
+                ]
+            },
+        )
+    )
+
+    citations = flatten_citations(copy)
 
     assert citations == [{"url": "https://example.com/dup", "note": "a"}]
 
