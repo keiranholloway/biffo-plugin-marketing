@@ -1,14 +1,23 @@
 """Every path this plugin sends to Core must start with ``/api/v1/`` (#17's
-class — see the module docstring below for why a narrower check would miss
-most of it).
+class — see below for why a narrower check would miss most of it).
 
-Two real, deployment-breaking bugs have now shipped this shape: `image_routes`
+Three real, deployment-breaking bugs have now shipped this shape: `image_routes`
 gained `/internal/plugins/me/storage` and `/internal/media-generations`
-(missing `/api/v1`) in M6, and `admin_app._core` was built with no `/api/v1`
-prefix and no signing at all from M2 onward (#17). A check over *named
-constants* would have caught the first — it would NOT have caught the second,
-because most of that bug lives in inline string/f-string literals at call
-sites (`campaign_client.get(f"/campaigns/{campaign_id}")`,
+(missing `/api/v1`) in M6, `admin_app._core` was built with no `/api/v1`
+prefix and no signing at all from M2 onward (#17), and — once #17 was
+understood — twelve more call sites turned out to need the *same* prefix
+plus a second, harder-to-see credential: Core's internal, per-plugin CRUD
+mount authorises on the calling admin's own role even over a SigV4-signed
+request, so a signed-but-tokenless call reaches Core and fails silently as a
+permission error rather than loudly as a 404 (#27; see
+`src/marketing/principal_client.py`'s module docstring for the full
+mechanism, and `admin_app._core`'s for how every one of those twelve now
+gets both credentials).
+
+A check over *named constants* would have caught the first bug — it would
+NOT have caught the second or third, because most of that shape lives in
+inline string/f-string literals at call sites
+(`campaign_client.get(f"/campaigns/{campaign_id}")`,
 `admin_app._core("POST", "/artefacts", ...)`), which a constants-only sweep
 never looks at. So this walks the AST of every module in `src/marketing/` and
 inspects the literal (or statically-resolvable) path argument of every call
@@ -24,38 +33,36 @@ under `/api/v1/plugins/marketing/admin/...` by the host — not a call this
 plugin makes outward to Core. Conflating the two would fail every route
 handler in the file for the wrong reason.
 
-## The known-pending baseline, and why it exists rather than a plain assert
+Only the file that makes a call is asked to prove its path is fixed — a
+module-level constant is resolved from `ast.Assign` nodes in the SAME file's
+own tree (`_module_string_constants`), never across an import. `admin_app.py`,
+`channel_plan_routes.py` and `image_routes.py` each therefore carry their own
+literal `/api/v1/internal/plugins/marketing` text (as a local `_INTERNAL_PREFIX`
+constant in the first two, inline in the third's one call site) rather than
+importing one shared constant — the same reasoning `admin_app.py`'s module
+docstring gives for duplicating `_validated_campaign_id` rather than
+importing it: what the guard can see has to live at the call site.
 
-Twelve of the call sites this walk finds are real, currently-broken instances
-of the class — every one blocked on the same thing: Core's internal,
-per-plugin CRUD mount (`/api/v1/internal/plugins/marketing/...`) requires
-BOTH a SigV4 signature AND the calling admin's own token, forwarded via
-`X-Biffo-User-Token` (see `admin_app.py`'s and `image_routes.py`'s module
-docstrings, and issue #27, for the full mechanism). The SDK method that does
-both together (`SignedCoreClient.raw_request(..., extra_signed_headers=...)`)
-exists in `biffo-plugin-sdk`'s source but has never been released — PyPI's
-newest version is 1.1.0, which lacks it entirely (keiranholloway/
-biffo-template#1480). Fixing these call sites without that capability means
-either shipping bearer-only calls that will 403 in a real deployment (exactly
-today's bug) or hand-rolling SigV4 signing in this plugin — duplicating SDK
-internals that already exist correctly one repo over.
+## `_PENDING_SDK_RELEASE`: empty, and meant to stay that way
 
-So rather than silently exempting these paths from the guard (which would be
-routing around the defect, not fixing it) or failing the suite on a bug
-nobody can fix from this repo right now, `_PENDING_SDK_RELEASE` names them
-explicitly, keyed by (file, resolved path, how many times it appears). The
-test asserts the ACTUAL violations found equal this baseline exactly, in
-both directions:
+This baseline held the twelve #27 call sites while `biffo-plugin-sdk` 1.2.0 —
+the release carrying `SignedCoreClient.raw_request(...,
+extra_signed_headers=...)`, the one SDK method that signs a request AND
+carries the forwarded user token through that signature — existed in source
+but had never reached PyPI (keiranholloway/biffo-template#1480). Landing
+that release (confirmed live: PyPI lists 1.0.0, 1.1.0, 1.2.0) and rewriting
+every call site to use it (`principal_client.py`) is what emptied it.
 
-- A path outside this baseline that still fails the `/api/v1/` check is a
-  NEW instance of the class — the test fails, same as it would with no
-  baseline at all.
-- A path in this baseline that no longer fails (because #27 landed a fix) is
-  now stale — the test fails until the entry is removed, so a fix can't
-  silently widen the exemption for other paths that happen to share its text.
+The test still asserts the ACTUAL violations found equal this baseline
+exactly, in both directions, so an empty baseline is not a weaker check than
+a populated one — it is the same check with nothing exempted:
 
-Remove entries from `_PENDING_SDK_RELEASE` as each one is fixed, never add a
-new one without a comment explaining why it can't be fixed directly.
+- Any path that fails the `/api/v1/` check is now a violation outright — the
+  baseline no longer absorbs the twelve #27 sites.
+- If a future defect needs a temporary exemption again, name it explicitly
+  here with a comment explaining why it can't be fixed directly, and drain it
+  the same way this one was drained — never leave a stale entry once the
+  underlying call is fixed.
 """
 
 from __future__ import annotations
@@ -77,17 +84,11 @@ _CLIENT_METHODS = {"get", "post", "put", "patch", "delete"}
 _EXCLUDED_RECEIVERS = {"router"}
 
 #: (filename, resolved leading path, occurrence count) — see the module
-#: docstring's "known-pending baseline" section. `sorted()` order below is
-#: purely so a diff is easy to read; the comparison itself doesn't care.
-_PENDING_SDK_RELEASE: dict[tuple[str, str], int] = {
-    ("admin_app.py", "/campaigns/"): 2,
-    ("admin_app.py", "/artefacts"): 3,
-    ("admin_app.py", "/artefacts/"): 3,
-    ("admin_app.py", "/links"): 1,
-    ("channel_plan_routes.py", "/artefacts"): 1,
-    ("image_routes.py", "/campaigns/"): 1,
-    ("image_routes.py", "/assets"): 1,
-}
+#: docstring's "`_PENDING_SDK_RELEASE`: empty, and meant to stay that way"
+#: section. Empty is the asserted invariant, not a placeholder — the test
+#: fails just as loudly on a NEW unexempted violation as it did while this
+#: held the twelve #27 sites.
+_PENDING_SDK_RELEASE: dict[tuple[str, str], int] = {}
 
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:

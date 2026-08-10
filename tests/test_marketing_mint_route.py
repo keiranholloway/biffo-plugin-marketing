@@ -35,13 +35,13 @@ class _FakeCore:
         # `request=` is not decoration: httpx refuses `raise_for_status()` on a
         # response with no request attached, and the route calls it.
         request = httpx.Request(method, f"https://core.invalid{path}")
-        if method == "GET" and path.startswith("/campaigns/"):
+        if method == "GET" and path.startswith(f"{admin_app._INTERNAL_PREFIX}/campaigns/"):
             return httpx.Response(
                 200,
                 json={"id": _CAMPAIGN, "destination_url": self.destination},
                 request=request,
             )
-        if method == "POST" and path == "/links":
+        if method == "POST" and path == f"{admin_app._INTERNAL_PREFIX}/links":
             body = kw["json"]
             self.created.append(body)
             return httpx.Response(

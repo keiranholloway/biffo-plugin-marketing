@@ -98,7 +98,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aws-lambda-powertools", extras = ["tracer"], specifier = ">=3.4.0" },
-    { name = "biffo-plugin-sdk", extras = ["sigv4", "user-serving"], specifier = ">=1.1,<2.0" },
+    { name = "biffo-plugin-sdk", extras = ["sigv4", "user-serving"], specifier = ">=1.2,<2.0" },
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pillow", specifier = ">=11.0.0" },
@@ -117,16 +117,16 @@ dev = [
 
 [[package]]
 name = "biffo-plugin-sdk"
-version = "1.1.0"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aws-lambda-powertools" },
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/10/bb/e0b42186304af743972a092cf1b83ef8399ea41b16ae0af0db930e599d76/biffo_plugin_sdk-1.1.0.tar.gz", hash = "sha256:8b5b77d440dd4c53cf6c0ec1729ad43c5d717803d1ccc9a0ef3eee69c8729d00", size = 33322, upload-time = "2026-07-24T06:56:57.68Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/6c/d61125c1e312e0442a90843f55be2263a8df3938ec1ada8f6e3ca6b2ceb8/biffo_plugin_sdk-1.2.0.tar.gz", hash = "sha256:af76624b91b4ec059b6291d2d319cdbc1d72d35592594ee600d3170ecf5b88a5", size = 44022, upload-time = "2026-08-10T18:47:53.658Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/22/79747766062dcda4719aa3f37fc994a09f8f5e5bd73261f78a4660ccdf0f/biffo_plugin_sdk-1.1.0-py3-none-any.whl", hash = "sha256:9f78f41b3a904acddf56ca879d6e4fcdc18d1ff7a7c8249f1d088268fda82714", size = 23000, upload-time = "2026-07-24T06:56:56.573Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/90/fdf715a083c5ddc83719fc83abe58c815f493e199bb8ff486978d5dcd4c7/biffo_plugin_sdk-1.2.0-py3-none-any.whl", hash = "sha256:0b0e0c2d8f20f6893d694a45a2c584cfcc99c1a2e0395a804054721bb3118e00", size = 27491, upload-time = "2026-08-10T18:47:52.444Z" },
 ]
 
 [package.optional-dependencies]

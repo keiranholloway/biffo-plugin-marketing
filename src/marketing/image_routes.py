@@ -49,6 +49,7 @@ from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from . import principal_client
 from .image_provider import GeneratedImage, ImageProvider, ImageProviderError, OpenAIImageProvider
 
 require_admin = require_group("admin")
@@ -57,6 +58,14 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 _STORAGE_PATH = "/api/v1/internal/plugins/me/storage"
 _LEDGER_PATH = "/api/v1/internal/media-generations"
+
+#: Where `get_campaign_client()`'s dual-auth client reaches this plugin's own
+#: generated-CRUD tables (`marketing_campaign`, `marketing_asset`) — Core's
+#: internal, per-plugin mount, never the public one. See `admin_app.py`'s
+#: `_INTERNAL_PREFIX` for why this is its own local constant rather than an
+#: import: the guard test below resolves a named constant only within the
+#: file that defines it.
+_INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 
 #: A plain client's own upload timeout, matching `admin_app._CORE_TIMEOUT`'s
 #: reasoning: generous enough that a cold start or a slow provider does not
@@ -100,12 +109,17 @@ def get_core_client() -> BiffoAPIClient:
     return create_core_client()
 
 
-def get_campaign_client(admin: Any = Depends(require_admin)) -> BiffoAPIClient:
-    """A plain, bearer-token client for this plugin's own generated-CRUD
-    tables — `marketing_campaign` and `marketing_asset` — scoped to the
-    calling admin's own forwarded token, exactly like `admin_app._core`.
+def get_campaign_client(
+    admin: Any = Depends(require_admin),
+) -> principal_client.PrincipalCoreClient:
+    """A dual-auth client for this plugin's own generated-CRUD tables —
+    `marketing_campaign` and `marketing_asset` — SigV4-signed AND carrying
+    the calling admin's own forwarded token, exactly like `admin_app._core`
+    (see `principal_client`'s module docstring for why both are required
+    together, not either alone: this hits the same
+    `require_principal_crud_permission`-guarded internal mount `_core` does).
     """
-    return BiffoAPIClient(token=admin.token)
+    return principal_client.PrincipalCoreClient(admin.token)
 
 
 class GenerateStillRequest(BaseModel):
@@ -197,7 +211,7 @@ async def generate_still_route(
     body: GenerateStillRequest,
     provider: ImageProvider = Depends(get_image_provider),
     core_client: BiffoAPIClient = Depends(get_core_client),
-    campaign_client: BiffoAPIClient = Depends(get_campaign_client),
+    campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
 ) -> GenerateStillResponse:
     """Generate one still, store it, ledger its cost (or its absence), and
     record it as this campaign's approved source creative.
@@ -205,7 +219,7 @@ async def generate_still_route(
     campaign_id = _validated_campaign_id(campaign_id)
 
     try:
-        await campaign_client.get(f"/campaigns/{campaign_id}")
+        await campaign_client.get(f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}")
     except BiffoAPIError as exc:
         raise _core_error(exc, not_found="Campaign not found.") from exc
 
@@ -234,7 +248,7 @@ async def generate_still_route(
 
     try:
         asset = await campaign_client.post(
-            "/assets",
+            f"{_INTERNAL_PREFIX}/assets",
             json={
                 "campaign_id": campaign_id,
                 "media_kind": "image",

@@ -57,7 +57,13 @@ async def start_channel_plan_route(
 
     created = await admin_app._core(
         "POST",
-        "/artefacts",
+        # Not `admin_app._INTERNAL_PREFIX` — `tests/test_marketing_core_paths_
+        # guard.py` resolves a module-level string constant only within the
+        # SAME file's own AST, so a cross-module reference here would read as
+        # unresolvable and be silently skipped rather than checked. Written
+        # out in full for the same reason `admin_app._validated_campaign_id`
+        # is duplicated rather than imported (see that function's docstring).
+        "/api/v1/internal/plugins/marketing/artefacts",
         admin.token,
         json={
             "campaign_id": campaign_id,

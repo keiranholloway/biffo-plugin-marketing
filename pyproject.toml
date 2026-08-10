@@ -4,28 +4,21 @@ version = "0.1.0"
 description = "Campaign studio — research, positioning, channel planning, generation and attribution for platform marketing."
 requires-python = ">=3.13"
 dependencies = [
-  # biffo-plugin-sdk has a real release path as of biffo-template's
-  # .github/workflows/publish-sdk.yml: the package is versioned 1.0.0 and
-  # publishes to PyPI (via Trusted Publishing) when an `sdk-v*` tag is
-  # pushed. This pin is therefore the *correct end state* and is left as-is.
-  #
-  # ORDERING: the pin only resolves once the owner has actually pushed
-  # `sdk-v1.0.0` and PyPI has the release. Until that first publish,
-  # `uv sync` in a freshly-copied plugin repo cannot resolve it — the same
-  # as before this comment was written, so nothing regressed here; what
-  # changed is that the fix is now one tag push away rather than unbuilt.
-  # Deliberately NOT worked around with a git/path source in the committed
-  # file: baking one in would mean every plugin repo forked from this
-  # skeleton silently keeps building against a moving git ref long after
-  # the real release exists. Use a local `[tool.uv.sources]` override until
-  # then — see the README's "biffo-plugin-sdk dependency" section, which
-  # documents both options and says which to delete once 1.0.0 is live.
   # [user-serving] brings FastAPI and the `require_group` gate the admin
   # surface mounts behind; [sigv4] signs this plugin's own outbound calls to
   # Core's internal API so it is granted `system:marketing` rather than the
   # host's role identity (ADR-0021 section 1a). Same pins as idea-scout, the
   # other user-facing plugin.
-  "biffo-plugin-sdk[sigv4,user-serving]>=1.1,<2.0",
+  #
+  # >=1.2 (not >=1.1): 1.2.0 is the first release carrying
+  # `SignedCoreClient.raw_request(..., extra_signed_headers=...)` — the
+  # dual-auth (SigV4 + forwarded user token) mechanism this plugin's
+  # `principal_client` module depends on for every call to Core's internal,
+  # per-plugin CRUD mount (issue #27, keiranholloway/biffo-template#1480).
+  # Confirmed live on PyPI (releases: 1.0.0, 1.1.0, 1.2.0) before this pin
+  # was bumped, so `uv sync` resolves it with no local `[tool.uv.sources]`
+  # override needed.
+  "biffo-plugin-sdk[sigv4,user-serving]>=1.2,<2.0",
   "aws-lambda-powertools[tracer]>=3.4.0",
   # Already present for the SDK; also used by admin_app to call Core directly —
   # one hop, rather than the host calling itself through the public path.
