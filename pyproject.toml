@@ -36,6 +36,11 @@ dependencies = [
   # version to whatever AWS happens to be running that week. Used only by
   # config.py, to read one SSM parameter.
   "boto3>=1.35.0",
+  # Used only by render.py, to centre-crop the one approved creative into
+  # each placement's exact aspect ratio. Pillow, not a model call — see
+  # render.py's module docstring for why regenerating per placement is the
+  # thing this module exists to avoid.
+  "pillow>=11.0.0",
 ]
 
 [dependency-groups]
