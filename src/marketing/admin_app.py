@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from biffo_plugin_sdk import BiffoAPIError, SignedCoreClient, create_core_client
+from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
@@ -258,7 +258,13 @@ class _CoreAgentGateway:
     `CoreTransport` is built on (it subclasses this same `SignedCoreClient`).
     """
 
-    def __init__(self, client: SignedCoreClient) -> None:
+    def __init__(self, client: BiffoAPIClient) -> None:
+        # Typed as the base `BiffoAPIClient`, not `SignedCoreClient`: that is
+        # exactly what `create_core_client()` is declared to return (it may
+        # build either, depending on `BIFFO_CORE_AUTH_MODE`), and everything
+        # here only calls `.get`/`.post`, which the base class already
+        # defines. Only the *default* build (SigV4) is correct against the
+        # real internal mount; `get_agent_gateway` is what actually chooses it.
         self._client = client
 
     async def request_agent_run(
@@ -322,7 +328,8 @@ async def _latest_artefact(campaign_id: str, kind: str, token: str) -> dict[str,
     change (`filterable_columns` derives from column type, never a hardcoded
     list). Sorted defensively rather than trusting insertion order — a fake
     Core in a test may not preserve it."""
-    resp = await _core("GET", "/artefacts", token, params={"campaign_id": campaign_id, "kind": kind})
+    params = {"campaign_id": campaign_id, "kind": kind}
+    resp = await _core("GET", "/artefacts", token, params=params)
     resp.raise_for_status()
     rows = resp.json() or []
     if not rows:
@@ -359,7 +366,17 @@ async def _advance_artefact(
             gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
         )
     else:
-        result = await pipeline.advance_positioning(gateway, run_id=artefact.get("agent_run_id"))
+        run_id = artefact.get("agent_run_id")
+        if not run_id:
+            # Cannot happen via the routes below — `start_positioning_route`
+            # always stamps `agent_run_id` on creation — but a row edited
+            # directly through generated CRUD could lack it, and "there is no
+            # run to advance" is a real, distinct failure from any pipeline
+            # error.
+            raise pipeline.MalformedOutputError(
+                "This positioning artefact has no agent_run_id to advance."
+            )
+        result = await pipeline.advance_positioning(gateway, run_id=run_id)
 
     if result is None:
         return artefact  # still in flight; nothing to propose yet
@@ -473,7 +490,10 @@ async def approve_artefact_route(
     if artefact.get("status") != "proposed":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Only a 'proposed' artefact can be approved (status: {artefact.get('status')}).",
+            detail=(
+                "Only a 'proposed' artefact can be approved "
+                f"(status: {artefact.get('status')})."
+            ),
         )
 
     updated = await _core(
@@ -500,7 +520,10 @@ async def reject_artefact_route(
     if artefact.get("status") != "proposed":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Only a 'proposed' artefact can be rejected (status: {artefact.get('status')}).",
+            detail=(
+                "Only a 'proposed' artefact can be rejected "
+                f"(status: {artefact.get('status')})."
+            ),
         )
 
     updated = await _core(

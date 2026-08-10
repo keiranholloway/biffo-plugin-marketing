@@ -114,8 +114,6 @@ def extract_research_findings(messages: list[dict[str, Any]]) -> Any | None:
     or invalid. A single angle degrading is tolerated the way idea-scout
     tolerates a thin research angle — what must **not** be tolerated is the
     synthesised run as a whole citing nothing, checked separately below."""
-    from .definitions import ResearchFindingSet
-
     data = _tool_call_arguments(messages, FINDINGS_TOOL_NAME)
     if data is None:
         return None
@@ -386,7 +384,7 @@ async def start_positioning(
         agent_name=POSITIONING_AGENT_NAME,
         definition=positioning_definition(
             model=positioning_model,
-            instructions=_positioning_instructions(),
+            instructions=POSITIONING_INSTRUCTIONS,
         ),
         output_tool=positioning_tool_schema(),
         input_payload={"research": research_body},
@@ -409,12 +407,6 @@ async def advance_positioning(gateway: AgentGateway, *, run_id: str) -> Position
     if not view.succeeded:
         raise RunNotSucceededError("The positioning run did not complete successfully.")
     return extract_positioning(view.messages)
-
-
-def _positioning_instructions() -> str:
-    from .definitions import POSITIONING_INSTRUCTIONS
-
-    return POSITIONING_INSTRUCTIONS
 
 
 def require_approved(status: str, *, what: str) -> None:
