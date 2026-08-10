@@ -2,10 +2,23 @@
  *
  * Same-origin and relative: this app is served from
  * `/api/v1/plugins/marketing/admin/`, so the API sits one level up at
- * `/api/v1/plugins/marketing/`. Hard-coding an absolute origin here would
- * break the moment the instance's domain differs, which is every instance
- * other than the one it was written on.
+ * `/api/v1/plugins/marketing/`. Hard-coding an absolute origin would break on
+ * every instance but the one it was written on.
+ *
+ * ## Why the Authorization header, and not cookies
+ *
+ * The first version of this file used `credentials: 'include'`, which sends
+ * cookies. API Gateway's `/api/v1/plugins/*` route is JWT-authorized, so a
+ * cookie is not a credential it recognises: every call came back 401 and the
+ * panel rendered "Could not load campaigns: request failed (401)".
+ *
+ * The estate authenticates with a Cognito ID token in `Authorization: Bearer`,
+ * resolved from the portal's shared session — `auth.ts`/`identity.ts` here are
+ * idea-scout's, copied rather than rewritten, because this is exactly the part
+ * that should not be reinvented per plugin.
  */
+
+import { getCurrentSession } from './auth'
 
 export interface Campaign {
   id: string
@@ -17,12 +30,22 @@ export interface Campaign {
 const BASE = '/api/v1/plugins/marketing'
 
 export async function listCampaigns(): Promise<Campaign[]> {
-  const response = await fetch(`${BASE}/campaigns`, { credentials: 'include' })
+  const session = await getCurrentSession()
+  const idToken = session?.getIdToken().getJwtToken() ?? null
+
+  const response = await fetch(`${BASE}/campaigns`, {
+    headers: {
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+    },
+  })
 
   if (!response.ok) {
-    // The status, not the body. A body can be an HTML error page — rendering
-    // it into the message is how another plugin ended up showing
-    // `{"detail":"Administrator access required"}` where its content belonged.
+    // The status, not the body. A body can be an HTML error page — rendering it
+    // is how another plugin displayed `{"detail":"Administrator access
+    // required"}` where its content belonged.
+    if (response.status === 401) {
+      throw new Error('not signed in (401) — sign in to the portal, then reload')
+    }
     throw new Error(`request failed (${response.status})`)
   }
 
