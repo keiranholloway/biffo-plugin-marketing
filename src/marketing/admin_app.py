@@ -9,16 +9,32 @@ authorization is a core concern, never plugin code).
 The plugin has two surfaces in its design, and they are the same machine pointed
 at different audiences: ``admin_ingress`` is the operator marketing *the
 platform*, ``user_ingress`` is a franchise unit marketing *its own services*.
-Only the first is built. There is no platform-operator tier in Biffo — an
-instance's "platform admins" are simply its own tenant admins — which is exactly
-why one plugin can serve both Biffo-marketing-Biffo and Tabsii-marketing-Tabsii
-without a new capability.
+**Both are now built** — ``user_app.py`` is Surface B, added after this
+docstring first said "only the first is built" (now corrected: that sentence
+was stale from the moment ``user_app.py`` shipped). There is no
+platform-operator tier in Biffo — an instance's "platform admins" are simply
+its own tenant admins — which is exactly why one plugin can serve both
+Biffo-marketing-Biffo and Tabsii-marketing-Tabsii without a new capability.
 
 ## What is NOT here, and why
 
 The five tables declare their CRUD in ``biffo.plugin.json``'s ``api_routes``, so
-**Core** generates those and the host forwards them, authorised by each table's
-own admin-only permissions. The UI calls
+**Core** generates those and the host forwards them. **Not** "admin-only" any
+more, and not gated on either surface's Cognito group at all: ``biffo-
+template``'s ``plugin_host/forward.py`` places the declared-``api_routes``
+forwarder **outside** the plugin's own group gate on purpose ("gating them
+additionally on the plugin's user group... would reject the admin the route
+exists for") — reachability is governed entirely by each table's own
+``required_role`` in Core, checked against WHATEVER Cognito group the bearer
+token belongs to, not by which mount the request came in through. Four of the
+five tables (``marketing_campaign``/``artefact``/``asset``/``link``) opened
+``list``/``read`` to ``required_role: []`` so ``user_app.py`` could reach
+them — which means, as a direct consequence, ANY authenticated caller in the
+tenant can reach them via ``/api/v1/plugins/marketing/campaigns`` etc.
+directly, not only a ``founder``-group one (see ``user_app.py``'s own module
+docstring for the full reasoning and the accepted limitation this creates).
+``create``/``update``/``delete`` and every operation on ``marketing_click``
+stay admin-only. The UI calls
 ``/api/v1/plugins/marketing/campaigns`` directly — one hop.
 
 Routes live here only when they are *not* CRUD over one table: the pipeline

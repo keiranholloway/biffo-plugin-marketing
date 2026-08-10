@@ -57,29 +57,36 @@ signed-and-forwarded request, because the host's group gate and Core's own
 table permission are two independent checks (``forward.py``'s own docstring:
 "Authorization for these routes is the table's own ADR-0004 permissions...
 not the plugin's user_ingress.required_group"). So ``biffo.plugin.json``
-opens ``list``/``read`` to ``required_role: []`` (any authenticated caller,
-once the host's own group gate has already run) on ``marketing_campaign``,
-``marketing_artefact``, ``marketing_asset`` and ``marketing_link``.
-``create``/``update``/``delete`` stay admin-only on every table — a unit never
-writes through this surface — and ``marketing_click`` (raw per-click
-analytics: user agent, referrer) is untouched in every operation, since no
-route here has a legitimate reason to read it. ``[]`` is the established
-idiom for "any authenticated caller", not a bespoke choice: idea-scout's own
-``idea_scout_build_types``/``idea_scout_model_catalog`` read permissions use
-it for exactly the same reason
-(``services/api/src/api/dependencies.py``: "empty ``required_role``
-authorises any authenticated caller").
+opens ``list``/``read`` to ``required_role: []`` (any authenticated caller —
+Core's ``dependencies.py``: "empty ``required_role`` authorises any
+authenticated caller") on ``marketing_campaign``, ``marketing_artefact``,
+``marketing_asset`` and ``marketing_link``. ``create``/``update``/``delete``
+stay admin-only on every table — a unit never writes through this surface —
+and ``marketing_click`` (raw per-click analytics: user agent, referrer) is
+untouched in every operation, since no route here has a legitimate reason to
+read it. ``[]`` is the established idiom for "any authenticated caller", not
+a bespoke choice: idea-scout's own ``idea_scout_build_types``/
+``idea_scout_model_catalog`` read permissions use it for exactly the same
+reason.
 
-**A real, accepted limitation this creates:** opening ``marketing_artefact``
-at the table level also makes the generic CRUD route
-(``/api/v1/plugins/marketing/artefacts``) listable by any authenticated
-caller for EVERY kind — ``research``/``positioning``/``channel_plan`` as well
-as ``copy`` — because Core's permission model is per table+operation, not per
-row or per ``kind`` value. This route only ever requests and returns the
-``copy`` kind, but a founder who called the generic CRUD path directly could
-read the internal research/positioning/channel-plan artefacts too. Building
-kind-level permission granularity into Core's permission model is out of
-scope for this change; flagged here rather than silently accepted.
+**A real, accepted limitation this creates, broader than just this
+surface.** The routes in *this file* run behind ``require_founder``, but the
+table permission itself does not know that — Core's manifest-declared
+``api_routes`` (``GET /api/v1/plugins/marketing/campaigns`` etc.) are
+forwarded by the shared host **outside any group gate at all**
+(``plugin_host/forward.py``'s own docstring: placed there deliberately so an
+admin isn't rejected by a founder-only ``user_ingress`` gate). So opening
+these four tables' ``list``/``read`` makes them reachable by **any
+authenticated tenant caller** — admin, editor, viewer or founder alike — via
+that generic CRUD path directly, not only by a ``founder``-group request
+routed through this file. For ``marketing_artefact`` specifically that also
+means every ``kind`` is reachable that way, not just the ``copy`` kind this
+file's own routes request — a caller could read the internal
+research/positioning/channel-plan artefacts too. Building either
+per-caller-group or per-``kind`` permission granularity into Core's
+permission model is out of scope for this change. Flagged here rather than
+silently accepted, and tracked for follow-up rather than only documented —
+this repo's issue #40.
 
 ## What "available" means, and what it deliberately does not check yet
 
@@ -227,8 +234,11 @@ async def list_campaigns_route(
 async def _resolve_asset_url(core_client: BiffoAPIClient, asset: dict[str, Any]) -> dict[str, Any]:
     """One asset row plus a freshly-minted GET url — minted per request, per
     `image_routes`' own docstring on why a URL is never stored. Skips (does
-    not raise for) an asset row with no `media_id` rather than failing the
-    whole pack on one malformed row."""
+    not raise for) an asset row with no `media_id`, or a storage response
+    with no `url` in it, rather than failing the whole pack on one malformed
+    row — the second case mirrors the first: a response shaped differently
+    than expected is not something retrying *this whole request* fixes any
+    more than a missing `media_id` is."""
     media_id = asset.get("media_id")
     if not media_id:
         return {**asset, "url": None}
@@ -236,7 +246,7 @@ async def _resolve_asset_url(core_client: BiffoAPIClient, asset: dict[str, Any])
         url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
     except BiffoAPIError as exc:
         raise _core_error(exc) from exc
-    return {**asset, "url": url_resp["url"]}
+    return {**asset, "url": url_resp.get("url")}
 
 
 @router.get("/campaigns/{campaign_id}/pack")
