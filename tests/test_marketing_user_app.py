@@ -80,7 +80,7 @@ class _FakeCampaignClient:
         raise AssertionError(f"unexpected GET {path}")
 
 
-def _app(*, core_client: _FakeCoreClient, campaign_client: _FakeCampaignClient) -> FastAPI:
+def _app(*, core_client: Any, campaign_client: _FakeCampaignClient) -> FastAPI:
     app = FastAPI()
     app.include_router(user_app.router)
     app.dependency_overrides[user_app.require_founder] = _founder_user
@@ -287,6 +287,59 @@ def test_pack_assembles_copy_assets_and_links(fake_signed_client, configured_bas
             "variant": None,
             "is_paid": False,
             "url": f"{_BASE_URL}/c/tok-abc123",
+        }
+    ]
+
+
+def test_pack_survives_a_storage_response_with_no_url_key(fake_signed_client) -> None:
+    """A 200 from storage with a body shaped differently than expected (no
+    `url` key) must not 500 the whole pack — same resilience as the missing-
+    `media_id` case, not just a docstring claim about it."""
+    fake_signed_client(
+        {
+            f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
+                200,
+                json.dumps(_campaign_row()).encode(),
+            ),
+            f"{user_app._INTERNAL_PREFIX}/artefacts": (
+                200,
+                json.dumps([_approved_copy_artefact()]).encode(),
+            ),
+        }
+    )
+
+    class _MalformedStorageResponse:
+        async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            return {}  # no "url" key
+
+    campaign_client = _FakeCampaignClient(
+        assets=[
+            {
+                "id": "asset-1",
+                "campaign_id": _CAMPAIGN,
+                "media_kind": "image",
+                "placement": None,
+                "media_id": "media-1",
+                "is_source": True,
+            }
+        ]
+    )
+    client = TestClient(
+        _app(core_client=_MalformedStorageResponse(), campaign_client=campaign_client)
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    assert resp.json()["assets"] == [
+        {
+            "id": "asset-1",
+            "campaign_id": _CAMPAIGN,
+            "media_kind": "image",
+            "placement": None,
+            "media_id": "media-1",
+            "is_source": True,
+            "url": None,
         }
     ]
 
