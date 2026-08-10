@@ -52,6 +52,7 @@ from pydantic import BaseModel, Field
 from . import pipeline
 from .config import public_base_url
 from .definitions import MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
+from .image_routes import router as image_router
 from .links import destination_with_utms, mint_token, tracked_url
 
 require_admin = require_group("admin")
@@ -584,6 +585,10 @@ def build_app() -> FastAPI:
     """
     app = FastAPI(title="Marketing — campaign studio (admin)")
     app.include_router(router)
+    # Still-image generation (M6, issue #5) — routes live in image_routes.py,
+    # not here, so this file gains only this one line. See that module's
+    # docstring for why.
+    app.include_router(image_router)
 
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.
