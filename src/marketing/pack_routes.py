@@ -113,25 +113,22 @@ def get_campaign_client(
 #: `plugin_storage.presign_download` (biffo-template's `services/api/src/
 #: api/plugin_storage.py`) mints its URL from a bare `boto3.client("s3")` —
 #: no custom endpoint configured — so a legitimate download URL is always
-#: this host family. CodeQL flags the `client.get(...)` below in `_download`
+#: this host family. CodeQL flags the `client.get(...)` in `_download` below
 #: as a full server-side request forgery: the URL text is data-flow-tainted
-#: by `campaign_id`, several hops upstream, and nothing before this line
-#: proved the string is safe to fetch. This is that proof — reject anything
-#: that is not an https URL to a real S3 host before ever making the
-#: request, so a malformed or unexpected Core response cannot steer this
-#: Lambda at an arbitrary origin.
+#: by `campaign_id`, several hops upstream, and nothing before that line
+#: proved the string was safe to fetch. `_download`'s own `if` on `parsed`
+#: is that proof — reject anything that is not an https URL to a real S3
+#: host before ever making the request, so a malformed or unexpected Core
+#: response cannot steer this Lambda at an arbitrary origin.
+#:
+#: The check is written inline in `_download`, not behind a helper: CodeQL's
+#: taint tracker recognises a guard on the SAME tainted expression, in the
+#: same function, immediately before the sink — not an opaque call to a
+#: separate function it has no summary for. An earlier version wrapped this
+#: in `_validate_download_url(url)` and CodeQL kept flagging the call site
+#: unchanged, because the analysis has no way to know that helper strips the
+#: taint.
 _ALLOWED_DOWNLOAD_HOST_SUFFIX = ".amazonaws.com"
-
-
-def _validate_download_url(url: str) -> str:
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    if parts.scheme != "https" or not host.endswith(_ALLOWED_DOWNLOAD_HOST_SUFFIX):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Core returned a download URL for an unexpected host.",
-        )
-    return url
 
 
 def _core_error(exc: BiffoAPIError) -> HTTPException:
@@ -150,15 +147,30 @@ async def _download(core_client: BiffoAPIClient, media_id: str) -> bytes:
     download route (``internal_plugin_storage.py`` only ever mints a URL and
     lets the caller move the bytes); this Lambda plays the role a browser
     plays for ``image_routes._upload``'s presigned POST, one direction
-    earlier in the same flow."""
+    earlier in the same flow.
+
+    Validates the URL's scheme and host before fetching it — see
+    ``_ALLOWED_DOWNLOAD_HOST_SUFFIX``'s comment for why this check is
+    written inline rather than behind a helper.
+    """
     try:
         url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
     except BiffoAPIError as exc:
         raise _core_error(exc) from exc
 
+    download_url = url_resp["url"]
+    parsed = urlsplit(download_url)
+    if parsed.scheme != "https" or not (parsed.hostname or "").endswith(
+        _ALLOWED_DOWNLOAD_HOST_SUFFIX
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Core returned a download URL for an unexpected host.",
+        )
+
     async with httpx.AsyncClient(timeout=_TRANSFER_TIMEOUT) as client:
         try:
-            resp = await client.get(_validate_download_url(url_resp["url"]))
+            resp = await client.get(download_url)
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

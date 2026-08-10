@@ -318,22 +318,30 @@ def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) ->
 # ── SSRF guard on the download URL (CodeQL: full server-side request forgery) ──
 
 
-def test_validate_download_url_accepts_a_real_s3_host() -> None:
-    url = "https://bucket.s3.eu-west-1.amazonaws.com/key"
-    assert pack_routes._validate_download_url(url) == url
+@pytest.mark.asyncio
+async def test_download_accepts_a_real_s3_host(_s3: list[httpx.Request]) -> None:
+    content = await pack_routes._download(_FakeStorageClient(), _SOURCE_MEDIA_ID)  # type: ignore[arg-type]
+    assert content == _source_png_bytes()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "url",
+    "bad_url",
     [
         "http://bucket.s3.eu-west-1.amazonaws.com/key",  # not https
         "https://evil.example.com/key",  # not an S3 host at all
         "https://amazonaws.com.evil.example.com/key",  # suffix-match trick
     ],
 )
-def test_validate_download_url_rejects_anything_else(url: str) -> None:
+async def test_download_rejects_a_url_outside_the_s3_host_family(bad_url: str) -> None:
+    class _MaliciousStorageClient(_FakeStorageClient):
+        async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            if path == f"{pack_routes._STORAGE_PATH}/{_SOURCE_MEDIA_ID}/url":
+                return {"url": bad_url, "expires_in": 300}
+            return await super().get(path, params)
+
     with pytest.raises(HTTPException) as exc:
-        pack_routes._validate_download_url(url)
+        await pack_routes._download(_MaliciousStorageClient(), _SOURCE_MEDIA_ID)  # type: ignore[arg-type]
     assert exc.value.status_code == 502
 
 
