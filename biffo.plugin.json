@@ -385,31 +385,31 @@
     },
     {
       "method": "GET",
-      "path": "/asets",
+      "path": "/assets",
       "table": "marketing_asset",
       "operation": "list",
-      "description": "List asets for the caller's tenant."
+      "description": "List assets for the caller's tenant."
     },
     {
       "method": "GET",
-      "path": "/asets/{id}",
+      "path": "/assets/{id}",
       "table": "marketing_asset",
       "operation": "read",
-      "description": "Read one aset."
+      "description": "Read one asset."
     },
     {
       "method": "POST",
-      "path": "/asets",
+      "path": "/assets",
       "table": "marketing_asset",
       "operation": "create",
-      "description": "Create a aset."
+      "description": "Create an asset."
     },
     {
       "method": "PATCH",
-      "path": "/asets/{id}",
+      "path": "/assets/{id}",
       "table": "marketing_asset",
       "operation": "update",
-      "description": "Update a aset."
+      "description": "Update an asset."
     },
     {
       "method": "GET",
