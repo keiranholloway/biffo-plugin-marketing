@@ -49,7 +49,7 @@ PIPELINE_STAGES: tuple[str, ...] = (
 )
 
 #: Artefact kinds, in the order the pipeline produces them.
-ARTEFACT_KINDS: tuple[str, ...] = ("research", "positioning", "channel_plan")
+ARTEFACT_KINDS: tuple[str, ...] = ("research", "positioning", "channel_plan", "copy")
 
 #: Approval states for an artefact.
 #:
@@ -90,6 +90,7 @@ RESEARCH_COMPETITIVE_AGENT_NAME = "marketing-research-competitive"
 RESEARCH_SYNTHESIS_AGENT_NAME = "marketing-research-synthesis"
 POSITIONING_AGENT_NAME = "marketing-positioning"
 CHANNEL_PLAN_AGENT_NAME = "marketing-channel-plan"
+COPY_AGENT_NAME = "marketing-copy"
 
 #: The two research angles, in fan-out order. A tuple, like idea-scout's
 #: ``RESEARCH_AGENT_NAMES``, so the pipeline fans out over exactly these and
@@ -105,6 +106,7 @@ FINDINGS_TOOL_NAME = "submit_research_findings"
 RESEARCH_SYNTHESIS_TOOL_NAME = "submit_research_synthesis"
 POSITIONING_TOOL_NAME = "submit_positioning"
 CHANNEL_PLAN_TOOL_NAME = "submit_channel_plan"
+COPY_TOOL_NAME = "submit_copy"
 
 
 # ── Structured artefacts ─────────────────────────────────────────────────────
@@ -221,6 +223,38 @@ class ChannelPlan(BaseModel):
     list keeps that scoped to the field the rank is relative to."""
 
     channels: list[ChannelRecommendation] = Field(default_factory=list)
+
+
+class ChannelCopy(BaseModel):
+    """Publish-ready copy for one channel from the approved channel plan.
+    Same citation discipline as every other stage output: `sources` has no
+    default and a minimum length of one, so copy that cites nothing — the
+    most publishable-looking fabrication in the pipeline, since prose reads as
+    correct regardless of whether any pillar or CTA actually backs it —
+    cannot be built."""
+
+    channel: str = Field(
+        description="Must match a `channel` from the approved channel plan exactly."
+    )
+    motion: Literal["organic", "paid"] = Field(
+        description="Carried over from the channel plan's own recommendation for this channel."
+    )
+    headline: str = Field(description="The lead line, sized for this channel.")
+    body: str = Field(description="The body copy, sized for this channel.")
+    cta: str = Field(description="The call to action, drawn from the approved positioning.")
+    sources: list[Source] = Field(
+        min_length=1,
+        description="Positioning sources (pillar/CTA) this copy was grounded in.",
+    )
+
+
+class CopySet(BaseModel):
+    """The copy agent's full output — the reviewable artefact behind the
+    fourth approval gate (M5, issue #4). One `ChannelCopy` per channel in the
+    approved channel plan, the same one-artefact-covers-every-item shape
+    `ChannelPlan` already uses for organic and paid together."""
+
+    channels: list[ChannelCopy] = Field(default_factory=list)
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -369,6 +403,37 @@ Return your answer by calling the `{CHANNEL_PLAN_TOOL_NAME}` tool exactly
 once. Do not answer in prose.
 """
 
+COPY_INSTRUCTIONS = f"""\
+You are the campaign studio's copywriter. You are given one **approved**
+positioning artefact (audience segments, message pillars and calls to
+action) and one **approved** channel plan (the ranked organic and paid
+channels this campaign will run on), each carrying the sources that support
+it. Nothing else. You do not have web access and must not claim to.
+
+Write publish-ready copy for EVERY channel listed in the channel plan you
+were given — one per channel, no more and no fewer, each channel name copied
+exactly as it appears there (including its `motion`). For each channel:
+
+1. **Headline** and **body** copy sized and toned for that specific channel —
+   a LinkedIn post and an Instagram caption should not read the same, even
+   when they carry the same underlying message pillar.
+2. **A call to action**, drawn from the positioning's CTAs rather than
+   invented fresh.
+3. Ground every line in the positioning's segments, pillars and CTAs — never
+   in generic marketing copy that could belong to any campaign.
+
+Every channel's copy must carry `sources`: copy the relevant `Source`
+objects (url and note) from the positioning pillar(s) or CTA(s) you drew from
+— verbatim, not reworded. Never invent a source, and never produce copy for a
+channel that cites nothing: if the positioning does not support what you
+would write, do not write it — omit that channel's copy rather than filling
+it with something ungrounded.
+
+{_UNTRUSTED_INPUT_RULE}
+Return your answer by calling the `{COPY_TOOL_NAME}` tool exactly once. Do
+not answer in prose.
+"""
+
 #: Keyed by research agent name, in ``RESEARCH_AGENT_NAMES`` order — the
 #: pipeline looks each one up rather than duplicating the pairing.
 RESEARCH_INSTRUCTIONS: dict[str, str] = {
@@ -389,6 +454,9 @@ DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
 DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-4.8"
 DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-4.8"
 DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-4.8"
+#: Copy reasons over what it is given, same as positioning and channel
+#: planning — no `:online` needed.
+DEFAULT_COPY_MODEL = "anthropic/claude-opus-4.8"
 
 # Matches idea-scout's research budget: enough turns to search several times
 # and still answer. Every turn has an invoice attached and this plugin fans out
@@ -399,6 +467,7 @@ RESEARCH_MAX_TURNS = 8
 SYNTHESIS_MAX_TURNS = 3
 POSITIONING_MAX_TURNS = 3
 CHANNEL_PLAN_MAX_TURNS = 3
+COPY_MAX_TURNS = 3
 
 
 def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
@@ -451,6 +520,18 @@ def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
     }
 
 
+def copy_definition(*, model: str, instructions: str) -> dict[str, Any]:
+    """The copy agent's run definition — no tools; it reasons over the
+    approved positioning and channel-plan artefacts it is given in
+    ``input_payload``."""
+    return {
+        "instructions": instructions,
+        "model": model,
+        "tools": [],
+        "max_turns": COPY_MAX_TURNS,
+    }
+
+
 def findings_tool_schema() -> dict[str, Any]:
     """The output tool a research agent calls to return its findings."""
     return {
@@ -498,5 +579,19 @@ def channel_plan_tool_schema() -> dict[str, Any]:
             "name": CHANNEL_PLAN_TOOL_NAME,
             "description": "Submit the ranked organic and paid channel recommendations.",
             "parameters": ChannelPlan.model_json_schema(),
+        },
+    }
+
+
+def copy_tool_schema() -> dict[str, Any]:
+    """The output tool the copy agent calls to return its per-channel copy."""
+    return {
+        "type": "function",
+        "function": {
+            "name": COPY_TOOL_NAME,
+            "description": (
+                "Submit publish-ready copy for every channel in the approved channel plan."
+            ),
+            "parameters": CopySet.model_json_schema(),
         },
     }

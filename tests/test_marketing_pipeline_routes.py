@@ -550,3 +550,168 @@ def test_channel_plan_artefact_can_be_approved(ctx) -> None:
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
+
+
+# ── copy (M5, issue #4) ────────────────────────────────────────────────────────
+
+
+def _copy_call(url: str = "https://example.com/thread") -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_copy",
+                        "arguments": {
+                            "channels": [
+                                {
+                                    "channel": "Instagram Reels",
+                                    "motion": "organic",
+                                    "headline": "Run every site the same way, finally.",
+                                    "body": "One dashboard, every location.",
+                                    "cta": "See how it works",
+                                    "sources": [{"url": url, "note": "n"}],
+                                }
+                            ]
+                        },
+                    }
+                }
+            ],
+        }
+    ]
+
+
+def _empty_copy_call() -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "submit_copy", "arguments": {"channels": []}}}],
+        }
+    ]
+
+
+def _propose_and_approve_channel_plan(client, core, gateway) -> dict[str, Any]:
+    """Research and positioning approved, channel plan proposed AND approved
+    — the state `start_copy_route` requires from both upstream stages."""
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # advances pending -> proposed
+    return client.post(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan/approve").json()
+
+
+def test_start_copy_refuses_when_positioning_is_not_approved(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+    gateway.complete(started["agent_run_id"], messages=_positioning_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")  # proposed, not approved
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert resp.status_code == 409
+    assert gateway.requested == [
+        r for r in gateway.requested if r["agent_name"] != "marketing-copy"
+    ]
+
+
+def test_start_copy_refuses_when_no_positioning_exists(ctx) -> None:
+    client, _core, _gateway = ctx
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+    assert resp.status_code == 404
+
+
+def test_start_copy_refuses_when_channel_plan_is_not_approved(ctx) -> None:
+    """The gate enforcement itself, mirroring the channel-plan/positioning
+    pair: `proposed` channel plan must not be usable here, or its own
+    approval gate is decorative."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # proposed, not approved
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert resp.status_code == 409
+    assert gateway.requested == [
+        r for r in gateway.requested if r["agent_name"] != "marketing-copy"
+    ]
+
+
+def test_start_copy_refuses_when_no_channel_plan_exists(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert resp.status_code == 404
+
+
+def test_start_copy_runs_once_both_upstream_artefacts_are_approved(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["kind"] == "copy"
+    assert body["status"] == "pending"
+    copy_requests = [r for r in gateway.requested if r["agent_name"] == "marketing-copy"]
+    assert len(copy_requests) == 1
+    assert copy_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == "Segment"
+    assert copy_requests[0]["input_payload"]["channel_plan"]["channels"][0]["channel"] == (
+        "Instagram Reels"
+    )
+
+
+def test_get_copy_artefact_proposes_once_it_succeeds(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+
+    run_id = started["agent_run_id"]
+    gateway.complete(run_id, messages=_copy_call())
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/copy")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "proposed"
+    stored_body = json.loads(body["body"])
+    assert stored_body["channels"][0]["channel"] == "Instagram Reels"
+
+
+def test_get_copy_artefact_502s_a_zero_citation_run_and_leaves_it_pending(ctx) -> None:
+    """The milestone's guard at the HTTP boundary, the copy half: a run that
+    cited nothing must not be proposed as if it were publish-ready."""
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+
+    run_id = started["agent_run_id"]
+    gateway.complete(run_id, messages=_empty_copy_call())
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/copy")
+
+    assert resp.status_code == 502
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_copy_artefact_can_be_approved(ctx) -> None:
+    """The same generic approve route already covers `copy` once it is a
+    known kind — confirms the wiring holds end to end, same as the
+    channel-plan equivalent above."""
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+    gateway.complete(started["agent_run_id"], messages=_copy_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/copy")  # proposes it
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/artefacts/copy/approve")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "approved"
