@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .definitions import (
     CHANNEL_PLAN_AGENT_NAME,
@@ -139,6 +140,39 @@ def _total_citations(*source_lists: list[Source]) -> int:
     return sum(len(sources) for sources in source_lists)
 
 
+def _extract_cited_artefact[T: BaseModel](
+    messages: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    model_cls: type[T],
+    citation_groups: Callable[[T], list[list[Source]]],
+    malformed_message: str,
+    no_citations_message: str,
+) -> T:
+    """The shared skeleton behind :func:`extract_research_synthesis`,
+    :func:`extract_positioning` and :func:`extract_channel_plan`: fetch the
+    last call to ``tool_name``, validate it against ``model_cls``, and
+    enforce the zero-citation guard over ``citation_groups(result)``.
+
+    Kept as one implementation rather than three near-identical copies
+    precisely because the guard is "the milestone, not a detail" (this
+    module's docstring) — three copies is three places a change to the guard
+    itself (or a fix to it) can drift out of step.
+    """
+    data = _tool_call_arguments(messages, tool_name)
+    if data is None:
+        raise MalformedOutputError(malformed_message)
+    try:
+        result = model_cls.model_validate(data)
+    except ValidationError as exc:
+        raise MalformedOutputError(str(exc)) from exc
+
+    total = _total_citations(*citation_groups(result))
+    if total == 0:
+        raise NoCitationsError(no_citations_message)
+    return result
+
+
 def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthesis:
     """The research-synthesis agent's output, or a hard failure.
 
@@ -148,23 +182,19 @@ def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthe
     finding little, there is no redundancy at the synthesis step: nothing else
     produces the ``research`` artefact, so there is nothing to degrade to.
     """
-    data = _tool_call_arguments(messages, RESEARCH_SYNTHESIS_TOOL_NAME)
-    if data is None:
-        raise MalformedOutputError(
+    return _extract_cited_artefact(
+        messages,
+        tool_name=RESEARCH_SYNTHESIS_TOOL_NAME,
+        model_cls=ResearchSynthesis,
+        citation_groups=lambda r: [f.sources for f in r.findings],
+        malformed_message=(
             f"the research-synthesis run produced no {RESEARCH_SYNTHESIS_TOOL_NAME} tool call"
-        )
-    try:
-        synthesis = ResearchSynthesis.model_validate(data)
-    except ValidationError as exc:
-        raise MalformedOutputError(str(exc)) from exc
-
-    total = _total_citations(*(f.sources for f in synthesis.findings))
-    if total == 0:
-        raise NoCitationsError(
+        ),
+        no_citations_message=(
             "The research run fetched zero URLs. Nothing was found to cite, so no "
             "artefact was produced — try running research again."
-        )
-    return synthesis
+        ),
+    )
 
 
 def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
@@ -172,27 +202,21 @@ def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
     failure modes as :func:`extract_research_synthesis`, for the same reason:
     a positioning claim is exactly as fabricable as a research finding, and an
     operator reviewing it needs the same guarantee."""
-    data = _tool_call_arguments(messages, POSITIONING_TOOL_NAME)
-    if data is None:
-        raise MalformedOutputError(
-            f"the positioning run produced no {POSITIONING_TOOL_NAME} tool call"
-        )
-    try:
-        positioning = Positioning.model_validate(data)
-    except ValidationError as exc:
-        raise MalformedOutputError(str(exc)) from exc
-
-    total = _total_citations(
-        *(s.sources for s in positioning.segments),
-        *(p.sources for p in positioning.pillars),
-        *(c.sources for c in positioning.ctas),
-    )
-    if total == 0:
-        raise NoCitationsError(
+    return _extract_cited_artefact(
+        messages,
+        tool_name=POSITIONING_TOOL_NAME,
+        model_cls=Positioning,
+        citation_groups=lambda r: [
+            *(s.sources for s in r.segments),
+            *(p.sources for p in r.pillars),
+            *(c.sources for c in r.ctas),
+        ],
+        malformed_message=f"the positioning run produced no {POSITIONING_TOOL_NAME} tool call",
+        no_citations_message=(
             "The positioning run cited nothing from the approved research. Nothing "
             "was produced — try running positioning again."
-        )
-    return positioning
+        ),
+    )
 
 
 def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
@@ -202,23 +226,17 @@ def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
     positioning claim, and arguably the most confident-sounding one in the
     whole pipeline, because channel advice reads as generic wisdom whether or
     not anyone researched it."""
-    data = _tool_call_arguments(messages, CHANNEL_PLAN_TOOL_NAME)
-    if data is None:
-        raise MalformedOutputError(
-            f"the channel-plan run produced no {CHANNEL_PLAN_TOOL_NAME} tool call"
-        )
-    try:
-        plan = ChannelPlan.model_validate(data)
-    except ValidationError as exc:
-        raise MalformedOutputError(str(exc)) from exc
-
-    total = _total_citations(*(c.sources for c in plan.channels))
-    if total == 0:
-        raise NoCitationsError(
+    return _extract_cited_artefact(
+        messages,
+        tool_name=CHANNEL_PLAN_TOOL_NAME,
+        model_cls=ChannelPlan,
+        citation_groups=lambda r: [c.sources for c in r.channels],
+        malformed_message=f"the channel-plan run produced no {CHANNEL_PLAN_TOOL_NAME} tool call",
+        no_citations_message=(
             "The channel-plan run cited nothing from the approved positioning. Nothing "
             "was produced — try running channel planning again."
-        )
-    return plan
+        ),
+    )
 
 
 def flatten_citations(
@@ -241,8 +259,15 @@ def flatten_citations(
             *(p.sources for p in output.pillars),
             *(c.sources for c in output.ctas),
         ]
-    else:
+    elif isinstance(output, ChannelPlan):
         groups = [c.sources for c in output.channels]
+    else:
+        # Exhaustive over this function's own type hint — a new artefact type
+        # reaching here without a branch of its own must fail loudly rather
+        # than silently reusing another stage's `.channels`/`.segments`
+        # shape (issue found in review: the pre-M4 version of this function
+        # had exactly one `else`, quietly assumed to mean "positioning").
+        raise TypeError(f"flatten_citations: unsupported artefact output type {type(output)!r}")
     seen: set[str] = set()
     flat: list[dict[str, Any]] = []
     for sources in groups:

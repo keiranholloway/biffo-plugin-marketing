@@ -29,6 +29,7 @@ from marketing.pipeline import (
     extract_positioning,
     extract_research_findings,
     extract_research_synthesis,
+    flatten_citations,
 )
 
 
@@ -247,3 +248,46 @@ def test_extract_research_findings_returns_the_set_when_valid() -> None:
     assert result is not None
     assert result.angle == "audience"
     assert result.findings[0].sources[0].url == "https://example.com/z"
+
+
+# ── flatten_citations — dispatches on the result TYPE, not a `kind` string ───
+
+
+def test_flatten_citations_of_a_channel_plan_dedupes_by_url() -> None:
+    plan = extract_channel_plan(
+        _tool_call(
+            "submit_channel_plan",
+            {
+                "channels": [
+                    {
+                        "channel": "Instagram Reels",
+                        "motion": "organic",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/dup", "note": "a"}],
+                    },
+                    {
+                        "channel": "Google Search ads",
+                        "motion": "paid",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/dup", "note": "b"}],
+                    },
+                ]
+            },
+        )
+    )
+
+    citations = flatten_citations(plan)
+
+    assert citations == [{"url": "https://example.com/dup", "note": "a"}]
+
+
+def test_flatten_citations_raises_on_an_unsupported_output_type() -> None:
+    """A defensive check, not a reachable path today: every real caller only
+    ever passes what `extract_research_synthesis`/`extract_positioning`/
+    `extract_channel_plan` return. Exercised directly so a fourth artefact
+    type added here without its own branch fails loudly instead of quietly
+    reusing `ChannelPlan`'s `.channels` shape."""
+    with pytest.raises(TypeError):
+        flatten_citations(object())  # type: ignore[arg-type]

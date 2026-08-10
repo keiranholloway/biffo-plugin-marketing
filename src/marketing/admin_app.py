@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,7 @@ from pydantic import BaseModel, Field
 
 from . import pipeline
 from .config import public_base_url
-from .definitions import MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
+from .definitions import ARTEFACT_KINDS, MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
 from .image_routes import router as image_router
 from .links import destination_with_utms, mint_token, tracked_url
 
@@ -237,11 +238,27 @@ async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response
 # `_core`'s Cognito-bearer-token calls cannot reach (ADR-0009 gates it on IAM,
 # not a JWT).
 
-#: The kinds a pipeline stage exists for. All three of
-#: `definitions.ARTEFACT_KINDS` as of M4 (issue #3) — `channel_plan` reuses
-#: this same generic read/approve/reject dispatch; only `_advance_artefact`
-#: below and `channel_plan_routes.py`'s starter route are kind-specific.
+#: The kinds a pipeline stage exists for — an explicit, opt-in subset of
+#: `definitions.ARTEFACT_KINDS` (which also lists table-level kinds that may
+#: not have a wired stage yet, as `channel_plan` itself did not until M4).
+#: Kept as its own tuple rather than reused directly so that adding a kind to
+#: `ARTEFACT_KINDS` cannot, by itself, make routes below start dispatching to
+#: it before a stage actually exists — the assertion just below is what stops
+#: this tuple drifting to name a kind `ARTEFACT_KINDS` does not.
+#:
+#: Kind-specific code, all of it: `_advance_artefact`'s branch on `kind`
+#: below, `pipeline.flatten_citations`'s dispatch on the result *type* (not
+#: `kind` — it never sees the string), and each stage's own starter route
+#: (`start_research_route`/`start_positioning_route` here,
+#: `start_channel_plan_route` in `channel_plan_routes.py`). Everything else
+#: — `get_artefact_route`/`approve_artefact_route`/`reject_artefact_route` —
+#: is generic over any kind in this tuple.
 _PIPELINE_ARTEFACT_KINDS = ("research", "positioning", "channel_plan")
+if not set(_PIPELINE_ARTEFACT_KINDS) <= set(ARTEFACT_KINDS):
+    raise RuntimeError(
+        "_PIPELINE_ARTEFACT_KINDS must stay a subset of definitions.ARTEFACT_KINDS "
+        f"(got {_PIPELINE_ARTEFACT_KINDS!r} against {ARTEFACT_KINDS!r})"
+    )
 
 _AGENT_RUNS_PATH = "/api/v1/internal/agent-runs"
 
@@ -354,6 +371,18 @@ def _pipeline_error_to_http(exc: pipeline.PipelineError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
 
+#: `research` is fanned out and handled as its own branch below — its advance
+#: function takes `chain_id`/`research_run_ids`, not a single `run_id`, so it
+#: cannot share this mapping's call shape. Every other stage is a single,
+#: un-fanned-out run, and shares exactly the shape `advance(gateway,
+#: run_id=...)`: adding one grows this dict by one line, not `_advance_artefact`
+#: by a new branch.
+_SINGLE_RUN_ADVANCERS: dict[str, Callable[..., Any]] = {
+    "positioning": pipeline.advance_positioning,
+    "channel_plan": pipeline.advance_channel_plan,
+}
+
+
 async def _advance_artefact(
     artefact: dict[str, Any], kind: str, gateway: pipeline.AgentGateway, token: str
 ) -> dict[str, Any]:
@@ -368,9 +397,8 @@ async def _advance_artefact(
             gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
         )
     else:
-        # positioning and channel_plan are both single, un-fanned-out runs —
-        # `agent_run_id` is stamped on creation by their respective starter
-        # routes (`start_positioning_route` here, `start_channel_plan_route`
+        # `agent_run_id` is stamped on creation by each stage's own starter
+        # route (`start_positioning_route` here, `start_channel_plan_route`
         # in `channel_plan_routes.py`). A row edited directly through
         # generated CRUD could lack it, and "there is no run to advance" is a
         # real, distinct failure from any pipeline error.
@@ -379,11 +407,7 @@ async def _advance_artefact(
             raise pipeline.MalformedOutputError(
                 f"This {kind} artefact has no agent_run_id to advance."
             )
-        result = (
-            await pipeline.advance_channel_plan(gateway, run_id=run_id)
-            if kind == "channel_plan"
-            else await pipeline.advance_positioning(gateway, run_id=run_id)
-        )
+        result = await _SINGLE_RUN_ADVANCERS[kind](gateway, run_id=run_id)
 
     if result is None:
         return artefact  # still in flight; nothing to propose yet
