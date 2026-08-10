@@ -59,11 +59,11 @@
       "permissions": {
         "list": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "read": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "create": {
           "allowed": true,
@@ -130,11 +130,11 @@
       "permissions": {
         "list": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "read": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "create": {
           "allowed": true,
@@ -188,11 +188,11 @@
       "permissions": {
         "list": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "read": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "create": {
           "allowed": true,
@@ -253,11 +253,11 @@
       "permissions": {
         "list": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "read": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "create": {
           "allowed": true,
@@ -475,6 +475,10 @@
     "agent-run-request": "^1",
     "owner-scoped-tables": "^1",
     "object-storage": "^1"
+  },
+  "user_ingress": {
+    "required_group": "founder",
+    "app": "marketing.user_app:app"
   },
   "admin_ingress": {
     "required_group": "admin",
