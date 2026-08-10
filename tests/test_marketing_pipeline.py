@@ -23,6 +23,7 @@ from marketing.pipeline import (
     MalformedOutputError,
     NoCitationsError,
     extract_positioning,
+    extract_research_findings,
     extract_research_synthesis,
 )
 
@@ -138,3 +139,51 @@ def test_research_finding_cannot_be_built_with_empty_sources() -> None:
 
     with pytest.raises(ValidationError):
         ResearchFinding(signal="x", why_it_matters="y", sources=[])
+
+
+# ── extract_research_findings — per-angle, degrades rather than fails ────────
+#
+# Unlike the synthesis/positioning extractors above, one research angle
+# returning nothing usable is tolerated (idea-scout's own rationale: a single
+# angle finding little is a thinner result, not a failed run). This is not
+# currently called anywhere in `pipeline.py` — the research-synthesis agent
+# reads the raw fan-in payload itself, not this plugin — kept for the same
+# reason idea-scout keeps its own equivalent (`service.extract_findings`,
+# also uncalled outside its own tests): a future admin view showing what one
+# research angle actually found needs exactly this.
+
+
+def test_extract_research_findings_returns_none_for_a_missing_tool_call() -> None:
+    assert extract_research_findings([{"role": "assistant", "content": "..."}]) is None
+
+
+def test_extract_research_findings_returns_none_for_an_invalid_tool_call() -> None:
+    """A finding with no source fails Pydantic validation — degraded, not
+    raised, unlike the aggregate synthesis/positioning guard."""
+    messages = _tool_call(
+        "submit_research_findings",
+        {"angle": "audience", "findings": [{"signal": "x", "why_it_matters": "y", "sources": []}]},
+    )
+    assert extract_research_findings(messages) is None
+
+
+def test_extract_research_findings_returns_the_set_when_valid() -> None:
+    messages = _tool_call(
+        "submit_research_findings",
+        {
+            "angle": "audience",
+            "findings": [
+                {
+                    "signal": "x",
+                    "why_it_matters": "y",
+                    "sources": [{"url": "https://example.com/z", "note": "n"}],
+                }
+            ],
+        },
+    )
+
+    result = extract_research_findings(messages)
+
+    assert result is not None
+    assert result.angle == "audience"
+    assert result.findings[0].sources[0].url == "https://example.com/z"
