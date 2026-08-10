@@ -54,7 +54,7 @@ class _FakeCore:
 def ctx(monkeypatch: pytest.MonkeyPatch):
     core = _FakeCore()
     monkeypatch.setattr(admin_app, "_core", core)
-    monkeypatch.setattr(admin_app, "PUBLIC_BASE_URL", _BASE)
+    monkeypatch.setattr(admin_app, "public_base_url", lambda: _BASE)
 
     app = admin_app.build_app()
     # The host gates on the Cognito group before this app sees a request
@@ -135,7 +135,7 @@ def test_a_campaign_with_no_destination_is_refused(monkeypatch: pytest.MonkeyPat
     """
     core = _FakeCore(destination=None)
     monkeypatch.setattr(admin_app, "_core", core)
-    monkeypatch.setattr(admin_app, "PUBLIC_BASE_URL", _BASE)
+    monkeypatch.setattr(admin_app, "public_base_url", lambda: _BASE)
     app = admin_app.build_app()
     app.dependency_overrides[admin_app.require_admin] = lambda: type(
         "U", (), {"sub": "a", "groups": ["admin"], "token": "t"}
@@ -154,7 +154,7 @@ def test_an_unconfigured_deployment_says_so_rather_than_minting_a_broken_url(
 ) -> None:
     """Without a base URL the minted link would be published as `/c/<token>`."""
     monkeypatch.setattr(admin_app, "_core", _FakeCore())
-    monkeypatch.setattr(admin_app, "PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(admin_app, "public_base_url", lambda: "")
     app = admin_app.build_app()
     app.dependency_overrides[admin_app.require_admin] = lambda: type(
         "U", (), {"sub": "a", "groups": ["admin"], "token": "t"}

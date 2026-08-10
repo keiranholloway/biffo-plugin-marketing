@@ -30,6 +30,12 @@ dependencies = [
   # Already present for the SDK; also used by admin_app to call Core directly —
   # one hop, rather than the host calling itself through the public path.
   "httpx>=0.28.1",
+  # Declared rather than assumed from the Lambda runtime, matching
+  # services/_plugins/agent-runtime. AWS does ship boto3, but relying on that
+  # makes the dependency invisible to pyright and to pip-audit, and pins the
+  # version to whatever AWS happens to be running that week. Used only by
+  # config.py, to read one SSM parameter.
+  "boto3>=1.35.0",
 ]
 
 [dependency-groups]

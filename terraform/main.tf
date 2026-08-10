@@ -50,7 +50,30 @@ locals {
   # Grant Core API access only when the root config told us which API to scope
   # it to. Empty (the default) => the plugin never calls Core, so no grant.
   grants_core_api_access = var.core_api_execution_arn != ""
+
+  # Where this deployment's public base URL is read from.
+  #
+  # DERIVED, not passed in, and that is the point. `biffo plugin install`
+  # writes plugins.generated.tf from a fixed argument list — project_name,
+  # environment, plugin_name, handler, event_bus_name, core_api_url,
+  # core_api_execution_arn, tags — and that file is regenerated in full on the
+  # next install, so an installed plugin has NO channel for instance-specific
+  # configuration. (Core plugins escape this only because they are wired by
+  # hand in plugins.core.tf; that is how agent-runtime gets its OpenRouter
+  # key.) Filed upstream as keiranholloway/biffo-template#1456.
+  #
+  # A conventional path built from values the module already receives needs no
+  # such channel: Terraform grants read access to it, and an operator sets the
+  # value once with `aws ssm put-parameter`. Same shape as agent-runtime's
+  # credential parameters, minus the plumbing this module cannot have.
+  public_base_url_parameter = "/${var.project_name}/${var.environment}/${var.plugin_name}/public-base-url"
+
+  ssm_parameter_prefix = "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter"
 }
+
+data "aws_region" "current" {}
+
+data "aws_caller_identity" "current" {}
 
 # Compute — the plugin's Lambda function.
 module "function" {
@@ -73,6 +96,10 @@ module "function" {
     {
       BIFFO_CORE_API_URL = var.core_api_url
       BIFFO_PLUGIN_NAME  = var.plugin_name
+      # The parameter NAME, not the value. Terraform never reads the value, so
+      # it never lands in state — state is not a secret store, and a base URL
+      # that changes should not need an apply to take effect.
+      BIFFO_PUBLIC_BASE_URL_PARAMETER = local.public_base_url_parameter
     },
     var.environment_variables,
   )
@@ -164,4 +191,45 @@ resource "aws_iam_role_policy" "core_api" {
   # segment) since aws_iam_role_policy wants the name, not the ARN.
   role   = element(split("/", module.function.role_arn), length(split("/", module.function.role_arn)) - 1)
   policy = data.aws_iam_policy_document.core_api[0].json
+}
+
+
+# ---------------------------------------------------------------------------
+# Public base URL — read at runtime from one SSM parameter.
+#
+# `ssm:GetParameter` on exactly one path, and `kms:Decrypt` conditioned on the
+# call going via SSM, so the grant cannot be used for anything but fetching
+# this parameter. Copied deliberately from agent-runtime's credential grant,
+# including the ViaService condition.
+#
+# The parameter does not have to exist for this to apply. A deployment where
+# nobody has set it yet simply has a plugin that refuses to mint links and says
+# why (503), which is the honest behaviour — a link minted against a missing
+# base URL would be published as a relative path.
+# ---------------------------------------------------------------------------
+data "aws_iam_policy_document" "public_base_url" {
+  statement {
+    sid       = "ReadPublicBaseUrlParameter"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = ["${local.ssm_parameter_prefix}${local.public_base_url_parameter}"]
+  }
+
+  statement {
+    sid       = "DecryptPublicBaseUrlParameter"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${data.aws_region.current.name}.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "public_base_url" {
+  name   = "${local.function_name}-public-base-url"
+  role   = element(split("/", module.function.role_arn), length(split("/", module.function.role_arn)) - 1)
+  policy = data.aws_iam_policy_document.public_base_url.json
 }

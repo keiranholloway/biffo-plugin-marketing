@@ -46,16 +46,11 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .config import public_base_url
 from .definitions import MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
 from .links import destination_with_utms, mint_token, tracked_url
 
 require_admin = require_group("admin")
-
-#: The instance's public origin, where `c/*` is routed to the Core API by the
-#: shared CloudFront distribution. A published link should look like it belongs
-#: to the brand rather than to a gateway, so this is the marketing site's own
-#: origin and not the API's.
-PUBLIC_BASE_URL = os.environ.get("BIFFO_PUBLIC_BASE_URL", "")
 
 #: Core's own base URL. The plugin calls Core directly rather than back through
 #: the host: the host calling itself through the public path is three hops, and
@@ -122,7 +117,8 @@ async def mint_links(
     and they are an authenticated admin of this tenant. The public route's
     silence is about not confirming a *stranger's* guess.
     """
-    if not PUBLIC_BASE_URL:
+    base_url = public_base_url()
+    if not base_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No public base URL is configured for this deployment.",
@@ -175,7 +171,7 @@ async def mint_links(
                 "channel": spec.channel,
                 "variant": spec.variant,
                 "is_paid": spec.is_paid,
-                "url": tracked_url(PUBLIC_BASE_URL, token),
+                "url": tracked_url(base_url, token),
             }
         )
 
