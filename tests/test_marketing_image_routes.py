@@ -104,22 +104,23 @@ class _FakeCoreClient:
 
 
 class _FakeCampaignClient:
-    """Stands in for the bearer-token client over the plugin's own
-    generated-CRUD tables (`marketing_campaign`, `marketing_asset`)."""
+    """Stands in for the dual-auth (SigV4 + forwarded user token) client over
+    the plugin's own generated-CRUD tables (`marketing_campaign`,
+    `marketing_asset`) — Core's internal, per-plugin mount, per issue #27."""
 
     def __init__(self, *, exists: bool = True) -> None:
         self.exists = exists
         self.created_assets: list[dict[str, Any]] = []
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        if path == f"/campaigns/{_CAMPAIGN}":
+        if path == f"{image_routes._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}":
             if not self.exists:
                 raise BiffoAPIError(404, "not found")
             return {"id": _CAMPAIGN}
         raise AssertionError(f"unexpected GET {path}")
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
-        if path == "/assets":
+        if path == f"{image_routes._INTERNAL_PREFIX}/assets":
             row = {**(json or {}), "id": f"asset-{len(self.created_assets) + 1}"}
             self.created_assets.append(row)
             return row

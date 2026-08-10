@@ -50,7 +50,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import pipeline
+from . import pipeline, principal_client
 from .config import public_base_url
 from .definitions import ARTEFACT_KINDS, MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
 from .image_routes import router as image_router
@@ -67,6 +67,18 @@ CORE_API_URL = os.environ.get("BIFFO_CORE_API_URL", "")
 #: ~4.3s, so a 5s default expires on the first request after a quiet period —
 #: which reads as a broken feature rather than a slow one.
 _CORE_TIMEOUT = 30.0
+
+#: Every `_core()` call goes to Core's internal, per-plugin CRUD mount —
+#: `plugin_router.py`'s `path_prefix="/internal/plugins"` in biffo-template —
+#: never the public `/api/v1/plugins/marketing/*` one the browser reaches,
+#: which is unaddressable from a Lambda anyway (see `plugin_router.py`'s own
+#: docstring on the #652 collision). Written out here, at each call site
+#: below, rather than appended inside `_core()` itself: `tests/
+#: test_marketing_core_paths_guard.py` statically inspects each call site's
+#: own literal path argument, so the prefix has to be visible there, not
+#: hidden behind a helper's plumbing (`principal_client`'s module docstring
+#: explains the same choice from the other side).
+_INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -160,7 +172,7 @@ async def mint_links(
 
     campaign_id = _validated_campaign_id(campaign_id)
 
-    campaign = await _core("GET", f"/campaigns/{campaign_id}", admin.token)
+    campaign = await _core("GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", admin.token)
     if campaign.status_code == status.HTTP_404_NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
     campaign.raise_for_status()
@@ -179,7 +191,7 @@ async def mint_links(
         token = mint_token()
         created = await _core(
             "POST",
-            "/links",
+            f"{_INTERNAL_PREFIX}/links",
             admin.token,
             json={
                 "campaign_id": campaign_id,
@@ -215,15 +227,35 @@ async def mint_links(
 
 
 async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response:
+    """Dual-auth call to Core's internal, per-plugin CRUD mount — SigV4-signed
+    AND carrying the calling admin's own token, forwarded via
+    `X-Biffo-User-Token` (`principal_client`'s module docstring has the full
+    mechanism, and issue #27 the reasoning for why the fix is this and not a
+    bare signed client). `path` must already carry the `_INTERNAL_PREFIX`
+    every call site above supplies — see that constant's own comment for why
+    the prefix lives at the call site rather than being added here.
+
+    This is a thin wrapper over `principal_client.request`, kept so every
+    existing call site's `.status_code` / `.raise_for_status()` / `.json()`
+    usage — written against a plain `httpx.Response` from before this was
+    signed at all — keeps working unchanged.
+
+    `**kw` is narrower than it looks: it forwards to `principal_client.
+    request`, which accepts only `params=`/`json=` (plus `timeout=`, already
+    supplied above). The pre-fix `_core` forwarded `**kw` straight to
+    `httpx.AsyncClient.request`, so `headers=`/`data=`/a per-call `timeout=`
+    were all previously valid; none of that is a call site above needs
+    today, but a future one reaching for it gets a `TypeError`, not a
+    silently-ignored kwarg.
+    """
     if not CORE_API_URL:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Core API URL is not configured for this deployment.",
         )
-    async with httpx.AsyncClient(timeout=_CORE_TIMEOUT) as client:
-        return await client.request(
-            method, f"{CORE_API_URL}{path}", headers={"Authorization": f"Bearer {token}"}, **kw
-        )
+    return await principal_client.request(
+        method, path, token, base_url=CORE_API_URL, timeout=_CORE_TIMEOUT, **kw
+    )
 
 
 # ── Research + positioning (M3) ──────────────────────────────────────────────
@@ -348,7 +380,7 @@ async def _latest_artefact(campaign_id: str, kind: str, token: str) -> dict[str,
     list). Sorted defensively rather than trusting insertion order — a fake
     Core in a test may not preserve it."""
     params = {"campaign_id": campaign_id, "kind": kind}
-    resp = await _core("GET", "/artefacts", token, params=params)
+    resp = await _core("GET", f"{_INTERNAL_PREFIX}/artefacts", token, params=params)
     resp.raise_for_status()
     rows = resp.json() or []
     if not rows:
@@ -414,7 +446,7 @@ async def _advance_artefact(
 
     updated = await _core(
         "PATCH",
-        f"/artefacts/{artefact['id']}",
+        f"{_INTERNAL_PREFIX}/artefacts/{artefact['id']}",
         token,
         json={
             "status": "proposed",
@@ -439,7 +471,7 @@ async def start_research_route(
     environment this hangs in `pending` forever, silently)."""
     campaign_id = _validated_campaign_id(campaign_id)
 
-    campaign = await _core("GET", f"/campaigns/{campaign_id}", admin.token)
+    campaign = await _core("GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", admin.token)
     if campaign.status_code == status.HTTP_404_NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
     campaign.raise_for_status()
@@ -457,7 +489,7 @@ async def start_research_route(
 
     created = await _core(
         "POST",
-        "/artefacts",
+        f"{_INTERNAL_PREFIX}/artefacts",
         admin.token,
         json={
             "campaign_id": campaign_id,
@@ -527,7 +559,10 @@ async def approve_artefact_route(
         )
 
     updated = await _core(
-        "PATCH", f"/artefacts/{artefact['id']}", admin.token, json={"status": "approved"}
+        "PATCH",
+        f"{_INTERNAL_PREFIX}/artefacts/{artefact['id']}",
+        admin.token,
+        json={"status": "approved"},
     )
     updated.raise_for_status()
     return updated.json()
@@ -556,7 +591,10 @@ async def reject_artefact_route(
         )
 
     updated = await _core(
-        "PATCH", f"/artefacts/{artefact['id']}", admin.token, json={"status": "rejected"}
+        "PATCH",
+        f"{_INTERNAL_PREFIX}/artefacts/{artefact['id']}",
+        admin.token,
+        json={"status": "rejected"},
     )
     updated.raise_for_status()
     return updated.json()
@@ -591,7 +629,7 @@ async def start_positioning_route(
 
     created = await _core(
         "POST",
-        "/artefacts",
+        f"{_INTERNAL_PREFIX}/artefacts",
         admin.token,
         json={
             "campaign_id": campaign_id,

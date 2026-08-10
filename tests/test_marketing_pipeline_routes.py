@@ -33,11 +33,12 @@ class _FakeCore:
 
     async def __call__(self, method: str, path: str, token: str, **kw: Any) -> httpx.Response:
         request = httpx.Request(method, f"https://core.invalid{path}")
-        if method == "GET" and path == f"/campaigns/{_CAMPAIGN}":
+        prefix = admin_app._INTERNAL_PREFIX
+        if method == "GET" and path == f"{prefix}/campaigns/{_CAMPAIGN}":
             return httpx.Response(200, json=self.campaign, request=request)
-        if method == "GET" and path.startswith("/campaigns/"):
+        if method == "GET" and path.startswith(f"{prefix}/campaigns/"):
             return httpx.Response(404, json={"detail": "not found"}, request=request)
-        if method == "GET" and path == "/artefacts":
+        if method == "GET" and path == f"{prefix}/artefacts":
             params = kw.get("params") or {}
             rows = [
                 a
@@ -46,7 +47,7 @@ class _FakeCore:
                 and a.get("kind") == params.get("kind")
             ]
             return httpx.Response(200, json=rows, request=request)
-        if method == "POST" and path == "/artefacts":
+        if method == "POST" and path == f"{prefix}/artefacts":
             self._next_id += 1
             artefact_id = f"artefact-{self._next_id}"
             body = dict(kw["json"])
@@ -60,8 +61,8 @@ class _FakeCore:
             }
             self.artefacts[artefact_id] = row
             return httpx.Response(201, json=row, request=request)
-        if method == "PATCH" and path.startswith("/artefacts/"):
-            artefact_id = path.removeprefix("/artefacts/")
+        if method == "PATCH" and path.startswith(f"{prefix}/artefacts/"):
+            artefact_id = path.removeprefix(f"{prefix}/artefacts/")
             self.artefacts[artefact_id].update(kw["json"])
             return httpx.Response(200, json=self.artefacts[artefact_id], request=request)
         raise AssertionError(f"unexpected call {method} {path}")
