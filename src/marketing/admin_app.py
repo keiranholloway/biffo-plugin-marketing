@@ -36,17 +36,20 @@ learned that the same way.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
+from biffo_plugin_sdk import BiffoAPIError, SignedCoreClient, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import pipeline
 from .config import public_base_url
 from .definitions import MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
 from .links import destination_with_utms, mint_token, tracked_url
@@ -219,6 +222,335 @@ async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response
         return await client.request(
             method, f"{CORE_API_URL}{path}", headers={"Authorization": f"Bearer {token}"}, **kw
         )
+
+
+# ── Research + positioning (M3) ──────────────────────────────────────────────
+#
+# Not generated CRUD, for the same reason `mint_links` above is not: starting a
+# run and advancing an artefact both read one row and write several, and the
+# fan-out/approval logic lives in `pipeline.py` so it is testable without an
+# ASGI app. What is left here is the thin part — reading/writing the
+# `marketing_artefact` row through the same `_core` seam as every other route
+# in this file, and building the one thing that IS new: a SigV4-signed client
+# for Core's internal agent-run API (`/api/v1/internal/agent-runs`), which
+# `_core`'s Cognito-bearer-token calls cannot reach (ADR-0009 gates it on IAM,
+# not a JWT).
+
+#: Only the two kinds this milestone builds. `channel_plan` is
+#: `definitions.ARTEFACT_KINDS`'s third member and is not wired to a pipeline
+#: yet — a later milestone's job, not this one's to fake.
+_PIPELINE_ARTEFACT_KINDS = ("research", "positioning")
+
+_AGENT_RUNS_PATH = "/api/v1/internal/agent-runs"
+
+
+class _CoreAgentGateway:
+    """`pipeline.AgentGateway` backed by Core's internal, SigV4-signed
+    agent-run seam (ADR-0009, ADR-0014, ADR-0021 §1a).
+
+    Signs with the shared plugin host's own IAM role and asserts the
+    `marketing` plugin identity via the SDK's `acting_as_plugin` binding —
+    already set by the host's `group_gate` before this app is dispatched to,
+    so nothing here has to set it again. This is the platform's documented,
+    intended mechanism for a plugin to reach Core's internal API (ADR-0021
+    §1a: "the SDK's default `self.api` client... reads it to stamp the
+    outbound `X-Biffo-Plugin` header"), and it is what idea-scout's own
+    `CoreTransport` is built on (it subclasses this same `SignedCoreClient`).
+    """
+
+    def __init__(self, client: SignedCoreClient) -> None:
+        self._client = client
+
+    async def request_agent_run(
+        self,
+        *,
+        agent_name: str,
+        definition: dict[str, Any],
+        output_tool: dict[str, Any],
+        input_payload: dict[str, Any],
+        causation_id: str,
+    ) -> str:
+        # output_tools rides on the definition snapshot, not `tools` — an
+        # output tool offered as a registry tool fails the run as unknown
+        # (ADR-0017 §5), same as idea-scout's adapter.
+        snapshot = {**definition, "output_tools": [output_tool]}
+        run = await self._client.post(
+            _AGENT_RUNS_PATH,
+            json={
+                "agent_name": agent_name,
+                "definition_snapshot": snapshot,
+                "input_payload": input_payload,
+                "causation_id": causation_id,
+            },
+        )
+        return run["id"]
+
+    async def find_chain_run(
+        self, *, chain_id: str, agent_name: str
+    ) -> pipeline.AgentRunView | None:
+        rows = await self._client.get(
+            _AGENT_RUNS_PATH, params={"causation_id": chain_id, "agent_name": agent_name}
+        )
+        if not rows:
+            return None
+        return await self.get_agent_run(run_id=rows[0]["id"])
+
+    async def get_agent_run(self, *, run_id: str) -> pipeline.AgentRunView | None:
+        try:
+            run = await self._client.get(f"{_AGENT_RUNS_PATH}/{run_id}")
+        except BiffoAPIError as exc:
+            if exc.status_code == status.HTTP_404_NOT_FOUND:
+                return None
+            raise
+        return pipeline.AgentRunView(
+            id=run["id"], status=run["status"], messages=run.get("messages") or []
+        )
+
+
+def get_agent_gateway() -> pipeline.AgentGateway:
+    """One gateway per request. `create_core_client()` builds a SigV4-signing
+    client by default (ADR-0009) — never an unsigned one, which would
+    silently 403 against the internal mount."""
+    return _CoreAgentGateway(create_core_client())
+
+
+async def _latest_artefact(campaign_id: str, kind: str, token: str) -> dict[str, Any] | None:
+    """This campaign's most recent artefact of `kind`, or `None`.
+
+    `campaign_id` and `kind` are both plain `String` columns, so Core's
+    generic list route accepts them as equality filters without any manifest
+    change (`filterable_columns` derives from column type, never a hardcoded
+    list). Sorted defensively rather than trusting insertion order — a fake
+    Core in a test may not preserve it."""
+    resp = await _core("GET", "/artefacts", token, params={"campaign_id": campaign_id, "kind": kind})
+    resp.raise_for_status()
+    rows = resp.json() or []
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows[0]
+
+
+def _require_known_kind(kind: str) -> None:
+    if kind not in _PIPELINE_ARTEFACT_KINDS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown artefact kind.")
+
+
+def _pipeline_error_to_http(exc: pipeline.PipelineError) -> HTTPException:
+    """Every pipeline failure the caller can hit while advancing a run maps to
+    502: Core answered, an agent ran, and what it produced (or failed to
+    produce) is not something retrying the *request* fixes — the operator
+    re-runs the stage instead. Kept as one mapping so a new pipeline error
+    type cannot silently fall through as a 500."""
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+async def _advance_artefact(
+    artefact: dict[str, Any], kind: str, gateway: pipeline.AgentGateway, token: str
+) -> dict[str, Any]:
+    """Advance a `pending` artefact if its agent run(s) have produced
+    something, proposing it once they have. Reading is what advances the
+    pipeline (mirrors idea-scout's `get_run`) — there is no background loop
+    anywhere in this plugin."""
+    if kind == "research":
+        pending = json.loads(artefact.get("body") or "{}")
+        research_run_ids = pending.get("research_run_ids") or []
+        result = await pipeline.advance_research(
+            gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
+        )
+    else:
+        result = await pipeline.advance_positioning(gateway, run_id=artefact.get("agent_run_id"))
+
+    if result is None:
+        return artefact  # still in flight; nothing to propose yet
+
+    updated = await _core(
+        "PATCH",
+        f"/artefacts/{artefact['id']}",
+        token,
+        json={
+            "status": "proposed",
+            "body": json.dumps(result.model_dump()),
+            "citations": json.dumps(pipeline.flatten_citations(result)),
+        },
+    )
+    updated.raise_for_status()
+    return updated.json()
+
+
+@router.post("/campaigns/{campaign_id}/research", status_code=status.HTTP_201_CREATED)
+async def start_research_route(
+    campaign_id: str,
+    gateway: pipeline.AgentGateway = Depends(get_agent_gateway),
+    admin: Any = Depends(require_admin),
+) -> dict[str, Any]:
+    """Fan out the two research agents for this campaign on one causation
+    chain, and record the `research` artefact that will hold their
+    reconciled output once the engine's fan-in fires
+    (`scripts/seed_fan_in_workflow.py` — without that seeded once per
+    environment this hangs in `pending` forever, silently)."""
+    campaign_id = _validated_campaign_id(campaign_id)
+
+    campaign = await _core("GET", f"/campaigns/{campaign_id}", admin.token)
+    if campaign.status_code == status.HTTP_404_NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
+    campaign.raise_for_status()
+
+    brief = (campaign.json() or {}).get("brief")
+    if not brief:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="This campaign has no brief, so there is nothing to research.",
+        )
+
+    chain_id, research_run_ids = await pipeline.start_research(
+        gateway, brief={"campaign_id": campaign_id, "brief": brief}
+    )
+
+    created = await _core(
+        "POST",
+        "/artefacts",
+        admin.token,
+        json={
+            "campaign_id": campaign_id,
+            "kind": "research",
+            "status": "pending",
+            "causation_id": chain_id,
+            # research_run_ids travels here only while pending — advance_research
+            # needs them to detect "every research agent failed, so the engine
+            # never fired synthesis" (idea-scout's own reasoning for tracking
+            # them). Overwritten with the real synthesis output once proposed.
+            "body": json.dumps({"research_run_ids": research_run_ids}),
+        },
+    )
+    created.raise_for_status()
+    return created.json()
+
+
+@router.get("/campaigns/{campaign_id}/artefacts/{kind}")
+async def get_artefact_route(
+    campaign_id: str,
+    kind: str,
+    gateway: pipeline.AgentGateway = Depends(get_agent_gateway),
+    admin: Any = Depends(require_admin),
+) -> dict[str, Any]:
+    """This campaign's latest artefact of `kind`, advancing it first if it is
+    still `pending`."""
+    _require_known_kind(kind)
+    campaign_id = _validated_campaign_id(campaign_id)
+
+    artefact = await _latest_artefact(campaign_id, kind, admin.token)
+    if artefact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No {kind} artefact for this campaign yet.",
+        )
+    if artefact.get("status") != "pending":
+        return artefact
+
+    try:
+        return await _advance_artefact(artefact, kind, gateway, admin.token)
+    except pipeline.PipelineError as exc:
+        raise _pipeline_error_to_http(exc) from exc
+
+
+@router.post("/campaigns/{campaign_id}/artefacts/{kind}/approve")
+async def approve_artefact_route(
+    campaign_id: str, kind: str, admin: Any = Depends(require_admin)
+) -> dict[str, Any]:
+    """`proposed` -> `approved`. Only a human calls this route — there is no
+    other caller in this plugin — which is the approval gate itself, not
+    ceremony around it."""
+    _require_known_kind(kind)
+    campaign_id = _validated_campaign_id(campaign_id)
+
+    artefact = await _latest_artefact(campaign_id, kind, admin.token)
+    if artefact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No {kind} artefact for this campaign yet.",
+        )
+    if artefact.get("status") != "proposed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only a 'proposed' artefact can be approved (status: {artefact.get('status')}).",
+        )
+
+    updated = await _core(
+        "PATCH", f"/artefacts/{artefact['id']}", admin.token, json={"status": "approved"}
+    )
+    updated.raise_for_status()
+    return updated.json()
+
+
+@router.post("/campaigns/{campaign_id}/artefacts/{kind}/reject")
+async def reject_artefact_route(
+    campaign_id: str, kind: str, admin: Any = Depends(require_admin)
+) -> dict[str, Any]:
+    """`proposed` -> `rejected`."""
+    _require_known_kind(kind)
+    campaign_id = _validated_campaign_id(campaign_id)
+
+    artefact = await _latest_artefact(campaign_id, kind, admin.token)
+    if artefact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No {kind} artefact for this campaign yet.",
+        )
+    if artefact.get("status") != "proposed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only a 'proposed' artefact can be rejected (status: {artefact.get('status')}).",
+        )
+
+    updated = await _core(
+        "PATCH", f"/artefacts/{artefact['id']}", admin.token, json={"status": "rejected"}
+    )
+    updated.raise_for_status()
+    return updated.json()
+
+
+@router.post("/campaigns/{campaign_id}/positioning", status_code=status.HTTP_201_CREATED)
+async def start_positioning_route(
+    campaign_id: str,
+    gateway: pipeline.AgentGateway = Depends(get_agent_gateway),
+    admin: Any = Depends(require_admin),
+) -> dict[str, Any]:
+    """Start the single positioning agent, requiring an **approved** research
+    artefact. The gate enforcement itself: `proposed` research must not be
+    usable here, or the approval step above is decorative."""
+    campaign_id = _validated_campaign_id(campaign_id)
+
+    research = await _latest_artefact(campaign_id, "research", admin.token)
+    if research is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No research artefact for this campaign yet.",
+        )
+    try:
+        pipeline.require_approved(research.get("status") or "", what="The research artefact")
+    except pipeline.ArtefactNotApprovedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    raw_body = research.get("body")
+    research_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+
+    causation_id, run_id = await pipeline.start_positioning(gateway, research_body=research_body)
+
+    created = await _core(
+        "POST",
+        "/artefacts",
+        admin.token,
+        json={
+            "campaign_id": campaign_id,
+            "kind": "positioning",
+            "status": "pending",
+            "causation_id": causation_id,
+            "agent_run_id": run_id,
+        },
+    )
+    created.raise_for_status()
+    return created.json()
 
 
 def build_app() -> FastAPI:
