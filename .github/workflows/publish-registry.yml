@@ -23,10 +23,17 @@
 # ## It needs a token
 #
 # The registry is a different repo, so the job-scoped GITHUB_TOKEN cannot write
-# to it. Until `REGISTRY_PUBLISH_TOKEN` is set on this repository the job warns
-# and skips — deliberately not a failure, so a missing token never reds an
-# otherwise good merge, but deliberately not silent either, because silence is
-# how the registry went stale in the first place.
+# to it. Until `REGISTRY_PUBLISH_TOKEN` is set on this repository the publish
+# job is **skipped** — deliberately not a failure, so a missing token never
+# reds an otherwise good merge, but deliberately not silent either, because
+# silence is how the registry went stale in the first place: a `::warning`
+# still fires, and the job's own conclusion now reads `skipped` rather than
+# `success`, so a publish that happened and a publish that could not are
+# distinguishable on the PR page, in `branch-health` and in the daily
+# dashboard (biffo-template#1450). A missing token used to read as an
+# ordinary green run — indistinguishable from a real publish everywhere that
+# matters — until the marketing plugin's first merge shipped nothing and
+# nobody could tell without checking the registry by hand.
 #
 # Create a fine-grained PAT with `contents: write` on the registry repo, then:
 #   gh secret set REGISTRY_PUBLISH_TOKEN
@@ -36,6 +43,17 @@
 # `sources.json` from the source manifest, with no credential anywhere. Add your
 # plugin there and the store converges within a week of any version bump. The
 # token only upgrades that from eventually-correct to immediately-correct.
+#
+# ## Why this is two jobs
+#
+# The `secrets` context is not available in a job-level `if:`, so the `publish`
+# job cannot be gated on `REGISTRY_PUBLISH_TOKEN` directly — only a step-level
+# `if:` can read `secrets`. `check-token` is a tiny job that always runs, reads
+# the secret in a step, and exposes a boolean job **output** (`needs`/`vars`/
+# `github` contexts, unlike `secrets`, ARE available at job level). `publish`
+# then gates on `needs.check-token.outputs.present` at the job level. GitHub
+# reports a job whose `if:` evaluates false as `skipped`, not `success` — the
+# whole reason for the split.
 name: Publish to plugin registry
 
 on:
@@ -46,8 +64,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  check-token:
+    name: Check for the registry token
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    outputs:
+      present: ${{ steps.token.outputs.present }}
+    steps:
+      - name: Check for the registry token
+        id: token
+        env:
+          REGISTRY_PUBLISH_TOKEN: ${{ secrets.REGISTRY_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "${REGISTRY_PUBLISH_TOKEN}" ]; then
+            echo "::warning title=Registry not updated::REGISTRY_PUBLISH_TOKEN is not set on this repository, so this plugin's entry in the Biffo plugin registry will NOT be updated (the 'Upsert registry entry' job below is skipped). The portal marketplace will keep showing the previously published version. See this workflow's header comment."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
     name: Upsert registry entry
+    needs: check-token
+    if: needs.check-token.outputs.present == 'true'
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - name: Check out this plugin
@@ -55,20 +93,7 @@ jobs:
         with:
           path: plugin
 
-      - name: Check for the registry token
-        id: token
-        env:
-          REGISTRY_PUBLISH_TOKEN: ${{ secrets.REGISTRY_PUBLISH_TOKEN }}
-        run: |
-          if [ -z "${REGISTRY_PUBLISH_TOKEN}" ]; then
-            echo "::warning title=Registry not updated::REGISTRY_PUBLISH_TOKEN is not set on this repository, so this plugin's entry in the Biffo plugin registry was NOT updated. The portal marketplace will keep showing the previously published version. See this workflow's header comment."
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Check out the registry
-        if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v4
         with:
           repository: keiranholloway/biffo-plugins-registry
@@ -82,13 +107,11 @@ jobs:
       # installs the interpreter itself, which is how this repo's own ci.yml
       # gets 3.13 on the same runners.
       - name: Set up Python
-        if: steps.token.outputs.present == 'true'
         uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.13'
 
       - name: Upsert this plugin's entry
-        if: steps.token.outputs.present == 'true'
         working-directory: registry
         run: |
           set -euo pipefail
@@ -97,7 +120,6 @@ jobs:
             --repo "${{ github.server_url }}/${{ github.repository }}"
 
       - name: Commit and push
-        if: steps.token.outputs.present == 'true'
         working-directory: registry
         run: |
           set -euo pipefail
