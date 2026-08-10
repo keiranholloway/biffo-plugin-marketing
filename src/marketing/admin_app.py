@@ -669,6 +669,14 @@ def build_app() -> FastAPI:
 
     app.include_router(channel_plan_router)
 
+    # Results dashboard (M8, issue #7) — same reasoning as channel_plan_router
+    # above: a lazy, in-function import keeps this file's diff to one include
+    # line while `results_routes` reaches back into this module for
+    # `require_admin`/`_core`.
+    from .results_routes import router as results_router
+
+    app.include_router(results_router)
+
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.
     static = _static_dir()
