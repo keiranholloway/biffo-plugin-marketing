@@ -58,7 +58,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from biffo_plugin_sdk import BiffoAPIError, SignedCoreClient
+from biffo_plugin_sdk import BiffoAPIClient, SignedCoreClient
 
 #: Matches `plugin_host.forward.FORWARDED_USER_HEADER` exactly (biffo-template)
 #: — the header `require_principal_crud_permission` reads a user token from
@@ -76,19 +76,47 @@ async def _raw(
     json: dict[str, Any] | None,
     timeout: float | None,
 ) -> tuple[int, bytes, str]:
-    """The one signed, dual-credential send every helper below builds on."""
-    full_path = f"{path}?{urlencode(params)}" if params else path
+    """The one signed, dual-credential send every helper below builds on.
+
+    Builds and closes its own `SignedCoreClient` per call, deliberately
+    matching the lifecycle discipline of the `httpx.AsyncClient` this
+    replaced in `admin_app._core` (`async with httpx.AsyncClient(...) as
+    client:`) — a `SignedCoreClient` owns exactly such a client
+    (`BiffoAPIClient.__init__` builds one whenever `client=` isn't passed),
+    so skipping the `async with` here would leak one connection pool per
+    call rather than one per request, which is what a caller reading the
+    code this replaced would reasonably expect not to happen.
+    """
+    # `None`-valued entries are dropped, not stringified: `urlencode` alone
+    # would render `{"a": None}` as the literal query text `a=None`, sending
+    # Core a filter that matches the string "None" instead of omitting the
+    # filter — no current caller passes one (verified), but a future
+    # optional filter reaching here should omit cleanly, not silently break.
+    if params:
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        full_path = f"{path}?{urlencode(clean_params)}" if clean_params else path
+    else:
+        full_path = path
     content = _json.dumps(json).encode() if json is not None else None
     kwargs: dict[str, Any] = {"base_url": base_url}
     if timeout is not None:
         kwargs["timeout"] = timeout
+    # Not `async with SignedCoreClient(**kwargs) as client:` — the SDK's
+    # `BiffoAPIClient.__aenter__` is declared `-> BiffoAPIClient`, not
+    # `Self`, so pyright resolves `client`'s type through the base class and
+    # loses `raw_request` (only defined on `SignedCoreClient`). A plain
+    # try/finally closes the same connection pool `__aexit__` would, without
+    # depending on a return-type annotation this module doesn't own.
     client = SignedCoreClient(**kwargs)
-    return await client.raw_request(
-        method,
-        full_path,
-        content=content,
-        extra_signed_headers={FORWARDED_USER_HEADER: token},
-    )
+    try:
+        return await client.raw_request(
+            method,
+            full_path,
+            content=content,
+            extra_signed_headers={FORWARDED_USER_HEADER: token},
+        )
+    finally:
+        await client.aclose()
 
 
 async def request(
@@ -152,7 +180,14 @@ class PrincipalCoreClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> Any:
-        status_code, body, _content_type = await _raw(
+        # Routed through `request()` (this module's own httpx.Response-shaped
+        # wrapper) rather than `_raw` directly, specifically so the
+        # non-2xx-to-BiffoAPIError mapping below can reuse `BiffoAPIClient`'s
+        # OWN static helpers instead of a second, independent copy of them —
+        # an earlier version of this method hand-rolled that mapping and had
+        # already drifted from the SDK's own fallback-detail text on first
+        # write (`f"HTTP {status}"` vs. the SDK's `response.reason_phrase`).
+        response = await request(
             method,
             path,
             self._token,
@@ -161,15 +196,5 @@ class PrincipalCoreClient:
             json=json,
             timeout=self._timeout,
         )
-        parsed: Any = None
-        if body:
-            try:
-                parsed = _json.loads(body)
-            except ValueError:
-                parsed = body.decode(errors="replace")
-        if 200 <= status_code < 300:
-            return parsed
-        detail = parsed.get("detail") if isinstance(parsed, dict) else None
-        if not detail:
-            detail = parsed if isinstance(parsed, str) and parsed else f"HTTP {status_code}"
-        raise BiffoAPIError(status_code, str(detail), parsed)
+        BiffoAPIClient._raise_if_error(response)
+        return BiffoAPIClient._parse_json(response)

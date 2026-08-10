@@ -214,3 +214,28 @@ def test_already_fixed_paths_stay_fixed(filename: str, prefix: str) -> None:
     the AST walk's output alone."""
     source = (_SRC / filename).read_text()
     assert prefix in source, f"{filename} no longer contains the fixed path {prefix!r}"
+
+
+def test_the_internal_prefix_constant_agrees_across_every_copy() -> None:
+    """Guard vs. authority: `_find_violations` above only checks that a path
+    starts with `/api/v1/` — it never checks that the three independent
+    `_INTERNAL_PREFIX` copies this file's own docstring explains
+    (`admin_app.py`, `channel_plan_routes.py`, `image_routes.py`, each
+    forced local because the AST walk resolves a named constant only within
+    the file that defines it) actually agree with each other or with the
+    real mounted path. Verified empirically before this test was written: a
+    single-character typo in one copy (`marketting` for `marketing`) sends
+    every call in that file to an unmounted path while the rest of this
+    suite — including `test_every_core_call_path_is_api_v1_except_the_known_
+    pending_ones` above — stays green, because `/api/v1/internal/plugins/
+    marketting/...` still starts with `/api/v1/`. This is a two-line
+    disagreement check, not a redesign: the guard reads the SHAPE of each
+    path; this reads whether the three sources of that shape's prefix still
+    say the same thing.
+    """
+    from marketing import admin_app, channel_plan_routes, image_routes
+
+    canonical = "/api/v1/internal/plugins/marketing"
+    assert admin_app._INTERNAL_PREFIX == canonical
+    assert channel_plan_routes._INTERNAL_PREFIX == canonical
+    assert image_routes._INTERNAL_PREFIX == canonical

@@ -24,6 +24,17 @@ from . import admin_app, pipeline
 
 router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 
+#: Not `admin_app._INTERNAL_PREFIX` — `tests/test_marketing_core_paths_guard.py`
+#: resolves a module-level string constant only within the SAME file's own
+#: AST, so a cross-module reference would read as unresolvable and be
+#: silently skipped rather than checked. Written out as its own local
+#: constant for the same reason `admin_app._validated_campaign_id` is
+#: duplicated rather than imported (see that function's docstring) — and
+#: `tests/test_marketing_core_paths_guard.py`'s own disagreement test
+#: asserts this copy stays equal to the other two, since the guard itself
+#: only checks "starts with /api/v1/", never "the three copies agree".
+_INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
+
 
 @router.post("/campaigns/{campaign_id}/channel-plan", status_code=status.HTTP_201_CREATED)
 async def start_channel_plan_route(
@@ -57,13 +68,7 @@ async def start_channel_plan_route(
 
     created = await admin_app._core(
         "POST",
-        # Not `admin_app._INTERNAL_PREFIX` — `tests/test_marketing_core_paths_
-        # guard.py` resolves a module-level string constant only within the
-        # SAME file's own AST, so a cross-module reference here would read as
-        # unresolvable and be silently skipped rather than checked. Written
-        # out in full for the same reason `admin_app._validated_campaign_id`
-        # is duplicated rather than imported (see that function's docstring).
-        "/api/v1/internal/plugins/marketing/artefacts",
+        f"{_INTERNAL_PREFIX}/artefacts",
         admin.token,
         json={
             "campaign_id": campaign_id,

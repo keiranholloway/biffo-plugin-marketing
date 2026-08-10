@@ -239,6 +239,14 @@ async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response
     existing call site's `.status_code` / `.raise_for_status()` / `.json()`
     usage — written against a plain `httpx.Response` from before this was
     signed at all — keeps working unchanged.
+
+    `**kw` is narrower than it looks: it forwards to `principal_client.
+    request`, which accepts only `params=`/`json=` (plus `timeout=`, already
+    supplied above). The pre-fix `_core` forwarded `**kw` straight to
+    `httpx.AsyncClient.request`, so `headers=`/`data=`/a per-call `timeout=`
+    were all previously valid; none of that is a call site above needs
+    today, but a future one reaching for it gets a `TypeError`, not a
+    silently-ignored kwarg.
     """
     if not CORE_API_URL:
         raise HTTPException(
