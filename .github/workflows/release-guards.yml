@@ -1,0 +1,75 @@
+name: Release Guards
+
+# The closing-keyword guards, for a satellite repo (biffo-template#1395).
+#
+# ## Why a satellite needs this at all
+#
+# `Closes #N` closes the issue the instant a PR merges — before it is deployed
+# and before anyone has seen it work. And GitHub's linker has no concept of
+# negation, so a body saying *"do not close #N"* closes #N.
+#
+# Both halves have now bitten this estate. The negated form closed
+# tabsii-platform#76, the guard was written, and it closed tabsii-crm#320 a
+# second time — in a satellite, where the guard did not exist. It lived only in
+# `biffo-template` and in instances, because `biffo core upgrade` reaches
+# instances only. Nothing was stale or broken; four repos simply had no route to
+# it.
+#
+# ## What this is NOT
+#
+# The template's own `release-guards.yml` also runs the core-ownership guard,
+# the practices-corpus monotonicity check and a release-subject check. None of
+# those apply here — a satellite has no `core-manifest.json` and no practices
+# corpus — so this is the closing-keyword step alone rather than a copy carrying
+# three steps that would fail or no-op.
+#
+# ## `edited` is load-bearing
+#
+# Both of this guard's documented remedies are body edits: swap `Closes` for
+# `Refs`, or add a `Verified-on-deploy:` line. Without `edited` in the trigger,
+# neither can turn the check green on its own and the PR sits on a red required
+# check with no path forward (biffo-template#1319).
+
+on:
+  pull_request:
+    branches: [main, dev, staging]
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  release-guards:
+    name: Release Guards
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # A self-hosted spot runner reclaimed mid-job hangs rather than fails, and
+    # without a timeout it burns the 360-minute default before anyone is told.
+    timeout-minutes: 20
+    # `pull-requests: read` is what lets the script read the PR's CURRENT body
+    # via `gh pr view` rather than the frozen `pull_request` event payload. That
+    # frozen value is why both remedies above used to be unable to turn the
+    # check green (biffo-template#1174). Declared explicitly rather than relying
+    # on default token permissions, which are not guaranteed to include it.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Bare node: the script has no dependencies, so this needs no install and
+      # cannot be broken by one failing.
+      - name: Closing keywords
+        run: node scripts/check-closing-keywords.mjs
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO: ${{ github.repository }}

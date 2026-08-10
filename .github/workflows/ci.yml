@@ -1,0 +1,221 @@
+name: CI
+
+# Scaled down from biffo-template's own root .github/workflows/ci.yml for a
+# single Python package: a plugin repo (per ADR-0003) extends the SDK and
+# has no JS/TS of its own.
+#
+# It DOES have Terraform. This comment used to claim the opposite — "no
+# Terraform of its own; Terraform, if a plugin ships any, is provisioned by the
+# consuming project's infra, not this repo's CI" — while the skeleton beside it
+# shipped a whole `terraform/` module, and that untrue sentence is exactly why
+# nothing checked it (#1244). What the consuming project provisions is the
+# module's *instantiation*; the module's own source lives here, is edited here,
+# and is only ever checked here. See the `terraform` job below.
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # A self-hosted spot runner that is reclaimed mid-job leaves the job hanging
+    # rather than failing: on 2026-07-30 five jobs across two PRs died with
+    # "The runner has received a shutdown signal", and without a timeout a job
+    # whose runner simply vanishes burns the 360-minute default before anyone
+    # is told. 20m is ~4x the slowest job observed across this repo and
+    # biffo-platform (JS, 5.4m), so a cold cache or a large PR will not trip it.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    name: Type Check
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run pyright
+
+  test:
+    name: Test
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - run: uv run pytest --cov --cov-report=xml
+      - uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: coverage.xml
+
+  validate-manifest:
+    name: Validate biffo.plugin.json
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      # Authoritative check: load_manifest() runs the *real* Pydantic model
+      # (biffo_plugin_sdk.plugin.PluginManifest) that the SDK, the Core API's
+      # discover_plugin_manifests(), and `biffo plugin install` all actually
+      # validate against — same reasoning cli/src/lib/plugin-manifest.ts
+      # documents for why the CLI validates this way rather than against
+      # registry-schema.json directly (see the next step).
+      - name: Validate against the SDK's PluginManifest model (authoritative)
+        run: |
+          uv run python -c "
+          from biffo_plugin_sdk.plugin import load_manifest
+          manifest = load_manifest('biffo.plugin.json')
+          print(f'OK: {manifest.name}@{manifest.version} — '
+                f'{len(manifest.tables)} table(s), {len(manifest.api_routes)} route(s)')
+          "
+      # Advisory check, not a gate: registry-schema.json (vendored from
+      # _skeletons/registry/registry-schema.json in biffo-template) is the
+      # nominal marketplace registry schema, but its api_routes shape
+      # predates issue #19's table/operation CRUD-synthesis redesign — it
+      # still requires a free-form `handler` function-name field, and its
+      # `path` regex rejects the `{id}` path parameter every single-row
+      # route (read/update/delete) is required to have. A manifest that is
+      # valid per the real PluginManifest model above (checked and pinned in
+      # this repo's uv.lock) will therefore *fail* strict validation here —
+      # confirmed directly against this template's own example manifest.
+      # Run non-blocking until the registry schema is corrected upstream;
+      # see README.md's "Manifest validation" section for the full story.
+      - name: Validate against the vendored registry schema (advisory, non-blocking)
+        continue-on-error: true
+        run: |
+          uv run python -m jsonschema -i biffo.plugin.json registry-schema.json
+
+  terraform:
+    name: Terraform (fmt)
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    # This repo's `terraform/` module is checked by nothing else (#1244). The
+    # skeleton shipped the module and no terraform step at all, so every plugin
+    # repo was scaffolded with Terraform that nothing looked at — confirmed live
+    # in biffo-plugin-idea-scout: three .tf files, zero terraform references
+    # across three workflows.
+    #
+    # `scripts/verify.sh` cannot substitute for this job, and deliberately does
+    # not try: its terraform check is guarded by `ci_has "terraform fmt"` so a
+    # template-shipped gate never asserts over more than the repo's own CI does
+    # (the #325 trap). A repo whose CI checks nothing therefore, correctly, gets
+    # nothing locally either. This job is what switches the local gate on.
+    #
+    # ## Why there is no `terraform validate` here
+    #
+    # Not an oversight, and do not "fix" it by adding one. `terraform/main.tf`
+    # sets `source = "../../cloud/aws/compute"`, a path relative to the module's
+    # INSTALL location (`modules/plugins/<name>/` in the consuming monorepo),
+    # not to this repo. `terraform init` in `terraform/` therefore fails with
+    #
+    #   Error: Unreadable module directory
+    #   Unable to evaluate directory symlink: lstat ../../cloud: no such file
+    #
+    # before `validate` is ever reached — verified against this skeleton. The
+    # module is validated where its paths resolve: by the consuming project's
+    # own `infra-validate` job, after `biffo plugin install` has copied it into
+    # place. See `terraform/README.md`, which has said so all along.
+    #
+    # fmt alone is not cosmetic. `terraform fmt -check` parses the HCL, so it
+    # exits 2 on an unparseable file and 3 on a merely unformatted one — the
+    # "a malformed .tf merges green" hole is closed by this step by itself.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: '~> 1.9'
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive terraform/
+
+  security-secrets:
+    name: Secret Scan
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+      # gitleaks/gitleaks-action@v2 cannot pass here, for two independent
+      # reasons, and a generated plugin repo would be born permanently red:
+      #
+      #   1. On self-hosted runners the scan succeeds and the action then dies
+      #      uploading its SARIF — it assumes a GitHub-hosted $HOME layout, and
+      #      on the AWS fleet the workspace is not under $HOME.
+      #   2. It requires a paid GITLEAKS_LICENSE for organization-owned repos
+      #      (confirmed on tabsii-com/tabsii-platform and tabsii-com/tabsii-crm).
+      #
+      # Install the free, open-source CLI instead — the same approach this
+      # template's own root ci.yml uses. Keep the two in step (issue #649).
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+      # --log-opts is load-bearing (issue #258). gitleaks defaults to `--all`,
+      # so with fetch-depth: 0 the scan reaches commits that exist only on
+      # unmerged branches — one bad commit on anyone's open branch then reddens
+      # every open PR, with nothing in the built ref responsible for it.
+      # Scoping to HEAD does not weaken detection: the full reachable history is
+      # still walked, so a secret committed then removed is still caught.
+      - name: gitleaks git history scan
+        run: gitleaks detect --redact -v --exit-code=2 --log-opts="--full-history HEAD"
+      # Second pass over the working tree. A generated repo's initial commit
+      # contains every skeleton file, so a secret in an unchanged file would
+      # pass the history scan and fail here. Running both closes the gap.
+      - name: gitleaks filesystem scan
+        run: gitleaks detect --no-git --redact -v --exit-code=2
+
+  security-deps:
+    name: Dependency Audit
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      # Fails on a real advisory, but treats an unreachable PyPI/OSV as
+      # INCONCLUSIVE rather than reddening a required check for an
+      # infrastructure hiccup (#591, #743). The raw `uv run pip-audit` this
+      # replaces exits non-zero identically whether it found a vulnerability or
+      # simply could not reach the advisory database.
+      #
+      # The script is byte-identical to biffo-template's copy and to every other
+      # satellite's, distributed by that repo's shared-sync.sh. Do not edit it
+      # here; edit it upstream.
+      - name: Dependency audit
+        run: sh scripts/py-dependency-audit.sh

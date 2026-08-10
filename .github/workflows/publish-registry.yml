@@ -1,0 +1,116 @@
+# Publishes this plugin's entry to the Biffo plugin registry.
+#
+# Without this, a plugin is invisible. The portal's plugin store reads a static
+# `plugins.json` from the public `keiranholloway/biffo-plugins-registry` repo,
+# and adding an entry used to be a manual step that nothing performed — so the
+# registry sat empty from the day it was created while real plugins ran in
+# production, and every instance's store read "No plugins available yet".
+# Nobody had forgotten a step; there was no step. This is the step.
+#
+# It runs when `biffo.plugin.json` changes on `dev`, and republishes the entry
+# from that manifest via `scripts/upsert_plugin.py` in the registry repo.
+#
+# ## What it does and does not overwrite
+#
+# `description`, `tags` and `ui_components` in the registry are **marketplace
+# copy** — written to sell the plugin to a human browsing the store, which is a
+# different job from this manifest's `description`, written for engineers. The
+# registry preserves those three once set, seeding them from the manifest only
+# on a plugin's first publish. `version`, `repo`, `required_core_version` and
+# `api_routes` track this manifest on every run. `status` is an operator
+# decision and is never changed by a publish.
+#
+# ## It needs a token
+#
+# The registry is a different repo, so the job-scoped GITHUB_TOKEN cannot write
+# to it. Until `REGISTRY_PUBLISH_TOKEN` is set on this repository the job warns
+# and skips — deliberately not a failure, so a missing token never reds an
+# otherwise good merge, but deliberately not silent either, because silence is
+# how the registry went stale in the first place.
+#
+# Create a fine-grained PAT with `contents: write` on the registry repo, then:
+#   gh secret set REGISTRY_PUBLISH_TOKEN
+#
+# If your plugin's repo is **public**, you may not need this at all: the
+# registry also runs a pull-based sync that re-derives every entry listed in its
+# `sources.json` from the source manifest, with no credential anywhere. Add your
+# plugin there and the store converges within a week of any version bump. The
+# token only upgrades that from eventually-correct to immediately-correct.
+name: Publish to plugin registry
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - biffo.plugin.json
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Upsert registry entry
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - name: Check out this plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Check for the registry token
+        id: token
+        env:
+          REGISTRY_PUBLISH_TOKEN: ${{ secrets.REGISTRY_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "${REGISTRY_PUBLISH_TOKEN}" ]; then
+            echo "::warning title=Registry not updated::REGISTRY_PUBLISH_TOKEN is not set on this repository, so this plugin's entry in the Biffo plugin registry was NOT updated. The portal marketplace will keep showing the previously published version. See this workflow's header comment."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the registry
+        if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: keiranholloway/biffo-plugins-registry
+          token: ${{ secrets.REGISTRY_PUBLISH_TOKEN }}
+          path: registry
+
+      # astral-sh/setup-uv, NOT actions/setup-python. The latter fetches a
+      # prebuilt interpreter from actions/python-versions, which has no build
+      # matching the self-hosted runner fleet's OS — every run failed with
+      # "The version '3.13' ... was not found for this operating system". uv
+      # installs the interpreter itself, which is how this repo's own ci.yml
+      # gets 3.13 on the same runners.
+      - name: Set up Python
+        if: steps.token.outputs.present == 'true'
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+
+      - name: Upsert this plugin's entry
+        if: steps.token.outputs.present == 'true'
+        working-directory: registry
+        run: |
+          set -euo pipefail
+          uv run --with jsonschema python3 scripts/upsert_plugin.py \
+            --manifest "../plugin/biffo.plugin.json" \
+            --repo "${{ github.server_url }}/${{ github.repository }}"
+
+      - name: Commit and push
+        if: steps.token.outputs.present == 'true'
+        working-directory: registry
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- plugins.json; then
+            echo "Registry entry already current — nothing to publish."
+            exit 0
+          fi
+          version="$(uv run python3 -c "import json;print(json.load(open('../plugin/biffo.plugin.json'))['version'])")"
+          name="$(uv run python3 -c "import json;print(json.load(open('../plugin/biffo.plugin.json'))['name'])")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins.json
+          git commit -m "feat(registry): publish ${name}@${version}"
+          # Another plugin may have published between checkout and now.
+          git pull --rebase origin main
+          git push origin HEAD:main

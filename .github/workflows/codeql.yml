@@ -1,0 +1,65 @@
+name: 'CodeQL'
+
+on:
+  push:
+    branches: [dev, staging, main]
+  pull_request:
+    branches: [dev, staging, main]
+  schedule:
+    # Weekly catch-up scan (Tuesday 05:17 UTC) for issues that land outside
+    # PR review (e.g. direct merges onto a branch).
+    - cron: '17 5 * * 2'
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    # CodeQL code scanning requires GitHub Advanced Security (GHAS) on private
+    # repos — the analysis runs but the SARIF upload fails without it. So this
+    # is opt-in: enable GHAS on the repo, then set the repo variable
+    # ENABLE_CODE_SCANNING=true. Left dormant (not failing) otherwise.
+    # See biffo-template's codeql.yml for the full reasoning (#1214): a public
+    # repo can scan for free, so it does; a private one still needs the opt-in.
+    # Both existing plugin repos are public, so this scans them for nothing —
+    # which is exactly why their never having been scanned was worth fixing
+    # (#1224).
+    if: github.event.repository.private == false || vars.ENABLE_CODE_SCANNING == 'true'
+    timeout-minutes: 15
+    permissions:
+      # Required for CodeQL to upload SARIF results.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      # autobuild intentionally omitted (build-mode 'none'):
+      # - the plugin's Python (src/, tests/) has no build step CodeQL needs.
+      # - javascript-typescript is declared even though a fresh plugin ships no
+      #   web/ directory: the skeleton itself carries scripts/*.mjs, and every
+      #   real plugin grows web/ and web-admin/ (both existing ones have them).
+      #   Declaring it only once a plugin gains a frontend would mean the scan
+      #   silently covers less than it appears to — the shape #1270 records for
+      #   the dependency audits.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:${{ matrix.language }}'

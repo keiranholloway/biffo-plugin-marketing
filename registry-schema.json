@@ -1,0 +1,317 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Biffo Plugin Manifest",
+  "description": "Schema for biffo.plugin.json — declares what a plugin provides and needs.",
+  "type": "object",
+  "required": ["name", "version", "tables", "api_routes", "ui_components"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Unique plugin slug (lowercase, kebab-case)."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semver version of this plugin release."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "Human-readable summary shown in the marketplace."
+    },
+    "author": {
+      "type": "string",
+      "default": "Biffo Team",
+      "description": "Publisher name."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Categorisation tags for filtering/search."
+    },
+    "required_core_version": {
+      "type": "string",
+      "default": ">=0.0.0",
+      "description": "Minimum Biffo core version (npm-style range)."
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "description": "PostgreSQL table name (snake_case)."
+          },
+          "columns": {
+            "type": "array",
+            "description": "Additional columns beyond id/tenant_id/created_at/updated_at, which are auto-injected on every table per ADR-0001 and must NOT be declared here — doing so fails validation (ColumnDefinition/PluginTableDefinition in services/api/src/api/models/plugin_table.py).",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "not": { "enum": ["id", "tenant_id", "created_at", "updated_at"] },
+                  "description": "Column name. The names id, tenant_id, created_at, and updated_at are reserved (auto-injected) and rejected here."
+                },
+                "type": {
+                  "type": "string",
+                  "pattern": "^(String|Integer|Text|Boolean|Float|DateTime)(\\(.*\\))?$",
+                  "description": "SQLAlchemy column type constructor string, e.g. 'String(255)', 'Integer', or 'DateTime(timezone=True)'. Must be one of the base types plugin_table.py's _TYPE_MAP resolves (String, Integer, Text, Boolean, Float, DateTime) — anything else silently falls back to String, so this schema rejects it up front rather than allowing a PostgreSQL-style type name (e.g. UUID, TIMESTAMP) that looks valid but isn't."
+                },
+                "primary_key": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether this is the primary key."
+                },
+                "nullable": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether NULL values are allowed. Defaults to false (NOT NULL)."
+                },
+                "index": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Create a database index on this column."
+                },
+                "default": { "type": "string", "description": "SQL default value expression." },
+                "description": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Human-readable column description."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "indexes": {
+            "type": "array",
+            "description": "Explicit (optionally multi-column or unique) indexes on the table, beyond any single-column indexes already requested via a column's index: true.",
+            "items": {
+              "type": "object",
+              "required": ["name", "columns"],
+              "properties": {
+                "name": { "type": "string", "description": "Index name in the database." },
+                "columns": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "minItems": 1,
+                  "description": "Column names included in the index."
+                },
+                "unique": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether the index enforces uniqueness."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "permissions": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Declarative per-operation generic-CRUD permissions (ADR-0004; TablePermissions in services/api/src/api/models/plugin_table.py). Default-deny: an absent permissions block, an absent operation key, or an operation with allowed:false ALL make the table invisible to the generic CRUD layer for that operation. required_role is an any-of allow-list matched against the caller's roles (cognito:groups); an empty list means any authenticated caller. Tenant scoping (ADR-0001) is always applied and is deliberately not configurable here. Only the five operation keys below are permitted.",
+            "properties": {
+              "list": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "allowed": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether the generic CRUD layer exposes this operation at all."
+                  },
+                  "required_role": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Any-of role allow-list; empty means any authenticated caller."
+                  }
+                }
+              },
+              "read": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "allowed": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether the generic CRUD layer exposes this operation at all."
+                  },
+                  "required_role": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Any-of role allow-list; empty means any authenticated caller."
+                  }
+                }
+              },
+              "create": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "allowed": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether the generic CRUD layer exposes this operation at all."
+                  },
+                  "required_role": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Any-of role allow-list; empty means any authenticated caller."
+                  }
+                }
+              },
+              "update": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "allowed": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether the generic CRUD layer exposes this operation at all."
+                  },
+                  "required_role": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Any-of role allow-list; empty means any authenticated caller."
+                  }
+                }
+              },
+              "delete": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "allowed": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether the generic CRUD layer exposes this operation at all."
+                  },
+                  "required_role": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Any-of role allow-list; empty means any authenticated caller."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Database tables the plugin creates via Alembic migrations."
+    },
+    "api_routes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["method", "path", "table", "operation"],
+        "properties": {
+          "method": {
+            "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            "description": "HTTP method. Must be compatible with `operation` (list/read=GET, create=POST, update=PUT/PATCH, delete=DELETE) — see plugin_route.py's _OPERATION_METHODS."
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/[a-zA-Z0-9/_{}-]+$",
+            "description": "Path relative to the plugin's mount point (/api/v1/plugins/<name>), e.g. '/widgets' or '/widgets/{id}'. Must start with '/'. Single-row operations (read/update/delete) address a row via an '{id}' path parameter; collection operations (list/create) must not."
+          },
+          "table": {
+            "type": "string",
+            "description": "Name of a table declared in this manifest's `tables` that this route exposes. A route cannot reference another plugin's table (RouteDefinition / parse_plugin_routes_from_manifest in services/api/src/api/models/plugin_route.py)."
+          },
+          "operation": {
+            "enum": ["list", "read", "create", "update", "delete"],
+            "description": "Generic CRUD operation the Core API synthesizes for this route against `table`, scoped to the caller's tenant_id (ADR-0001). A plugin manifest cannot ship executable handler code the Core API imports and runs (ADR-0002); routes are declarative (issue #19)."
+          },
+          "description": { "type": "string" }
+        }
+      },
+      "description": "Declarative generic-CRUD routes the Core API synthesizes against this plugin's own tables (issue #19 / ADR-0002), mounted under /api/v1/plugins/<name>."
+    },
+    "event_subscriptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["detail_type"],
+        "properties": {
+          "source": { "type": "string", "default": "biffo.core" },
+          "detail_type": { "type": "string" },
+          "handler": { "type": "string" }
+        }
+      },
+      "description": "EventBridge events the plugin subscribes to."
+    },
+    "infra_modules": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "compute",
+          "storage",
+          "events",
+          "cdn",
+          "database",
+          "auth",
+          "networking",
+          "oidc",
+          "api-gateway"
+        ]
+      },
+      "description": "Terraform module categories the plugin provisions."
+    },
+    "ui_components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "label", "path"],
+        "properties": {
+          "type": {
+            "enum": ["nav-link", "page", "dashboard-widget", "modal", "dialog"],
+            "description": "UI component type."
+          },
+          "label": { "type": "string" },
+          "path": { "type": "string" },
+          "icon": { "type": "string" },
+          "requires_auth": { "type": "boolean", "default": true }
+        }
+      },
+      "description": "Portal UI elements the plugin adds."
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "description"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Registered tool name, matching the runtime's in-code tool registry key (ADR-0014 §7)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable summary shown in the workflow builder's tool picker."
+          },
+          "parameters": {
+            "type": "object",
+            "description": "JSON Schema for the tool's arguments, as sent to the model provider."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Tools this plugin's agent runtime exposes to agentic workers — pure declaration (name/description/parameters), mirroring the runtime's in-code registry minus the executor and availability predicate. Core surfaces these in the orchestration catalog; the registry stays the ceiling (ADR-0014 §7)."
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Python package dependencies (including biffo-plugin-sdk)."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,65 @@
+#!/usr/bin/env sh
+# Per-file, auto-fixing, sub-second. See docs/practices/standards/local-gates.md
+#
+# Defensive by design: these three hooks are dropped verbatim into every repo in
+# the estate, and they differ in what they have. A hook that fails because the
+# repo has no lint-staged config would block all work there, which is how a
+# safety measure gets ripped out. Absent tooling is reported, never fatal;
+# tooling that IS present and fails is fatal.
+root=$(git rev-parse --show-toplevel) || exit 0
+cd "$root" || exit 0
+
+# The two abstention messages below are deliberately phrased as abstentions
+# rather than as status (#1193). The previous wording -- "nothing staged-file-
+# level to run", "skipping" -- read like the hook working, which is why 13 of 17
+# repos ran a formatting gate that formats nothing without anyone noticing.
+#
+# Unlike commit-msg, which now has a built-in fallback because Conventional
+# Commits is a RULE that can be checked with nothing but `sh`, this hook runs a
+# TOOLCHAIN. There is genuinely nothing to resolve and nothing to fall back to
+# where it is absent, and making it fatal would block all work in those repos,
+# which is how a safety measure gets ripped out.
+#
+# So it still exits 0. It just no longer implies it checked anything, and it
+# says what would make it real.
+#
+# ## The abstention is not the end state, and the count is moving
+#
+# An earlier version of this comment recorded "Checked 2026-08-03: no satellite
+# carries `lint-staged` anywhere". That is no longer true, and leaving it would
+# have made a fixable gap read as a permanent fact about satellites -- the
+# abstention would look like the design rather than a backlog.
+#
+# Re-measured 2026-08-06 across the nine tabsii satellites:
+#
+#   - `tabsii-crm` DOES carry it, and its gate is real.
+#   - `tabsii-ui` gained it the same day (tabsii-ui#24), which also showed the
+#     abstention is cheap to clear: add prettier + lint-staged and a config.
+#   - Seven others still abstain. THREE of those have no root `package.json` at
+#     all, so they hit the FIRST branch below, and no config file can fix them --
+#     they need a root manifest before they need a lint-staged entry.
+#
+# The deeper reason it keeps happening: **`.prettierrc` is not in
+# `shared-files.json`**, so nothing ever carries the estate's formatting rules
+# to a satellite. Each one is left to invent them or have none, and a satellite
+# that adopts prettier with DEFAULTS drifts away from the estate's style rather
+# than towards it -- measured in tabsii-ui, where prettier's defaults reformatted
+# all 7 source files and the template's settings reformatted 3.
+#
+# Do not re-freeze a measured count into this comment without a date and a way
+# to re-derive it. The number is a snapshot of a backlog, not a property of
+# satellites.
+if [ ! -f package.json ]; then
+  echo "pre-commit: ABSTAINED — no root package.json, so lint-staged cannot run here." >&2
+  echo "  Staged files were NOT linted or formatted. CI still checks them." >&2
+  echo "  To make this real: add lint-staged to a root package.json (see local-gates.md)." >&2
+  exit 0
+fi
+if ! node -e "const p=require('./package.json');process.exit(p['lint-staged']||p.config?.['lint-staged']?0:1)" 2>/dev/null \
+  && [ ! -f .lintstagedrc ] && [ ! -f .lintstagedrc.json ] && [ ! -f lint-staged.config.js ]; then
+  echo "pre-commit: ABSTAINED — package.json exists but declares no lint-staged config." >&2
+  echo "  Staged files were NOT linted or formatted. CI still checks them." >&2
+  echo "  To make this real: add a lint-staged config (see local-gates.md)." >&2
+  exit 0
+fi
+exec pnpm exec lint-staged

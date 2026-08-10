@@ -1,0 +1,122 @@
+#!/usr/bin/env sh
+# Conventional Commits, and the core-ownership boundary.
+# See docs/practices/standards/local-gates.md
+root=$(git rev-parse --show-toplevel) || exit 0
+cd "$root" || exit 0
+
+# The authoritative type list is commitlint.config.js's `type-enum` (AGENTS.md
+# §3). Mirrored here for the fallback below, and `cli/src/lib/commit-msg-fallback.test.ts`
+# asserts the two never drift apart -- a second copy of a list is a second copy
+# of a decision, and this one is load-bearing: ADR-0006 derives the release bump
+# from the subject.
+BIFFO_COMMIT_TYPES='feat fix chore docs test infra security refactor perf ci'
+
+# Subjects commitlint ignores by default (`defaultIgnores`): git's own generated
+# merge/revert subjects and the markers rebase writes. The fallback must ignore
+# them too, or it blocks ordinary git operations that commitlint would allow.
+_is_ignored_subject() {
+  case "$1" in
+    "Merge "* | "Revert "* | "Reverts "* | "fixup! "* | "squash! "* | "amend! "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_fallback_explain() {
+  echo "commit-msg: $2" >&2
+  echo "  subject:  $1" >&2
+  echo "  expected: type(scope): summary   e.g. feat(api): add run history endpoint" >&2
+  echo "  types:    $BIFFO_COMMIT_TYPES" >&2
+  echo "  (checked without commitlint -- this repo has no runnable config; see local-gates.md)" >&2
+}
+
+# A dependency-free Conventional Commits check, for repos where commitlint
+# cannot run.
+#
+# ## Why this exists
+#
+# This hook used to print
+#
+#     commit-msg: no commitlint config -- subject not checked
+#
+# and exit 0. That reads like information; it is a gate abstaining. It abstained
+# in 13 of 17 estate repos (#1193): it looked for a root commitlint config, and
+# ran it with `pnpm exec`, which needs a root package.json. Most satellites have
+# neither -- tabsii-crm's frontend is its own pnpm workspace under
+# apps/frontend/, so the repo root holds no package.json at all. AGENTS.md §3
+# was binding everywhere and enforced in three places.
+#
+# Shipping a config would not have fixed it: a config with no resolvable
+# commitlint binary still cannot run. Resolving the toolchain from whichever
+# workspace happens to hold it is fragile across six different layouts. A check
+# needing nothing but `sh` works in all of them and cannot abstain.
+#
+# ## What it deliberately does NOT check
+#
+# Only the load-bearing rules: the `type(scope): subject` shape, the type list,
+# and the 100-character header limit. `subject-case` and the
+# `body-no-ci-skip-token` plugin stay commitlint's job where commitlint runs. A
+# fallback STRICTER than the tool it stands in for would reject commits CI
+# accepts, and a local gate that is wrong gets bypassed on reflex.
+_fallback_check_subject() {
+  _subject=$(sed -n '1p' "$1")
+
+  # Empty or comment-only: git aborts the commit itself, so there is nothing to
+  # judge and refusing here would just produce a confusing second error.
+  case "$_subject" in '' | '#'*) return 0 ;; esac
+
+  _is_ignored_subject "$_subject" && return 0
+
+  # `${#var}` counts characters in POSIX sh. Matches header-max-length.
+  if [ "${#_subject}" -gt 100 ]; then
+    _fallback_explain "$_subject" "subject is ${#_subject} characters, limit is 100"
+    return 1
+  fi
+
+  case "$_subject" in
+    *': '*) ;;
+    *)
+      _fallback_explain "$_subject" 'no ": " separator'
+      return 1
+      ;;
+  esac
+
+  _head=${_subject%%': '*} # everything before the first ": "
+  _summary=${_subject#*': '}
+
+  if [ -z "$_summary" ]; then
+    _fallback_explain "$_subject" 'the summary after ": " is empty'
+    return 1
+  fi
+
+  # Strip an optional "(scope)" and an optional breaking-change "!", in either
+  # order: both `feat!: x` and `feat(api)!: x` are valid Conventional Commits.
+  _type=${_head%%'('*} # drop "(scope)" when present
+  _type=${_type%'!'}   # drop a trailing "!"
+
+  for _known in $BIFFO_COMMIT_TYPES; do
+    if [ "$_type" = "$_known" ]; then
+      return 0
+    fi
+  done
+
+  _fallback_explain "$_subject" "unknown type \"$_type\""
+  return 1
+}
+
+# commitlint where it is configured AND runnable; the built-in check everywhere
+# else. Both conditions matter: a config with no root package.json cannot be run
+# by `pnpm exec` from here, and taking that branch anyway is what produced the
+# silent abstention this replaces.
+if [ -f package.json ] &&
+  { [ -f commitlint.config.js ] || [ -f commitlint.config.mjs ] || [ -f .commitlintrc.json ]; }; then
+  pnpm exec commitlint --edit "$1" || exit 1
+else
+  _fallback_check_subject "$1" || exit 1
+fi
+
+# Refuse commits that edit template-owned paths (#370). Inert in the template
+# and absent in sibling/plugin repos, which own all of their own paths.
+# CI runs the same check, which --no-verify cannot skip.
+if [ -f scripts/biffo.sh ]; then
+  sh scripts/biffo.sh check ownership --staged "$1" || exit 1
+fi

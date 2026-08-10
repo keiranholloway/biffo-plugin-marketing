@@ -1,0 +1,89 @@
+{
+  "name": "marketing",
+  "version": "0.1.0",
+  "description": "Reference example plugin shipped with the plugin repository template — a single table with generic list/create/read/delete routes. Replace this manifest with your own plugin's tables and routes.",
+  "author": "Biffo Team",
+  "tags": ["example"],
+  "required_core_version": ">=0.0.0",
+  "tables": [
+    {
+      "name": "marketing_widgets",
+      "columns": [
+        {
+          "name": "name",
+          "type": "String(100)",
+          "nullable": false,
+          "description": "Widget name."
+        },
+        {
+          "name": "description",
+          "type": "Text",
+          "nullable": true
+        },
+        {
+          "name": "is_active",
+          "type": "Boolean",
+          "nullable": true,
+          "description": "Nullable because declared column defaults are not applied by the generated migration DDL (only the in-process SQLAlchemy model) — see README's 'Known limitations' section. Treat NULL as false; this plugin's own seed always sets it explicitly."
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_marketing_widgets_tenant_name",
+          "columns": ["tenant_id", "name"],
+          "unique": true
+        }
+      ],
+      "permissions": {
+        "list": { "allowed": true },
+        "read": { "allowed": true },
+        "create": { "allowed": true, "required_role": ["marketing.admin"] },
+        "delete": { "allowed": true, "required_role": ["marketing.admin"] }
+      }
+    }
+  ],
+  "api_routes": [
+    {
+      "method": "GET",
+      "path": "/widgets",
+      "table": "marketing_widgets",
+      "operation": "list",
+      "description": "List widgets for the caller's tenant."
+    },
+    {
+      "method": "POST",
+      "path": "/widgets",
+      "table": "marketing_widgets",
+      "operation": "create",
+      "description": "Create a widget."
+    },
+    {
+      "method": "GET",
+      "path": "/widgets/{id}",
+      "table": "marketing_widgets",
+      "operation": "read",
+      "description": "Get a single widget."
+    },
+    {
+      "method": "DELETE",
+      "path": "/widgets/{id}",
+      "table": "marketing_widgets",
+      "operation": "delete",
+      "description": "Delete a widget."
+    }
+  ],
+  "event_subscriptions": [
+    {
+      "source": "biffo.core",
+      "detail_type": "UserCreated",
+      "description": "Example subscription: logs newly created users. Replace with real logic, or remove this block if your plugin doesn't need it."
+    }
+  ],
+  "ui_components": [
+    { "type": "nav-link", "label": "Example Plugin", "path": "/admin/marketing" },
+    { "type": "page", "label": "Widgets", "path": "/admin/marketing/widgets" }
+  ],
+  "dependencies": {
+    "biffo-plugin-sdk": "^1.0"
+  }
+}

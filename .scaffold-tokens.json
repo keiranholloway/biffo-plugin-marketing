@@ -1,0 +1,10 @@
+{
+  "note": "Tokens `biffo plugin create` rewrites when it scaffolds this skeleton (cli/src/lib/plugin-scaffold.ts, `substitutions()`). A skeleton path containing one of these is TEMPLATE PAYLOAD, not a shared file: `src/marketing/main.py` becomes `src/idea_scout/main.py` in a real plugin, so no scaffolded repo can ever hold the skeleton's spelling of it. `shared-sync.sh --skeleton-adoption` reads this to keep those paths out of the adoption gap list, where they read as a 0/N failure to adopt when they are the opposite -- a file that did its job. Deleting them would break `biffo plugin create` outright, since there would be nothing left to rename. This file is a second copy of a decision that lives in code, which this estate only tolerates when a guard catches drift: cli/src/lib/scaffold-tokens-parity.test.ts asserts these and `substitutions()` agree in BOTH directions, so a token added to one and not the other fails CI rather than silently reintroducing a false positive.",
+  "tokens": [
+    "biffo-plugin-marketing",
+    "MarketingPlugin",
+    "marketing_widgets",
+    "marketing",
+    "marketing"
+  ]
+}

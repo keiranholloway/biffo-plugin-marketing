@@ -1,0 +1,169 @@
+#!/usr/bin/env sh
+# Run the checks CI runs, before paying for the round trip that would find them.
+#
+# Over the 30 days to 2026-07-29 the estate had 373 failed CI runs, 211 of 342
+# failing steps locally catchable. scripts/verify.sh documents the breakdown and
+# what it deliberately leaves out.
+#
+# Skip in CI. This is a *local* guard; CI runs each check in its own job with its
+# own reporting. CI jobs that push (notably the core-v* tag workflow) have no
+# `uv` on PATH, so firing here made tag pushes fail with `uv: not found` (code
+# 127) and blocked releases. GitHub Actions and every mainstream CI set $CI.
+# git EXPORTS GIT_DIR (and friends) into every hook. In a worktree that points
+# at `<main>/.git/worktrees/<name>` -- a real directory, where an ordinary
+# checkout has `.git` as a FILE -- and turbo reads it expecting the latter,
+# dying with `I/O error: Is a directory (os error 21)` before a single test
+# runs. Reproduced directly: `GIT_DIR=... pnpm turbo run test` fails, the same
+# command without it passes 3/3.
+#
+# That made the gate unpassable from any worktree, which AGENTS.md section 1
+# mandates as the place all work happens. Unsetting is safe: every git command
+# below discovers the repo from the working directory, which is the worktree
+# root and is what they should be operating on anyway.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+[ -n "${CI:-}" ] && exit 0
+
+# Escape hatch, deliberately explicit rather than a flag on git. `--no-verify`
+# would skip this too, but it also skips every other hook silently; this leaves a
+# decision in the shell history. Its usage rate is an H4 counter-metric.
+if [ -n "${BIFFO_SKIP_VERIFY:-}" ]; then
+  echo "pre-push: verify skipped (BIFFO_SKIP_VERIFY set) — CI will run it anyway." >&2
+  exit 0
+fi
+
+root=$(git rev-parse --show-toplevel) || exit 0
+cd "$root" || exit 0
+
+# git puts the ref list (<local ref> <local sha> <remote ref> <remote sha>, one
+# line per ref) on this process's stdin, ONCE. Two things below need it --
+# rewrite-scope-check and the pg-test block gate -- and a pipe can only be read
+# once, so it is captured to a file here and each consumer is fed from that
+# file instead of the real stdin. Falling back to no capture (each reader gets
+# whatever is left of the real stdin, i.e. nothing for the second one) rather
+# than failing the push if a temp file cannot be created: this hook's job is to
+# run checks, not to invent a new way to block a push that has nothing to do
+# with any of them.
+REFS_FILE=$(mktemp) || REFS_FILE=""
+if [ -n "$REFS_FILE" ]; then
+  cat >"$REFS_FILE"
+  trap 'rm -f "$REFS_FILE"' EXIT HUP INT TERM
+fi
+
+# The rewrite-scope guard runs FIRST.
+#
+# Why it exists: a force-push can quietly add a file to a branch's change set
+# and record a stale copy of somebody else's merged work as your own change.
+# That happened (tabsii-platform#446) and every local gate was green on it.
+# Runs from the version-pinned CLI rather than a per-repo copy (#1109).
+#
+# This used to warn and CONTINUE when the script was absent, which is a
+# fail-open in a gate whose whole job is refusing a push: the one repo missing
+# the file was the one where nothing checked. There is no absent case now --
+# the bridge resolves the script from the package -- and if the bridge itself
+# cannot run, that is a reason to stop, not to wave the push through.
+if [ -n "$REFS_FILE" ]; then
+  sh scripts/biffo.sh rewrite-scope-check <"$REFS_FILE" || exit 1
+else
+  sh scripts/biffo.sh rewrite-scope-check || exit 1
+fi
+
+# --- Claim guard (#1231 instance 2) -------------------------------------------
+#
+# `scripts/claim.sh` (packaged inside `@biffo/cli`, run through the bridge
+# above) has asked the estate's four-signal question about "is this issue
+# taken?" since #1209 -- but nothing ever RAN it. It shipped advisory-only, so
+# the fix for the collisions it exists to catch was itself subject to the same
+# failure: a collision happens precisely when someone does not think to check.
+#
+# `--guard <branch>` is the enforced form. It derives the issue number from the
+# branch name (`<type>/<number>-slug>`) and, when the branch names one, checks
+# for another remote branch or another OPEN PR naming the same issue -- NEVER
+# the `in-progress` label (three of four real collisions were "work exists,
+# label does not") and NEVER identity (a claim on #1109 was recorded as
+# `github-actions[bot]` because of a repo-local `user.email` override). It
+# excludes the branch being pushed and any PR whose head IS that branch, so
+# pushing your own branch a second time cannot block you on your own work.
+#
+# A branch that names no issue returns before any network call -- most
+# branches are fine, and noise kills a gate. Measured on a branch that DOES
+# name one: the added latency is the cost of two `gh` lookups, similar in
+# order of magnitude to `rewrite-scope-check` above.
+#
+# BIFFO_SKIP_CLAIM_GUARD -- narrow, claim-only escape hatch (#1327). Before
+# this, the only documented way past a false positive here was
+# BIFFO_SKIP_VERIFY at the top of this file, which does not target the claim
+# guard: it skips the WHOLE gate -- ruff, pyright, bandit, gitleaks,
+# rewrite-scope, this guard, everything. An agent reading "skip the claim
+# guard" reasonably reaches for the only hatch documented and gets "skip
+# everything" instead; one did, in the session #1327 was filed from. This
+# variable bypasses exactly the `claim --guard` call below and nothing else --
+# rewrite-scope-check, the pg-test block gate and `verify` all still run.
+branch=$(git symbolic-ref --quiet --short HEAD) || branch=""
+
+if [ -n "${BIFFO_SKIP_CLAIM_GUARD:-}" ]; then
+  echo "pre-push: claim guard skipped (BIFFO_SKIP_CLAIM_GUARD set) -- the rest of the gate still runs." >&2
+elif [ -n "$branch" ]; then
+  sh scripts/biffo.sh claim --guard "$branch"
+  claim_status=$?
+
+  if [ "$claim_status" -eq 1 ]; then
+    exit 1
+  fi
+
+  # $claim_status -eq 2 is "cannot tell" -- no network, gh unauthenticated, an
+  # API error -- and claim.sh has already printed a warning. Deliberately NOT
+  # blocked here: unlike every other gate in this file, this is a COORDINATION
+  # gate, not a correctness one. A false block costs the ability to push at
+  # all; a miss costs a recoverable collision caught early (every collision in
+  # #1209's own incident was caught before duplicate work merged). Set
+  # BIFFO_CLAIM_STRICT=1 to make claim.sh itself collapse cannot-tell into
+  # exit 1 instead, if you would rather block than guess.
+fi
+
+# --- pg-test block gate (#656) -------------------------------------------
+#
+# verify.sh already reports `pg-test` as `APPLICABLE BUT NOT RUN` when the repo
+# has Postgres-dependent tests and no DSN reached it, and tries to provision one
+# itself via `scripts/biffo.sh pg-test-db` before giving up. That is honest and
+# often self-healing -- but it surfaced on a push that was ENTIRELY RLS policy
+# DDL, where the lane still did not run and the push still went through amber.
+# A wall of green `OK` lines does not make a person weight one amber line
+# correctly at 5pm, and CI treats this lane as required, so a local pass that
+# quietly skipped it is not the thing it looks like.
+#
+# So: if this push touches `db/imports/**` or a `*_pg.py` module -- the
+# convention `scripts/pg-test-db.sh` and verify.sh's own module discovery both
+# use -- and verify.sh still cannot run the lane, block rather than warn.
+# `BIFFO_PGTEST_DIFF_RELEVANT=1` is how that intent reaches verify.sh; it makes
+# no decision itself, `scripts/pgtest-diff-check.sh` (through the same bridge
+# as rewrite-scope-check) does, from the same ref list captured above.
+#
+# Deliberately narrow: an ordinary frontend push touches none of those paths,
+# so `pgtest-diff-check` exits 1 and nothing here changes. A repo whose
+# integration branch cannot be resolved, or that got no ref list at all, exits
+# 2 -- "could not tell" -- and this does NOT block on that, the same posture
+# `rewrite-scope-check` and `claim.sh --guard` take on their own blind spots: a
+# coordination-shaped check that fails closed on not knowing teaches people to
+# route around it, which is the opposite of what a gate is for.
+#
+# `BIFFO_SKIP_PGTEST=1`, checked here rather than only inside verify.sh, is the
+# deliberate escape hatch AGENTS.md section 7 requires for loosening a gate --
+# in the open, not by reaching for `--no-verify` and skipping every other check
+# too.
+if [ -z "${BIFFO_SKIP_PGTEST:-}" ] && [ -n "$REFS_FILE" ]; then
+  if sh scripts/biffo.sh pgtest-diff-check <"$REFS_FILE"; then
+    export BIFFO_PGTEST_DIFF_RELEVANT=1
+  fi
+fi
+
+# Through the version-pinned CLI since #1109, so a repo cannot run a gate two
+# versions old -- eight of them did, and tabsii-crm checked ONE thing in eight
+# on a 700-line change and printed `verify passed` (#855). There is one copy of
+# verify.sh now, and which version a repo runs is its .biffo-shared-version.
+#
+# The branch this replaces printed "NO checks ran" and **exited 0**: a repo
+# without the file passed its pre-push having checked nothing, which is the
+# same defect one level up from the one #855 recorded. A gate that cannot run
+# is not a gate that passed.
+exec sh scripts/biffo.sh verify
