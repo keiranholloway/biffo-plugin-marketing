@@ -66,6 +66,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      # video_assembly.py's determinism tests (tests/test_marketing_video_assembly.py)
+      # skip — not fail — when no `ffmpeg` binary is on PATH, so a runner
+      # image without one would make this job report green having actually
+      # run zero of them. ubuntu-latest ships ffmpeg preinstalled, so this is
+      # a no-op there; it only does real work the day RUNNER_LABEL routes this
+      # repo to a self-hosted image that doesn't (see AGENTS.md #9 — that
+      # switch happens outside this repo's control).
+      - run: command -v ffmpeg >/dev/null || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       - run: uv sync --all-groups
       - run: uv run pytest --cov --cov-report=xml
       - uses: codecov/codecov-action@v5

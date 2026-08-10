@@ -464,13 +464,8 @@
   "ui_components": [
     {
       "type": "nav-link",
-      "label": "Example Plugin",
+      "label": "Marketing",
       "path": "/admin/marketing"
-    },
-    {
-      "type": "page",
-      "label": "Widgets",
-      "path": "/admin/marketing/widgets"
     }
   ],
   "dependencies": {
