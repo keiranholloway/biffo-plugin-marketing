@@ -12,7 +12,7 @@ converted at every boundary for no gain.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -89,6 +89,7 @@ RESEARCH_AUDIENCE_AGENT_NAME = "marketing-research-audience"
 RESEARCH_COMPETITIVE_AGENT_NAME = "marketing-research-competitive"
 RESEARCH_SYNTHESIS_AGENT_NAME = "marketing-research-synthesis"
 POSITIONING_AGENT_NAME = "marketing-positioning"
+CHANNEL_PLAN_AGENT_NAME = "marketing-channel-plan"
 
 #: The two research angles, in fan-out order. A tuple, like idea-scout's
 #: ``RESEARCH_AGENT_NAMES``, so the pipeline fans out over exactly these and
@@ -103,6 +104,7 @@ RESEARCH_AGENT_NAMES: tuple[str, ...] = (
 FINDINGS_TOOL_NAME = "submit_research_findings"
 RESEARCH_SYNTHESIS_TOOL_NAME = "submit_research_synthesis"
 POSITIONING_TOOL_NAME = "submit_positioning"
+CHANNEL_PLAN_TOOL_NAME = "submit_channel_plan"
 
 
 # ── Structured artefacts ─────────────────────────────────────────────────────
@@ -185,6 +187,40 @@ class Positioning(BaseModel):
     segments: list[Segment] = Field(default_factory=list)
     pillars: list[MessagePillar] = Field(default_factory=list)
     ctas: list[CallToAction] = Field(default_factory=list)
+
+
+class ChannelRecommendation(BaseModel):
+    """One recommended channel, organic or paid, grounded in the approved
+    positioning. Same citation discipline as `Segment`/`MessagePillar`/
+    `CallToAction`: `sources` has no default and a minimum length of one, so
+    a recommendation with no evidence cannot be built."""
+
+    channel: str = Field(
+        description="The channel, named specifically (e.g. 'Instagram Reels', 'Google Search ads')."
+    )
+    motion: Literal["organic", "paid"] = Field(
+        description="Whether this is an organic or a paid channel."
+    )
+    rank: int = Field(ge=1, description="This channel's priority within its motion — 1 is highest.")
+    rationale: str = Field(
+        description=(
+            "Why this channel fits, grounded in the positioning's segments, pillars or "
+            "CTAs — not generic channel wisdom."
+        )
+    )
+    sources: list[Source] = Field(
+        min_length=1, description="Positioning sources supporting this recommendation."
+    )
+
+
+class ChannelPlan(BaseModel):
+    """The channel-plan agent's full output — the reviewable artefact behind
+    the third approval gate (M4). Organic and paid recommendations share one
+    list, distinguished by `ChannelRecommendation.motion`, rather than two
+    separate lists: ranking is only meaningful within a motion, and a single
+    list keeps that scoped to the field the rank is relative to."""
+
+    channels: list[ChannelRecommendation] = Field(default_factory=list)
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -298,6 +334,41 @@ Return your answer by calling the `{POSITIONING_TOOL_NAME}` tool exactly
 once. Do not answer in prose.
 """
 
+CHANNEL_PLAN_INSTRUCTIONS = f"""\
+You are the campaign studio's channel strategist. You are given one
+**approved** positioning artefact — audience segments, message pillars and
+calls to action, each carrying the sources that support it. Nothing else. You
+do not have web access and must not claim to.
+
+Recommend channels for this campaign, covering BOTH motions:
+1. **Organic** channels — where this audience already spends attention,
+   reachable without paid distribution.
+2. **Paid** channels — where paid distribution would reach this audience
+   fastest or most precisely.
+
+Rank the channels within each motion (1 = highest priority) and give each a
+rationale an operator can disagree with: name exactly which segment, pillar or
+CTA the recommendation follows from. A channel recommendation with no evidence
+behind it is the most confident-sounding fabrication in this pipeline —
+"run paid social" or "post on LinkedIn" reads as correct whether or not
+anyone researched it, so generic channel wisdom is not an acceptable
+rationale.
+
+Every recommendation must carry `sources`: copy the relevant `Source` objects
+(url and note) from the positioning you were given — verbatim, not reworded.
+Never invent a source, and never recommend a channel that cites nothing: if
+the positioning does not support recommending a channel, do not recommend it.
+
+If the positioning is too thin to support any recommendation in a motion,
+return fewer channels (or none) for that motion rather than inventing content
+to fill it — a channel plan that recommends nothing beats one that recommends
+plausibly.
+
+{_UNTRUSTED_INPUT_RULE}
+Return your answer by calling the `{CHANNEL_PLAN_TOOL_NAME}` tool exactly
+once. Do not answer in prose.
+"""
+
 #: Keyed by research agent name, in ``RESEARCH_AGENT_NAMES`` order — the
 #: pipeline looks each one up rather than duplicating the pairing.
 RESEARCH_INSTRUCTIONS: dict[str, str] = {
@@ -313,19 +384,21 @@ RESEARCH_INSTRUCTIONS: dict[str, str] = {
 #: docstring for why (an unlisted alias is accepted today but is undocumented
 #: behaviour, not a documented guarantee).
 DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
-#: Neither synthesis nor positioning searches — both reason over what they are
-#: given — so neither needs `:online`.
+#: Neither synthesis, positioning nor channel planning searches — all three
+#: reason over what they are given — so none of them needs `:online`.
 DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-4.8"
 DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-4.8"
+DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-4.8"
 
 # Matches idea-scout's research budget: enough turns to search several times
 # and still answer. Every turn has an invoice attached and this plugin fans out
 # two of these per research run, so raising it is a cost decision.
 RESEARCH_MAX_TURNS = 8
-# Neither synthesis nor positioning searches; one turn to answer, plus headroom
-# for a retried tool call.
+# Neither synthesis, positioning nor channel planning searches; one turn to
+# answer, plus headroom for a retried tool call.
 SYNTHESIS_MAX_TURNS = 3
 POSITIONING_MAX_TURNS = 3
+CHANNEL_PLAN_MAX_TURNS = 3
 
 
 def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
@@ -367,6 +440,17 @@ def positioning_definition(*, model: str, instructions: str) -> dict[str, Any]:
     }
 
 
+def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
+    """The channel-plan agent's run definition — no tools; it reasons over
+    the approved positioning artefact it is given in ``input_payload``."""
+    return {
+        "instructions": instructions,
+        "model": model,
+        "tools": [],
+        "max_turns": CHANNEL_PLAN_MAX_TURNS,
+    }
+
+
 def findings_tool_schema() -> dict[str, Any]:
     """The output tool a research agent calls to return its findings."""
     return {
@@ -401,5 +485,18 @@ def positioning_tool_schema() -> dict[str, Any]:
             "name": POSITIONING_TOOL_NAME,
             "description": "Submit the audience segments, message pillars and CTAs.",
             "parameters": Positioning.model_json_schema(),
+        },
+    }
+
+
+def channel_plan_tool_schema() -> dict[str, Any]:
+    """The output tool the channel-plan agent calls to return its ranked
+    organic and paid channel recommendations."""
+    return {
+        "type": "function",
+        "function": {
+            "name": CHANNEL_PLAN_TOOL_NAME,
+            "description": "Submit the ranked organic and paid channel recommendations.",
+            "parameters": ChannelPlan.model_json_schema(),
         },
     }

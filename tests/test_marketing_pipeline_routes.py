@@ -192,6 +192,50 @@ def _positioning_call(url: str = "https://example.com/thread") -> list[dict[str,
     ]
 
 
+def _channel_plan_call(url: str = "https://example.com/thread") -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_channel_plan",
+                        "arguments": {
+                            "channels": [
+                                {
+                                    "channel": "Instagram Reels",
+                                    "motion": "organic",
+                                    "rank": 1,
+                                    "rationale": "r",
+                                    "sources": [{"url": url, "note": "n"}],
+                                },
+                                {
+                                    "channel": "Google Search ads",
+                                    "motion": "paid",
+                                    "rank": 1,
+                                    "rationale": "r",
+                                    "sources": [{"url": url, "note": "n"}],
+                                },
+                            ]
+                        },
+                    }
+                }
+            ],
+        }
+    ]
+
+
+def _empty_channel_plan_call() -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "submit_channel_plan", "arguments": {"channels": []}}}
+            ],
+        }
+    ]
+
+
 # ── start research ────────────────────────────────────────────────────────────
 
 
@@ -237,7 +281,7 @@ def test_start_research_404s_an_unknown_campaign(ctx) -> None:
 
 def test_get_artefact_404s_an_unknown_kind(ctx) -> None:
     client, _core, _gateway = ctx
-    assert client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan").status_code == 404
+    assert client.get(f"/campaigns/{_CAMPAIGN}/artefacts/not_a_real_kind").status_code == 404
 
 
 def test_get_artefact_404s_when_none_exists_yet(ctx) -> None:
@@ -396,3 +440,112 @@ def test_get_positioning_artefact_proposes_once_it_succeeds(ctx) -> None:
     assert body["status"] == "proposed"
     stored_body = json.loads(body["body"])
     assert stored_body["segments"][0]["name"] == "Segment"
+
+
+# ── channel plan (M4, issue #3) ───────────────────────────────────────────────
+
+
+def _propose_and_approve_positioning(client, core, gateway) -> dict[str, Any]:
+    """Research approved, positioning proposed AND approved — the state
+    `start_channel_plan_route` requires."""
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+    gateway.complete(started["agent_run_id"], messages=_positioning_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")  # advances pending -> proposed
+    return client.post(f"/campaigns/{_CAMPAIGN}/artefacts/positioning/approve").json()
+
+
+def test_start_channel_plan_refuses_when_positioning_is_not_approved(ctx) -> None:
+    """The gate enforcement itself, mirroring `test_start_positioning_refuses_
+    when_research_is_not_approved`: `proposed` positioning must not be usable
+    by the channel-plan stage, or the positioning approval gate is
+    decorative."""
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+    gateway.complete(started["agent_run_id"], messages=_positioning_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")  # proposed, not approved
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan")
+
+    assert resp.status_code == 409
+    assert gateway.requested == [
+        r for r in gateway.requested if r["agent_name"] != "marketing-channel-plan"
+    ]
+
+
+def test_start_channel_plan_refuses_when_no_positioning_exists(ctx) -> None:
+    client, _core, _gateway = ctx
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan")
+    assert resp.status_code == 404
+
+
+def test_start_channel_plan_runs_once_positioning_is_approved(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan")
+
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["kind"] == "channel_plan"
+    assert body["status"] == "pending"
+    channel_plan_requests = [
+        r for r in gateway.requested if r["agent_name"] == "marketing-channel-plan"
+    ]
+    assert len(channel_plan_requests) == 1
+    assert channel_plan_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == (
+        "Segment"
+    )
+
+
+def test_get_channel_plan_artefact_proposes_organic_and_paid_once_it_succeeds(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    run_id = started["agent_run_id"]
+    gateway.complete(run_id, messages=_channel_plan_call())
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "proposed"
+    stored_body = json.loads(body["body"])
+    motions = {c["motion"] for c in stored_body["channels"]}
+    assert motions == {"organic", "paid"}
+
+
+def test_get_channel_plan_artefact_502s_a_zero_citation_run_and_leaves_it_pending(ctx) -> None:
+    """The milestone's guard at the HTTP boundary, the channel-plan half: a
+    run that cited nothing must not be proposed as if it were evidenced."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    run_id = started["agent_run_id"]
+    gateway.complete(run_id, messages=_empty_channel_plan_call())
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    assert resp.status_code == 502
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_channel_plan_artefact_can_be_approved(ctx) -> None:
+    """The same generic approve route already covers `channel_plan` once it
+    is a known kind — nothing channel-plan-specific in `approve_artefact_route`
+    itself, so this is the confirmation that wiring holds end to end."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # proposes it
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan/approve")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "approved"

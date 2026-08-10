@@ -237,10 +237,11 @@ async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response
 # `_core`'s Cognito-bearer-token calls cannot reach (ADR-0009 gates it on IAM,
 # not a JWT).
 
-#: Only the two kinds this milestone builds. `channel_plan` is
-#: `definitions.ARTEFACT_KINDS`'s third member and is not wired to a pipeline
-#: yet — a later milestone's job, not this one's to fake.
-_PIPELINE_ARTEFACT_KINDS = ("research", "positioning")
+#: The kinds a pipeline stage exists for. All three of
+#: `definitions.ARTEFACT_KINDS` as of M4 (issue #3) — `channel_plan` reuses
+#: this same generic read/approve/reject dispatch; only `_advance_artefact`
+#: below and `channel_plan_routes.py`'s starter route are kind-specific.
+_PIPELINE_ARTEFACT_KINDS = ("research", "positioning", "channel_plan")
 
 _AGENT_RUNS_PATH = "/api/v1/internal/agent-runs"
 
@@ -367,17 +368,22 @@ async def _advance_artefact(
             gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
         )
     else:
+        # positioning and channel_plan are both single, un-fanned-out runs —
+        # `agent_run_id` is stamped on creation by their respective starter
+        # routes (`start_positioning_route` here, `start_channel_plan_route`
+        # in `channel_plan_routes.py`). A row edited directly through
+        # generated CRUD could lack it, and "there is no run to advance" is a
+        # real, distinct failure from any pipeline error.
         run_id = artefact.get("agent_run_id")
         if not run_id:
-            # Cannot happen via the routes below — `start_positioning_route`
-            # always stamps `agent_run_id` on creation — but a row edited
-            # directly through generated CRUD could lack it, and "there is no
-            # run to advance" is a real, distinct failure from any pipeline
-            # error.
             raise pipeline.MalformedOutputError(
-                "This positioning artefact has no agent_run_id to advance."
+                f"This {kind} artefact has no agent_run_id to advance."
             )
-        result = await pipeline.advance_positioning(gateway, run_id=run_id)
+        result = (
+            await pipeline.advance_channel_plan(gateway, run_id=run_id)
+            if kind == "channel_plan"
+            else await pipeline.advance_positioning(gateway, run_id=run_id)
+        )
 
     if result is None:
         return artefact  # still in flight; nothing to propose yet
@@ -589,6 +595,17 @@ def build_app() -> FastAPI:
     # not here, so this file gains only this one line. See that module's
     # docstring for why.
     app.include_router(image_router)
+
+    # Channel-plan (M4) routes live in their own module, imported here —
+    # rather than at this module's top level — so this file's own diff stays
+    # small: `channel_plan_routes` reaches back into this module for the
+    # shared `require_admin`/`get_agent_gateway`/`_core`/`_latest_artefact`
+    # helpers, and importing it at top level would be a real circular import
+    # (those names do not exist yet at that point in this module's own
+    # execution). By the time `build_app()` runs, they do.
+    from .channel_plan_routes import router as channel_plan_router
+
+    app.include_router(channel_plan_router)
 
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.
