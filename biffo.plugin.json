@@ -1,75 +1,457 @@
 {
   "name": "marketing",
   "version": "0.1.0",
-  "description": "Reference example plugin shipped with the plugin repository template — a single table with generic list/create/read/delete routes. Replace this manifest with your own plugin's tables and routes.",
+  "description": "Campaign studio \u2014 research an audience, decide the message, pick channels, generate media in the right form factors, hand the operator a pack they publish themselves, and measure what came back.",
   "author": "Biffo Team",
-  "tags": ["example"],
-  "required_core_version": ">=0.0.0",
+  "tags": ["marketing", "campaigns", "agentic", "attribution"],
+  "required_core_version": ">=0.272.0",
   "tables": [
     {
-      "name": "marketing_widgets",
+      "name": "marketing_campaign",
+      "description": "A campaign. Everything else in this plugin hangs off one of these, and its id is what `utm_campaign` carries \u2014 which is the whole point: attribution becomes a foreign key by construction rather than a string somebody typed.",
       "columns": [
         {
           "name": "name",
-          "type": "String(100)",
-          "nullable": false,
-          "description": "Widget name."
+          "type": "String(200)",
+          "nullable": false
         },
         {
-          "name": "description",
+          "name": "status",
+          "type": "String(32)",
+          "nullable": false,
+          "description": "draft | researching | planned | generating | ready | live | archived. Not an enum column \u2014 plugin tables have no enum type, and the service layer validates."
+        },
+        {
+          "name": "brief",
           "type": "Text",
+          "nullable": true,
+          "description": "What we want, for whom, by when. Free text; the agents read it."
+        },
+        {
+          "name": "destination_url",
+          "type": "String(1024)",
+          "nullable": true,
+          "description": "Where tracked links point. Configurable so installing into another instance is config, not a rewrite."
+        },
+        {
+          "name": "media_kinds",
+          "type": "String(255)",
+          "nullable": true,
+          "description": "Comma-separated: copy,image,video,audio. Which media the operator asked for \u2014 drives which agents run, how long it takes and what it costs."
+        },
+        {
+          "name": "starts_at",
+          "type": "DateTime",
           "nullable": true
         },
         {
-          "name": "is_active",
-          "type": "Boolean",
-          "nullable": true,
-          "description": "Nullable because declared column defaults are not applied by the generated migration DDL (only the in-process SQLAlchemy model) — see README's 'Known limitations' section. Treat NULL as false; this plugin's own seed always sets it explicitly."
-        }
-      ],
-      "indexes": [
+          "name": "ends_at",
+          "type": "DateTime",
+          "nullable": true
+        },
         {
-          "name": "idx_marketing_widgets_tenant_name",
-          "columns": ["tenant_id", "name"],
-          "unique": true
+          "name": "guidance",
+          "type": "Text",
+          "nullable": true,
+          "description": "Shown beside the pack. Carries disclosure and music-licensing obligations, because whoever presses publish warrants them \u2014 and that is the operator, not us."
         }
       ],
       "permissions": {
-        "list": { "allowed": true },
-        "read": { "allowed": true },
-        "create": { "allowed": true, "required_role": ["marketing.admin"] },
-        "delete": { "allowed": true, "required_role": ["marketing.admin"] }
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
+    },
+    {
+      "name": "marketing_artefact",
+      "description": "One agent-produced stage output \u2014 research, positioning, or channel plan \u2014 with its approval state. One table rather than three because the lifecycle is identical and the only difference is `kind`; three tables would triple the approval logic to keep in step.",
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true,
+          "description": "Plain key, not a foreign key \u2014 plugin tables cannot declare FKs. Validated in the service layer."
+        },
+        {
+          "name": "kind",
+          "type": "String(32)",
+          "nullable": false,
+          "description": "research | positioning | channel_plan"
+        },
+        {
+          "name": "status",
+          "type": "String(32)",
+          "nullable": false,
+          "description": "pending | proposed | approved | rejected"
+        },
+        {
+          "name": "body",
+          "type": "Text",
+          "nullable": true,
+          "description": "JSON-serialised. Plugin tables have no JSON column type, so structured artefacts are Text."
+        },
+        {
+          "name": "citations",
+          "type": "Text",
+          "nullable": true,
+          "description": "JSON-serialised source list. Separate from body so 'this claim has no source' is a structural question, not a prose one \u2014 a research run that cites nothing must be detectable without reading the prose."
+        },
+        {
+          "name": "causation_id",
+          "type": "String(255)",
+          "nullable": true,
+          "index": true,
+          "description": "The agent chain that produced this. Joins to agent_runs, which is how per-campaign LLM spend is assembled \u2014 caller_plugin alone under-reports fan-in."
+        },
+        {
+          "name": "agent_run_id",
+          "type": "String(36)",
+          "nullable": true
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
+    },
+    {
+      "name": "marketing_asset",
+      "description": "A piece of generated creative, stored via Core's plugin object storage. The bytes live in S3; this row is the record.",
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true
+        },
+        {
+          "name": "media_kind",
+          "type": "String(32)",
+          "nullable": false,
+          "description": "image | video | audio"
+        },
+        {
+          "name": "placement",
+          "type": "String(32)",
+          "nullable": true,
+          "description": "feed_1x1 | portrait_4x5 | story_9x16. The form factor this rendering is for."
+        },
+        {
+          "name": "media_id",
+          "type": "String(36)",
+          "nullable": true,
+          "description": "Core plugin-media id. The URL is minted per request and never stored \u2014 a stored URL is stale the moment it is written."
+        },
+        {
+          "name": "is_source",
+          "type": "Boolean",
+          "nullable": true,
+          "description": "True for the one approved creative; the placements are DETERMINISTIC RENDERS of it, never regenerations. Nullable, treat NULL as false \u2014 a declared default reaches the model but not the migration DDL."
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
+    },
+    {
+      "name": "marketing_link",
+      "description": "A tracked link: campaign x channel x variant. Its token is what makes `utm_campaign` a real reference rather than a hopeful string.",
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true
+        },
+        {
+          "name": "token",
+          "type": "String(64)",
+          "nullable": false,
+          "index": true,
+          "description": "secrets.token_urlsafe(32). Never echoed into a response body, event payload or log line."
+        },
+        {
+          "name": "channel",
+          "type": "String(64)",
+          "nullable": false,
+          "description": "e.g. linkedin, instagram, email"
+        },
+        {
+          "name": "variant",
+          "type": "String(64)",
+          "nullable": true,
+          "description": "Which creative variant this link is attached to."
+        },
+        {
+          "name": "destination_url",
+          "type": "String(1024)",
+          "nullable": false,
+          "description": "Resolved at mint time with UTMs stamped, so a later campaign edit cannot rewrite a link already published."
+        },
+        {
+          "name": "is_paid",
+          "type": "Boolean",
+          "nullable": true,
+          "description": "Organic or paid placement. Nullable, treat NULL as false."
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
+    },
+    {
+      "name": "marketing_click",
+      "description": "One click on a tracked link, recorded by Core's public redirect BEFORE the 302. Append-only; never updated. This is the only pre-submission server-side event in the whole funnel \u2014 the intake pages are static exports, so nothing else can observe a visitor before they submit a form.",
+      "columns": [
+        {
+          "name": "link_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true
+        },
+        {
+          "name": "campaign_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true,
+          "description": "Denormalised so per-campaign click counts need no join."
+        },
+        {
+          "name": "user_agent",
+          "type": "String(512)",
+          "nullable": true,
+          "description": "Truncated. No IP address is stored: it is personal data we have no use for, and not collecting it is cheaper than justifying it."
+        },
+        {
+          "name": "referrer",
+          "type": "String(1024)",
+          "nullable": true
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
       }
     }
   ],
   "api_routes": [
     {
       "method": "GET",
-      "path": "/widgets",
-      "table": "marketing_widgets",
+      "path": "/campaigns",
+      "table": "marketing_campaign",
       "operation": "list",
-      "description": "List widgets for the caller's tenant."
-    },
-    {
-      "method": "POST",
-      "path": "/widgets",
-      "table": "marketing_widgets",
-      "operation": "create",
-      "description": "Create a widget."
+      "description": "List campaigns for the caller's tenant."
     },
     {
       "method": "GET",
-      "path": "/widgets/{id}",
-      "table": "marketing_widgets",
+      "path": "/campaigns/{id}",
+      "table": "marketing_campaign",
       "operation": "read",
-      "description": "Get a single widget."
+      "description": "Read one campaign."
     },
     {
-      "method": "DELETE",
-      "path": "/widgets/{id}",
-      "table": "marketing_widgets",
-      "operation": "delete",
-      "description": "Delete a widget."
+      "method": "POST",
+      "path": "/campaigns",
+      "table": "marketing_campaign",
+      "operation": "create",
+      "description": "Create a campaign."
+    },
+    {
+      "method": "PATCH",
+      "path": "/campaigns/{id}",
+      "table": "marketing_campaign",
+      "operation": "update",
+      "description": "Update a campaign."
+    },
+    {
+      "method": "GET",
+      "path": "/artefacts",
+      "table": "marketing_artefact",
+      "operation": "list",
+      "description": "List artefacts for the caller's tenant."
+    },
+    {
+      "method": "GET",
+      "path": "/artefacts/{id}",
+      "table": "marketing_artefact",
+      "operation": "read",
+      "description": "Read one artefact."
+    },
+    {
+      "method": "POST",
+      "path": "/artefacts",
+      "table": "marketing_artefact",
+      "operation": "create",
+      "description": "Create a artefact."
+    },
+    {
+      "method": "PATCH",
+      "path": "/artefacts/{id}",
+      "table": "marketing_artefact",
+      "operation": "update",
+      "description": "Update a artefact."
+    },
+    {
+      "method": "GET",
+      "path": "/asets",
+      "table": "marketing_asset",
+      "operation": "list",
+      "description": "List asets for the caller's tenant."
+    },
+    {
+      "method": "GET",
+      "path": "/asets/{id}",
+      "table": "marketing_asset",
+      "operation": "read",
+      "description": "Read one aset."
+    },
+    {
+      "method": "POST",
+      "path": "/asets",
+      "table": "marketing_asset",
+      "operation": "create",
+      "description": "Create a aset."
+    },
+    {
+      "method": "PATCH",
+      "path": "/asets/{id}",
+      "table": "marketing_asset",
+      "operation": "update",
+      "description": "Update a aset."
+    },
+    {
+      "method": "GET",
+      "path": "/links",
+      "table": "marketing_link",
+      "operation": "list",
+      "description": "List links for the caller's tenant."
+    },
+    {
+      "method": "GET",
+      "path": "/links/{id}",
+      "table": "marketing_link",
+      "operation": "read",
+      "description": "Read one link."
+    },
+    {
+      "method": "POST",
+      "path": "/links",
+      "table": "marketing_link",
+      "operation": "create",
+      "description": "Create a link."
+    },
+    {
+      "method": "PATCH",
+      "path": "/links/{id}",
+      "table": "marketing_link",
+      "operation": "update",
+      "description": "Update a link."
+    },
+    {
+      "method": "GET",
+      "path": "/clicks",
+      "table": "marketing_click",
+      "operation": "list",
+      "description": "List clicks for the caller's tenant."
+    },
+    {
+      "method": "GET",
+      "path": "/clicks/{id}",
+      "table": "marketing_click",
+      "operation": "read",
+      "description": "Read one click."
     }
   ],
   "event_subscriptions": [
@@ -80,10 +462,27 @@
     }
   ],
   "ui_components": [
-    { "type": "nav-link", "label": "Example Plugin", "path": "/admin/marketing" },
-    { "type": "page", "label": "Widgets", "path": "/admin/marketing/widgets" }
+    {
+      "type": "nav-link",
+      "label": "Example Plugin",
+      "path": "/admin/marketing"
+    },
+    {
+      "type": "page",
+      "label": "Widgets",
+      "path": "/admin/marketing/widgets"
+    }
   ],
   "dependencies": {
     "biffo-plugin-sdk": "^1.0"
+  },
+  "core_capabilities": {
+    "agent-run-request": "^1",
+    "owner-scoped-tables": "^1",
+    "object-storage": "^1"
+  },
+  "admin_ingress": {
+    "required_group": "admin",
+    "app": "marketing.admin_app:app"
   }
 }
