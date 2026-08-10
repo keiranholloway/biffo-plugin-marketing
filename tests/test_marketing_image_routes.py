@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from marketing import image_routes
 from marketing.image_provider import GeneratedImage, ImageProviderError
 
-_CAMPAIGN = "b3f1c0de-0000-4000-8000-000000000006"
+_CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000ef"
 _MEDIA_ID = "media-1"
 _LEDGER_ID = "ledger-1"
 _PRESIGN_URL = "https://s3.example.invalid/upload"
