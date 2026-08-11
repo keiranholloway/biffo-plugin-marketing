@@ -53,9 +53,9 @@ import json
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, create_core_client
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from . import admin_app, pack_routes, pipeline, principal_client
+from . import admin_app, config, pack_routes, pipeline, principal_client
 from .results_routes import UnmeasuredMetric
 
 require_admin = admin_app.require_admin
@@ -237,6 +237,7 @@ def _budget_recommendation(paid_channel_count: int) -> dict[str, Any]:
 @router.get("/campaigns/{campaign_id}/paid-pack")
 async def get_paid_pack_route(
     campaign_id: str,
+    request: Request,
     core_client: BiffoAPIClient = Depends(get_core_client),
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
     admin: Any = Depends(require_admin),
@@ -312,7 +313,13 @@ async def get_paid_pack_route(
     assets_with_urls = [await pack_routes._asset_with_url(core_client, a) for a in assets]
 
     links = await pack_routes._ensure_links(
-        campaign_id, paid_channels, campaign=campaign, admin_token=admin.token
+        campaign_id,
+        paid_channels,
+        campaign=campaign,
+        admin_token=admin.token,
+        base_url=config.public_base_url_for(
+            request.headers.get("origin"), request.headers.get("referer")
+        ),
     )
     # `_ensure_links` returns every link Core holds for this campaign, not
     # just the `paid_channels` subset passed in — see issue #48. Filtered

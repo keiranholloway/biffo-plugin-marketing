@@ -34,7 +34,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from marketing import admin_app, pack_routes
+from marketing import admin_app, config, pack_routes
 from marketing.definitions import PLACEMENTS
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000c5"
@@ -187,7 +187,7 @@ def _app(*, core_client: _FakeStorageClient, campaign_client: _FakeCampaignClien
 
 @pytest.fixture(autouse=True)
 def _base_url(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(pack_routes, "public_base_url", lambda: _BASE_URL)
+    monkeypatch.setattr(pack_routes, "public_base_url_for", lambda *_: _BASE_URL)
 
 
 # ── failure paths ────────────────────────────────────────────────────────────
@@ -369,3 +369,51 @@ def test_does_not_remint_a_link_for_a_channel_that_already_has_one(
     assert resp.json()["links"][0]["url"] == f"{_BASE_URL}/c/existing-token"
     # No new link written.
     assert core.links == [core.links[0]]
+
+
+def test_link_urls_come_from_the_request_origin_not_from_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real derivation, with nothing patched over it.
+
+    Every other test here patches `public_base_url_for`, so none of them can
+    tell whether the route calls it at all. That is exactly how #72 shipped:
+    `_ensure_links` still called the **config-only** `public_base_url()`, which
+    returns nothing on the shared plugin host where this app actually runs, and
+    the deployed route 503'd ("No public base URL is configured for this
+    deployment") while every test here stayed green.
+
+    So this one deliberately does **not** use the `_base_url` fixture's patch —
+    it sends a real `Origin` header and asserts the minted URL was built from
+    it. It fails if anyone reverts a call site to the configured value, because
+    no configuration is set in this process.
+    """
+    core = _FakeCore(copy_artefact=_copy_artefact(_CHANNELS))
+    core.links.append(
+        {
+            "id": "link-existing",
+            "campaign_id": _CAMPAIGN,
+            "token": "existing-token",
+            "channel": "Instagram Reels",
+            "variant": None,
+            "is_paid": False,
+            "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
+        }
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    # Undo the autouse fixture: this test is about the un-patched path.
+    monkeypatch.setattr(pack_routes, "public_base_url_for", config.public_base_url_for)
+    # And make sure a configured value cannot rescue it if the origin is ignored.
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+
+    client = TestClient(
+        _app(core_client=_FakeStorageClient(), campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.get(
+        f"/campaigns/{_CAMPAIGN}/pack",
+        headers={"origin": "https://tenant.example.test"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["links"][0]["url"] == "https://tenant.example.test/c/existing-token"
