@@ -17,7 +17,10 @@ this module adds is the part that is genuinely paid-only:
 2. **Targeting**, drawn straight from the approved positioning artefact's
    ``segments`` — the only audience description this pipeline has ever
    produced, and the plugin's own citation discipline (every segment carries
-   ``sources``) already makes it a defensible brief rather than a guess.
+   ``sources``) already makes it a defensible brief rather than a guess. An
+   approved positioning with zero segments 404s rather than shipping an
+   empty targeting brief silently — the same gap-must-be-visible discipline
+   this file uses for ``paid_channels``.
 3. **A budget recommendation.** This plugin calls no ad platform API and has
    no historical spend or performance data to optimise against, so this is a
    declared, fixed starting-point heuristic — not a bidding model — and says
@@ -146,7 +149,14 @@ def _fit_to_limit(text: str, limit: int) -> tuple[str, bool]:
 
     budget = limit - len(_ELLIPSIS)
     candidate = text[:budget]
-    if " " in text[: budget + 1] and " " in candidate:
+    # Only back off to the previous whole word when the cut ITSELF lands
+    # mid-word (the character immediately after `candidate` is not a space).
+    # A cut that already lands exactly on a word boundary must keep every
+    # word it already has — checking `" " in candidate` alone (the earlier
+    # version of this function) can't tell those two cases apart, so it
+    # always discarded one extra whole word even when the boundary was
+    # already clean, wasting characters the platform actually allows.
+    if text[budget] != " " and " " in candidate:
         candidate = candidate.rsplit(" ", 1)[0]
     return f"{candidate.rstrip()}{_ELLIPSIS}", True
 
@@ -236,9 +246,10 @@ async def get_paid_pack_route(
     links, and spend (reported as unmeasurable — see the module docstring).
 
     Requires an **approved** `copy` artefact carrying at least one `paid`
-    channel, and an **approved** `positioning` artefact for `targeting` — the
-    same "an unreviewed artefact must never reach an operator" discipline
-    `pack_routes.get_pack_route` already enforces for the organic pack.
+    channel, and an **approved** `positioning` artefact with at least one
+    `segment` for `targeting` — the same "an unreviewed or empty artefact
+    must never reach an operator" discipline `pack_routes.get_pack_route`
+    already enforces for the organic pack's copy gate.
     """
     campaign_id = admin_app._validated_campaign_id(campaign_id)
 
@@ -289,6 +300,11 @@ async def get_paid_pack_route(
         else (raw_positioning_body or {})
     )
     targeting = positioning_body.get("segments") or []
+    if not targeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The approved positioning artefact has no segments to target.",
+        )
 
     assets, missing_placements = await pack_routes._existing_assets(
         campaign_id, campaign_client=campaign_client
@@ -298,6 +314,16 @@ async def get_paid_pack_route(
     links = await pack_routes._ensure_links(
         campaign_id, paid_channels, campaign=campaign, admin_token=admin.token
     )
+    # `_ensure_links` returns every link Core holds for this campaign, not
+    # just the `paid_channels` subset passed in — see issue #48. Filtered
+    # back down here rather than at the source, since fixing it properly
+    # needs `pack_routes.py`, which several agents work in concurrently and
+    # this change does not touch. This does not fix the rarer case issue #48
+    # also describes (a paid channel sharing an organic channel's exact name
+    # would still surface that organic link instead of minting a paid one) —
+    # that half needs the source fix.
+    paid_channel_names = {c["channel"] for c in paid_channels}
+    links = [link for link in links if link.get("channel") in paid_channel_names]
 
     return {
         "campaign_id": campaign_id,

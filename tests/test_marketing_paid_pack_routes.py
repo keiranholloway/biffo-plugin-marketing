@@ -290,6 +290,27 @@ def test_409s_when_positioning_is_not_approved(monkeypatch: pytest.MonkeyPatch) 
     assert resp.status_code == 409
 
 
+def test_404s_when_the_approved_positioning_has_no_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved positioning with an empty `segments` list must not ship a
+    silently-empty targeting brief — same "the gap is visible, not silent"
+    discipline as the missing-paid-channels and missing-source-creative
+    cases above."""
+    core = _FakeCore(
+        copy_artefact=_copy_artefact([_PAID_CHANNEL_META]),
+        positioning_artefact=_positioning_artefact([]),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
+
+    assert resp.status_code == 404
+    assert "segments" in resp.json()["detail"].lower()
+
+
 def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     core = _FakeCore(
         copy_artefact=_copy_artefact([_PAID_CHANNEL_META]),
@@ -373,6 +394,40 @@ def test_assembles_the_paid_pack(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["guidance"] == "Disclose #ad. Licensed music only."
 
 
+def test_does_not_leak_an_existing_organic_link_into_the_paid_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pack_routes._ensure_links` (reused here) returns every link Core
+    holds for the campaign, not just the requested `channels` (issue #48) —
+    an organic link for a channel this paid pack never asked about must not
+    show up in its `links`."""
+    core = _FakeCore(
+        copy_artefact=_copy_artefact([_ORGANIC_CHANNEL, _PAID_CHANNEL_META]),
+        positioning_artefact=_positioning_artefact(_SEGMENTS),
+    )
+    core.links.append(
+        {
+            "id": "link-organic",
+            "campaign_id": _CAMPAIGN,
+            "token": "organic-token",
+            "channel": _ORGANIC_CHANNEL["channel"],
+            "variant": None,
+            "is_paid": False,
+            "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
+        }
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
+
+    assert resp.status_code == 200
+    links = resp.json()["links"]
+    assert {link["channel"] for link in links} == {_PAID_CHANNEL_META["channel"]}
+    assert all(link["is_paid"] for link in links)
+
+
 def test_does_not_remint_a_paid_link_for_a_channel_that_already_has_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,6 +477,16 @@ def test_fit_to_limit_never_cuts_mid_word() -> None:
     words = text[:-1].split()
     source_words = "Run every one of your sites the same way".split()
     assert words == source_words[: len(words)]
+
+
+def test_fit_to_limit_keeps_the_full_word_when_the_cut_already_lands_on_a_boundary() -> None:
+    """When `budget` characters happen to land exactly on a space, the whole
+    word up to that point must be kept — backing off one further word (the
+    bug this regresses) wastes characters the platform actually allows."""
+    text, truncated = paid_pack_routes._fit_to_limit("Hello wonderful world", 16)
+    assert truncated is True
+    assert text == "Hello wonderful…"
+    assert len(text) == 16
 
 
 def test_fit_to_limit_handles_a_limit_smaller_than_the_ellipsis() -> None:
