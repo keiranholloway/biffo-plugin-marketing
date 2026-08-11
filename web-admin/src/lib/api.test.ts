@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { listCampaigns } from './api'
+import { createCampaign, listCampaigns } from './api'
 import * as auth from './auth'
 
 afterEach(() => {
@@ -76,5 +76,35 @@ describe('listCampaigns authorization', () => {
     stubSession(null)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }))
     await expect(listCampaigns()).rejects.toThrow(/not signed in/)
+  })
+})
+
+describe('createCampaign', () => {
+  it('posts the campaign with a bearer and starts it at draft', async () => {
+    stubSession('abc123')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ id: '1', name: 'x', status: 'draft' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createCampaign({ name: 'Spring', destination_url: 'https://example.com/demo' })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/plugins/marketing/campaigns')
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer abc123')
+    // status is the pipeline's vocabulary, not the operator's — a new campaign
+    // always starts at draft, so the form does not offer it.
+    expect(JSON.parse(init.body as string).status).toBe('draft')
+  })
+
+  it('names the missing admin role on a 403, rather than a bare status', async () => {
+    // `marketing_campaign`'s create permission requires `admin`, evaluated by
+    // Core. Without this the form silently appears not to work.
+    stubSession()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 403 }))
+    await expect(
+      createCampaign({ name: 'x', destination_url: 'https://example.com' }),
+    ).rejects.toThrow(/admin role/)
   })
 })
