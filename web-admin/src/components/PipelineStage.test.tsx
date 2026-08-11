@@ -134,4 +134,29 @@ describe('PipelineStage', () => {
     )
     expect(screen.getByRole('button', { name: /run research again/i })).toBeInTheDocument()
   })
+
+  it('explains why re-running is blocked, not just a disabled button with no reason', () => {
+    // A rejected stage whose upstream gate has since closed again (e.g. the
+    // campaign's brief was cleared) must say why "run again" cannot be
+    // clicked — the null-status case always did; the rejected case silently
+    // did not.
+    render(
+      <PipelineStage
+        kind="research"
+        title="Research"
+        artefact={artefact('rejected')}
+        loading={false}
+        error={null}
+        canStart={false}
+        blockedReason="This campaign has no brief yet — add one above before starting research."
+        busy={false}
+        onStart={noop}
+        onRefresh={noop}
+        onApprove={noop}
+        onReject={noop}
+      />,
+    )
+    expect(screen.getByText(/no brief yet/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /run research again/i })).toBeDisabled()
+  })
 })

@@ -98,11 +98,19 @@ const STAGES: StageConfig[] = [
       const body = parseArtefactBody<CopySetBody>(artefact)
       return body !== null ? <CopyArtefact body={body} /> : <p className="empty">No content to show.</p>
     },
-    gate: (approved) =>
-      reason(
-        approved.positioning && approved.channel_plan,
-        'Approve the positioning and channel-plan stages first.',
-      ),
+    gate: (approved) => {
+      // Names only the stage(s) actually still unapproved — a caller with
+      // channel-plan already approved and only positioning outstanding must
+      // not be told to redo channel-plan too.
+      const outstanding = [
+        !approved.positioning ? 'positioning' : null,
+        !approved.channel_plan ? 'channel plan' : null,
+      ].filter((s): s is string => s !== null)
+      return reason(
+        outstanding.length === 0,
+        `Approve the ${outstanding.join(' and ')} stage${outstanding.length > 1 ? 's' : ''} first.`,
+      )
+    },
   },
 ]
 

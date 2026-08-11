@@ -67,11 +67,21 @@ export function PipelineStage({
 
       {!loading && (
         <>
-          {status === null && (
+          {/* `null` (never started) and `rejected` (started, then turned
+              down) share the exact same start gate — both need canStart and
+              both explain themselves with the same blockedReason when it
+              isn't met. Only the button's own label differs. Keeping this as
+              one branch is what stopped the rejected case from silently
+              losing the hint the null case always had. */}
+          {(status === null || status === 'rejected') && (
             <>
               {blockedReason !== null && <p className="hint">{blockedReason}</p>}
               <button type="button" onClick={onStart} disabled={!canStart || busy}>
-                {busy ? 'Starting…' : `Start ${title.toLowerCase()}`}
+                {busy
+                  ? 'Starting…'
+                  : status === 'rejected'
+                    ? `Run ${title.toLowerCase()} again`
+                    : `Start ${title.toLowerCase()}`}
               </button>
             </>
           )}
@@ -93,12 +103,6 @@ export function PipelineStage({
                 {busy ? 'Rejecting…' : 'Reject'}
               </button>
             </div>
-          )}
-
-          {status === 'rejected' && (
-            <button type="button" onClick={onStart} disabled={!canStart || busy}>
-              {busy ? 'Starting…' : `Run ${title.toLowerCase()} again`}
-            </button>
           )}
         </>
       )}
