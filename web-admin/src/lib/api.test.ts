@@ -1,6 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createCampaign, listCampaigns } from './api'
+import {
+  approveArtefact,
+  createCampaign,
+  generateStill,
+  getArtefact,
+  getPack,
+  getResults,
+  listCampaigns,
+  parseArtefactBody,
+  startResearch,
+  updateCampaign,
+  type ResearchSynthesisBody,
+} from './api'
 import * as auth from './auth'
 
 afterEach(() => {
@@ -106,5 +118,191 @@ describe('createCampaign', () => {
     await expect(
       createCampaign({ name: 'x', destination_url: 'https://example.com' }),
     ).rejects.toThrow(/admin role/)
+  })
+})
+
+describe('updateCampaign', () => {
+  it('PATCHes generated CRUD, not an admin-app route', async () => {
+    stubSession('abc123')
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: 'c1' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateCampaign('c1', { brief: 'Who this is for, and why now.' })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/plugins/marketing/campaigns/c1')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ brief: 'Who this is for, and why now.' })
+  })
+})
+
+describe('pipeline artefacts', () => {
+  it('returns null on a 404 rather than throwing — "not started yet" is not an error', async () => {
+    stubSession()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }))
+    await expect(getArtefact('c1', 'research')).resolves.toBeNull()
+  })
+
+  it('starts research at the admin-app route, not generated CRUD', async () => {
+    stubSession('abc123')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ id: 'a1', status: 'pending' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startResearch('c1')
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/plugins/marketing/admin/campaigns/c1/research')
+  })
+
+  it('surfaces the server-authored reason on a 422, not a bare status', async () => {
+    // Unlike listCampaigns/createCampaign above, this hits the plugin's OWN
+    // admin route — the detail text is authored specifically for an
+    // operator to read (admin_app.py's start_research_route), not Core's
+    // generic-CRUD wording, so surfacing it is the point.
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({ detail: 'This campaign has no brief, so there is nothing to research.' }),
+      }),
+    )
+    await expect(startResearch('c1')).rejects.toThrow(/no brief/)
+  })
+
+  it('names the missing group on a 403 from the admin app', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ detail: "This surface requires the 'admin' group." }),
+      }),
+    )
+    await expect(startResearch('c1')).rejects.toThrow(/admin' group/)
+  })
+
+  it('approves at the artefact-scoped route', async () => {
+    stubSession('abc123')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ id: 'a1', status: 'approved' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await approveArtefact('c1', 'channel_plan')
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/plugins/marketing/admin/campaigns/c1/artefacts/channel_plan/approve')
+    expect(init.method).toBe('POST')
+  })
+})
+
+describe('parseArtefactBody', () => {
+  it('parses the JSON-serialised body column into its structured shape', () => {
+    const body: ResearchSynthesisBody = { summary: 'x', findings: [] }
+    const parsed = parseArtefactBody<ResearchSynthesisBody>({
+      id: 'a1',
+      campaign_id: 'c1',
+      kind: 'research',
+      status: 'proposed',
+      body: JSON.stringify(body),
+      citations: null,
+      causation_id: null,
+      agent_run_id: null,
+    })
+    expect(parsed).toEqual(body)
+  })
+
+  it('returns null rather than throwing on no artefact, no body, or unparseable JSON', () => {
+    expect(parseArtefactBody(null)).toBeNull()
+    expect(
+      parseArtefactBody({
+        id: 'a1',
+        campaign_id: 'c1',
+        kind: 'research',
+        status: 'pending',
+        body: null,
+        citations: null,
+        causation_id: null,
+        agent_run_id: null,
+      }),
+    ).toBeNull()
+  })
+})
+
+describe('generateStill', () => {
+  it('reports a null cost_usd as unpriced, never as $0', async () => {
+    // The null case is load-bearing (image_routes.py) — a caller must never
+    // read "cost_usd is null" as "this cost nothing".
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          asset: { id: 'as1' },
+          media: { id: 'm1' },
+          url: 'https://example.com/still.png',
+          ledger: { id: 'l1', cost_usd: null, unpriced: true },
+        }),
+      }),
+    )
+    const result = await generateStill('c1', 'a storefront photo')
+    expect(result.ledger.cost_usd).toBeNull()
+    expect(result.ledger.unpriced).toBe(true)
+  })
+})
+
+describe('getPack', () => {
+  it('surfaces missing_placements rather than hiding the gap', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaign_id: 'c1',
+          assets: [],
+          missing_placements: ['feed_1x1', 'story_9x16'],
+          copy: [],
+          links: [],
+          guidance: '',
+        }),
+      }),
+    )
+    const pack = await getPack('c1')
+    expect(pack.missing_placements).toEqual(['feed_1x1', 'story_9x16'])
+  })
+})
+
+describe('getResults', () => {
+  it('keeps leads/conversions/cost as UnmeasuredMetric, distinct from a real click count', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaigns: [
+            {
+              campaign_id: 'c1',
+              campaign_name: 'Spring',
+              clicks: { total: 4, paid: 1, organic: 3, unknown_channel_type: 0 },
+              leads: { measurable: false, denominator: 4, reason: 'no transport' },
+              conversions: { measurable: false, denominator: null, reason: 'no transport' },
+              cost: { measurable: false, denominator: null, reason: 'no transport' },
+            },
+          ],
+          unattributed_clicks: 0,
+        }),
+      }),
+    )
+    const results = await getResults()
+    expect(results.campaigns[0].clicks.total).toBe(4)
+    expect(results.campaigns[0].leads.measurable).toBe(false)
   })
 })
