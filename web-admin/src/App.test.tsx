@@ -65,3 +65,26 @@ describe('creating a campaign', () => {
     expect(screen.getByRole('button', { name: /create campaign/i })).toBeDisabled()
   })
 })
+
+describe('opening a campaign studio', () => {
+  it('switches to the campaign detail view, and back again', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null, brief: null },
+      ],
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Spring demo push')
+
+    await user.click(screen.getByRole('button', { name: /^open$/i }))
+    expect(screen.getByRole('heading', { name: 'Spring demo push' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Pipeline' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /back to campaigns/i }))
+    expect(screen.getByRole('heading', { name: 'Campaign studio' })).toBeInTheDocument()
+  })
+})

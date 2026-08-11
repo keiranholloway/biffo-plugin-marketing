@@ -1,0 +1,199 @@
+import { useEffect, useState, type ReactNode } from 'react'
+
+import {
+  approveArtefact,
+  getArtefact,
+  parseArtefactBody,
+  rejectArtefact,
+  startChannelPlan,
+  startCopy,
+  startPositioning,
+  startResearch,
+  type Artefact,
+  type ArtefactKind,
+  type ChannelPlanBody,
+  type CopySetBody,
+  type PositioningBody,
+  type ResearchSynthesisBody,
+} from '../lib/api'
+import { ChannelPlanArtefact, CopyArtefact, PositioningArtefact, ResearchArtefact } from './ArtefactBody'
+import { PipelineStage } from './PipelineStage'
+
+interface StageState {
+  artefact: Artefact | null
+  loading: boolean
+  error: string | null
+  busy: boolean
+}
+
+interface Gate {
+  canStart: boolean
+  blockedReason: string | null
+}
+
+/** `ok`, and the one reason to show when it is not — collapses what would
+ * otherwise be a parallel `x ? null : '...'` ternary at every gate. */
+function reason(ok: boolean, blockedReason: string): Gate {
+  return { canStart: ok, blockedReason: ok ? null : blockedReason }
+}
+
+/** Whether each stage's artefact has cleared its approval gate — the only
+ * thing every `gate()` below reads. */
+interface Approved {
+  research: boolean
+  positioning: boolean
+  channel_plan: boolean
+}
+
+interface StageConfig {
+  kind: ArtefactKind
+  title: string
+  start: (campaignId: string) => Promise<Artefact>
+  /** The stage's real output, once it has one — never called for a `null`
+   * or still-`pending` artefact (see `Pipeline`'s render loop). */
+  renderBody: (artefact: Artefact) => ReactNode
+  gate: (approved: Approved, hasBrief: boolean) => Gate
+}
+
+/** Everything that varies per stage, in one place — a fifth stage is one new
+ * entry here, not four disjoint edits across a starter map, a body-render
+ * switch and a gate map with nothing enforcing they stay in step. */
+const STAGES: StageConfig[] = [
+  {
+    kind: 'research',
+    title: 'Research',
+    start: startResearch,
+    renderBody: (artefact) => {
+      const body = parseArtefactBody<ResearchSynthesisBody>(artefact)
+      return body !== null ? <ResearchArtefact body={body} /> : <p className="empty">No content to show.</p>
+    },
+    gate: (_approved, hasBrief) =>
+      reason(hasBrief, 'This campaign has no brief yet — add one above before starting research.'),
+  },
+  {
+    kind: 'positioning',
+    title: 'Positioning',
+    start: startPositioning,
+    renderBody: (artefact) => {
+      const body = parseArtefactBody<PositioningBody>(artefact)
+      return body !== null ? <PositioningArtefact body={body} /> : <p className="empty">No content to show.</p>
+    },
+    gate: (approved) => reason(approved.research, 'Approve the research stage first.'),
+  },
+  {
+    kind: 'channel_plan',
+    title: 'Channel plan',
+    start: startChannelPlan,
+    renderBody: (artefact) => {
+      const body = parseArtefactBody<ChannelPlanBody>(artefact)
+      return body !== null ? <ChannelPlanArtefact body={body} /> : <p className="empty">No content to show.</p>
+    },
+    gate: (approved) => reason(approved.positioning, 'Approve the positioning stage first.'),
+  },
+  {
+    kind: 'copy',
+    title: 'Copy',
+    start: startCopy,
+    renderBody: (artefact) => {
+      const body = parseArtefactBody<CopySetBody>(artefact)
+      return body !== null ? <CopyArtefact body={body} /> : <p className="empty">No content to show.</p>
+    },
+    gate: (approved) =>
+      reason(
+        approved.positioning && approved.channel_plan,
+        'Approve the positioning and channel-plan stages first.',
+      ),
+  },
+]
+
+function initialState(): Record<ArtefactKind, StageState> {
+  const empty = (): StageState => ({ artefact: null, loading: true, error: null, busy: false })
+  return { research: empty(), positioning: empty(), channel_plan: empty(), copy: empty() }
+}
+
+/** The pipeline (M3/M4/M5): research → positioning → channel plan → copy,
+ * each ending at a human approval gate. Without this, none of these agent
+ * runs can ever be reviewed, so the pipeline could not advance past its
+ * first stage from a browser at all.
+ *
+ * `hasBrief` gates the very first start: `start_research_route` 422s on a
+ * campaign with no brief, and nothing else in this pipeline can run before
+ * research does.
+ */
+export function Pipeline({ campaignId, hasBrief }: { campaignId: string; hasBrief: boolean }) {
+  const [state, setState] = useState<Record<ArtefactKind, StageState>>(initialState)
+
+  function patch(kind: ArtefactKind, next: Partial<StageState>) {
+    setState((prev) => ({ ...prev, [kind]: { ...prev[kind], ...next } }))
+  }
+
+  async function load(kind: ArtefactKind) {
+    patch(kind, { loading: true, error: null })
+    try {
+      const artefact = await getArtefact(campaignId, kind)
+      patch(kind, { artefact, loading: false })
+    } catch (e: unknown) {
+      patch(kind, { loading: false, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  useEffect(() => {
+    setState(initialState())
+    for (const { kind } of STAGES) {
+      load(kind)
+    }
+    // campaignId is the only thing this effect should re-run on — `load`
+    // closes over it fresh on every render, so it is deliberately not in
+    // this dependency list. No react-hooks lint plugin is installed in this
+    // package, so there is no exhaustive-deps rule to satisfy or suppress.
+  }, [campaignId])
+
+  async function runMutation(kind: ArtefactKind, mutate: () => Promise<Artefact | null>) {
+    patch(kind, { busy: true, error: null })
+    try {
+      const artefact = await mutate()
+      patch(kind, { artefact, busy: false })
+    } catch (e: unknown) {
+      patch(kind, { busy: false, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  const approved: Approved = {
+    research: state.research.artefact?.status === 'approved',
+    positioning: state.positioning.artefact?.status === 'approved',
+    channel_plan: state.channel_plan.artefact?.status === 'approved',
+  }
+
+  return (
+    <div className="pipeline">
+      {STAGES.map((stage) => {
+        const s = state[stage.kind]
+        const gate = stage.gate(approved, hasBrief)
+        // `pending`'s body is bookkeeping (e.g. research's in-flight run
+        // ids), not the real stage output — see `Artefact`'s own doc
+        // comment. Nothing to render until the gate has actually produced
+        // something.
+        const body = s.artefact !== null && s.artefact.status !== 'pending' ? stage.renderBody(s.artefact) : null
+        return (
+          <PipelineStage
+            key={stage.kind}
+            kind={stage.kind}
+            title={stage.title}
+            artefact={s.artefact}
+            loading={s.loading}
+            error={s.error}
+            canStart={gate.canStart}
+            blockedReason={gate.blockedReason}
+            busy={s.busy}
+            onStart={() => runMutation(stage.kind, () => stage.start(campaignId))}
+            onRefresh={() => runMutation(stage.kind, () => getArtefact(campaignId, stage.kind))}
+            onApprove={() => runMutation(stage.kind, () => approveArtefact(campaignId, stage.kind))}
+            onReject={() => runMutation(stage.kind, () => rejectArtefact(campaignId, stage.kind))}
+          >
+            {body}
+          </PipelineStage>
+        )
+      })}
+    </div>
+  )
+}
