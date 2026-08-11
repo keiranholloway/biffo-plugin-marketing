@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 #: What an operator can ask a campaign to produce.
 #:
@@ -195,13 +195,45 @@ class ChannelRecommendation(BaseModel):
     """One recommended channel, organic or paid, grounded in the approved
     positioning. Same citation discipline as `Segment`/`MessagePillar`/
     `CallToAction`: `sources` has no default and a minimum length of one, so
-    a recommendation with no evidence cannot be built."""
+    a recommendation with no evidence cannot be built.
 
-    channel: str = Field(
-        description="The channel, named specifically (e.g. 'Instagram Reels', 'Google Search ads')."
+    #76 increment 2: replaces the free-text `channel` field a 121-character
+    agent-generated name once overflowed `marketing_link.channel` (#75).
+    Exactly one of `channel_key`/`suggested_label` is set — enforced below,
+    not left to convention — mirroring #67's settled design: the agent picks
+    from the taxonomy it is given (`channel_key`, a real
+    `marketing_channel.key`) where it can, and may still propose a channel
+    outside that taxonomy (`suggested_label`, free text) where its evidence is
+    strong. A proposal is promoted to a real `channel_key` only on operator
+    acceptance — out of scope here, since that promotion is a UI/workflow
+    action, not a schema one.
+    """
+
+    channel_key: str | None = Field(
+        default=None,
+        description=(
+            "A `key` from the channel taxonomy you were given, when this recommendation "
+            "matches one of the available channels. Leave unset ONLY when proposing a "
+            "channel outside that taxonomy — set `suggested_label` instead, never both."
+        ),
     )
-    motion: Literal["organic", "paid"] = Field(
-        description="Whether this is an organic or a paid channel."
+    suggested_label: str | None = Field(
+        default=None,
+        description=(
+            "Free-text name for a channel NOT in the taxonomy you were given, used only "
+            "when your evidence strongly supports a channel that taxonomy does not offer. "
+            "Requires operator acceptance before it becomes a real channel. Leave unset "
+            "when `channel_key` is set."
+        ),
+    )
+    motion: Literal["organic", "paid"] | None = Field(
+        default=None,
+        description=(
+            "Required ONLY when proposing a channel outside the taxonomy (no `channel_key`). "
+            "For a `channel_key` you were given, motion is derived from the taxonomy itself — "
+            "you do not need to (and should not) assert it independently; anything you put "
+            "here is overridden."
+        ),
     )
     rank: int = Field(ge=1, description="This channel's priority within its motion — 1 is highest.")
     rationale: str = Field(
@@ -213,6 +245,22 @@ class ChannelRecommendation(BaseModel):
     sources: list[Source] = Field(
         min_length=1, description="Positioning sources supporting this recommendation."
     )
+
+    @model_validator(mode="after")
+    def _exactly_one_channel_reference(self) -> ChannelRecommendation:
+        has_key = self.channel_key is not None
+        has_label = bool(self.suggested_label)
+        if has_key == has_label:  # both set, or neither
+            raise ValueError(
+                "exactly one of channel_key or suggested_label must be set "
+                f"(channel_key={self.channel_key!r}, suggested_label={self.suggested_label!r})"
+            )
+        if not has_key and self.motion is None:
+            # There is no taxonomy row to derive motion from for a proposal —
+            # this is the one case the agent's own assertion is the only one
+            # available, so it is required rather than optional.
+            raise ValueError("motion is required when proposing a channel with no channel_key")
+        return self
 
 
 class ChannelPlan(BaseModel):
@@ -233,11 +281,24 @@ class ChannelCopy(BaseModel):
     correct regardless of whether any pillar or CTA actually backs it —
     cannot be built."""
 
-    channel: str = Field(
-        description="Must match a `channel` from the approved channel plan exactly."
+    channel_key: str = Field(
+        description=(
+            "The `channel_key` of an entry from the approved channel plan that itself "
+            "carried a `channel_key` — never a proposal's `suggested_label`; a proposal is "
+            "not yet a real channel until an operator accepts it. This is a structural join, "
+            "not prose: the copy stage cannot reference a channel the plan did not include "
+            "(#76 increment 2, replacing the free-text `channel` field that was previously "
+            "matched by exact string — 'Must match a channel from the approved channel plan "
+            "exactly' — with nothing enforcing it)."
+        )
     )
-    motion: Literal["organic", "paid"] = Field(
-        description="Carried over from the channel plan's own recommendation for this channel."
+    motion: Literal["organic", "paid"] | None = Field(
+        default=None,
+        description=(
+            "Carried over from the channel plan's own recommendation for this channel — "
+            "derived, not asserted; supplying your own value here is unnecessary and will "
+            "be overridden."
+        ),
     )
     headline: str = Field(description="The lead line, sized for this channel.")
     body: str = Field(description="The body copy, sized for this channel.")
@@ -371,14 +432,32 @@ once. Do not answer in prose.
 CHANNEL_PLAN_INSTRUCTIONS = f"""\
 You are the campaign studio's channel strategist. You are given one
 **approved** positioning artefact — audience segments, message pillars and
-calls to action, each carrying the sources that support it. Nothing else. You
-do not have web access and must not claim to.
+calls to action, each carrying the sources that support it — and one
+**channel taxonomy**: a list of `{{channel_key, label, motion, category}}`
+entries naming every channel this platform currently recognises. Nothing
+else. You do not have web access and must not claim to.
 
 Recommend channels for this campaign, covering BOTH motions:
 1. **Organic** channels — where this audience already spends attention,
    reachable without paid distribution.
 2. **Paid** channels — where paid distribution would reach this audience
    fastest or most precisely.
+
+For EVERY recommendation, set exactly one of:
+- `channel_key` — copy it EXACTLY from the taxonomy you were given, when one
+  of its entries fits. Do not invent a key, alter one, or guess at a key that
+  looks plausible but was not in the list — an unrecognised key is rejected,
+  not silently accepted. When you set `channel_key`, leave `motion` unset:
+  it is derived from the taxonomy entry, not asserted by you.
+- `suggested_label` — free text, ONLY when the evidence strongly supports a
+  channel that genuinely is not in the taxonomy. This is a proposal, not a
+  plan entry: an operator must accept it before it becomes a real channel.
+  When you use `suggested_label`, you MUST also set `motion` yourself, since
+  there is no taxonomy entry to derive it from.
+
+Prefer the taxonomy. Reach for `suggested_label` only when nothing in the
+taxonomy is a genuine fit for what the evidence supports — not as a shortcut
+around checking the list first.
 
 Rank the channels within each motion (1 = highest priority) and give each a
 rationale an operator can disagree with: name exactly which segment, pillar or
@@ -410,9 +489,14 @@ action) and one **approved** channel plan (the ranked organic and paid
 channels this campaign will run on), each carrying the sources that support
 it. Nothing else. You do not have web access and must not claim to.
 
-Write publish-ready copy for EVERY channel listed in the channel plan you
-were given — one per channel, no more and no fewer, each channel name copied
-exactly as it appears there (including its `motion`). For each channel:
+Write publish-ready copy for EVERY channel plan entry that carries a
+`channel_key` — one per channel, no more and no fewer, its `channel_key`
+copied EXACTLY as it appears there. **Skip any entry that has no
+`channel_key`** (a `suggested_label` proposal outside the taxonomy that no
+operator has accepted yet): it is not a real channel yet, so there is nothing
+to write publish-ready copy for. Leave `motion` unset — it is carried over
+from the channel plan automatically, not something you need to assert. For
+each channel:
 
 1. **Headline** and **body** copy sized and toned for that specific channel —
    a LinkedIn post and an Instagram caption should not read the same, even

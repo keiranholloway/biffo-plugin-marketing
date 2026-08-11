@@ -8,6 +8,7 @@ import {
   getPack,
   getResults,
   listCampaigns,
+  listChannels,
   parseArtefactBody,
   startResearch,
   updateCampaign,
@@ -276,6 +277,41 @@ describe('getPack', () => {
     )
     const pack = await getPack('c1')
     expect(pack.missing_placements).toEqual(['feed_1x1', 'story_9x16'])
+  })
+})
+
+describe('listChannels', () => {
+  it('calls the plugin API relative to the origin, not an absolute host', async () => {
+    stubSession()
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listChannels()
+
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url).toBe('/api/v1/plugins/marketing/channels')
+  })
+
+  it('returns the taxonomy rows as given', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { key: 'linkedin_organic', label: 'LinkedIn — organic', motion: 'organic', category: 'social', ad_platform: null },
+        ],
+      }),
+    )
+    await expect(listChannels()).resolves.toEqual([
+      { key: 'linkedin_organic', label: 'LinkedIn — organic', motion: 'organic', category: 'social', ad_platform: null },
+    ])
+  })
+
+  it('returns an empty list when the body is not an array', async () => {
+    stubSession()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }))
+    await expect(listChannels()).resolves.toEqual([])
   })
 })
 

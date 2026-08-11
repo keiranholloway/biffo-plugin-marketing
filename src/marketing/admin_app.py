@@ -472,14 +472,16 @@ def _pipeline_error_to_http(exc: pipeline.PipelineError) -> HTTPException:
 
 #: `research` is fanned out and handled as its own branch below — its advance
 #: function takes `chain_id`/`research_run_ids`, not a single `run_id`, so it
-#: cannot share this mapping's call shape. Every other stage is a single,
-#: un-fanned-out run, and shares exactly the shape `advance(gateway,
-#: run_id=...)`: adding one grows this dict by one line, not `_advance_artefact`
+#: cannot share this mapping's call shape. `channel_plan` and `copy` are ALSO
+#: their own branches below (#76 increment 2): both need extra context
+#: (the taxonomy/plan they were started against) read back from the pending
+#: artefact's own `body`, the same way `research_run_ids` already is — a
+#: shape this dict's uniform `advance(gateway, run_id=...)` call cannot carry.
+#: `positioning` is the one stage left that needs nothing beyond `run_id`:
+#: adding another like it grows this dict by one line, not `_advance_artefact`
 #: by a new branch.
 _SINGLE_RUN_ADVANCERS: dict[str, Callable[..., Any]] = {
     "positioning": pipeline.advance_positioning,
-    "channel_plan": pipeline.advance_channel_plan,
-    "copy": pipeline.advance_copy,
 }
 
 
@@ -490,24 +492,49 @@ async def _advance_artefact(
     something, proposing it once they have. Reading is what advances the
     pipeline (mirrors idea-scout's `get_run`) — there is no background loop
     anywhere in this plugin."""
+
+    # `agent_run_id` is stamped on creation by each stage's own starter route
+    # (`start_positioning_route` here, `start_channel_plan_route` in
+    # `channel_plan_routes.py`, `start_copy_route` in `copy_routes.py`). A row
+    # edited directly through generated CRUD could lack it, and "there is no
+    # run to advance" is a real, distinct failure from any pipeline error —
+    # checked once here since every branch below except `research` needs it.
+    def _require_run_id() -> str:
+        run_id = artefact.get("agent_run_id")
+        if not run_id:
+            raise pipeline.MalformedOutputError(
+                f"This {kind} artefact has no agent_run_id to advance."
+            )
+        return run_id
+
     if kind == "research":
         pending = json.loads(artefact.get("body") or "{}")
         research_run_ids = pending.get("research_run_ids") or []
         result = await pipeline.advance_research(
             gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
         )
+    elif kind == "channel_plan":
+        # `channel_taxonomy` is `{channel_key: motion}` for exactly what
+        # `start_channel_plan_route` showed this run — stashed in `body`
+        # while pending, same pattern as `research_run_ids` above (#76
+        # increment 2). See `pipeline.extract_channel_plan` for why it must
+        # be what the run was shown, not a fresh fetch.
+        pending = json.loads(artefact.get("body") or "{}")
+        taxonomy = pending.get("channel_taxonomy") or {}
+        result = await pipeline.advance_channel_plan(
+            gateway, run_id=_require_run_id(), taxonomy=taxonomy
+        )
+    elif kind == "copy":
+        # `channel_plan_channels` is `{channel_key: motion}` for the approved
+        # plan's real entries this run was started against — same pattern,
+        # see `pipeline.extract_copy`.
+        pending = json.loads(artefact.get("body") or "{}")
+        channel_plan_channels = pending.get("channel_plan_channels") or {}
+        result = await pipeline.advance_copy(
+            gateway, run_id=_require_run_id(), channel_plan_channels=channel_plan_channels
+        )
     else:
-        # `agent_run_id` is stamped on creation by each stage's own starter
-        # route (`start_positioning_route` here, `start_channel_plan_route`
-        # in `channel_plan_routes.py`). A row edited directly through
-        # generated CRUD could lack it, and "there is no run to advance" is a
-        # real, distinct failure from any pipeline error.
-        run_id = artefact.get("agent_run_id")
-        if not run_id:
-            raise pipeline.MalformedOutputError(
-                f"This {kind} artefact has no agent_run_id to advance."
-            )
-        result = await _SINGLE_RUN_ADVANCERS[kind](gateway, run_id=run_id)
+        result = await _SINGLE_RUN_ADVANCERS[kind](gateway, run_id=_require_run_id())
 
     if result is None:
         return artefact  # still in flight; nothing to propose yet

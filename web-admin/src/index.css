@@ -262,6 +262,27 @@ button.secondary {
   color: #9c1a1a;
 }
 
+/* An unrecognised channel_key is a problem, not a neutral state: the taxonomy
+   has no row for it, so the operator is looking at a machine identifier where a
+   channel name belongs. Without this rule it inherits `.badge`'s grey, which
+   reads as ordinary — and "looks ordinary" is the failure this whole change set
+   removed when it stopped rendering such channels blank. Amber, not red: the
+   pack still assembles, so it is a warning rather than a rejection. */
+.badge-unknown {
+  background: #fdf0d5;
+  color: #8a5a00;
+}
+
+.channel-unknown {
+  font-style: italic;
+}
+
+/* Muted while the taxonomy loads, so a key briefly showing before its label
+   arrives cannot be mistaken for the resolved name. */
+.channel-loading {
+  color: #888;
+}
+
 .stage-actions {
   display: flex;
   gap: 0.5rem;

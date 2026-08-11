@@ -97,10 +97,28 @@ async def start_copy_route(
         raw = artefact.get("body")
         return json.loads(raw) if isinstance(raw, str) else (raw or {})
 
+    channel_plan_body = _body(approved_channel_plan)
+    # `{channel_key: motion}` for the plan's real entries (#76 increment 2) —
+    # excludes any suggested_label-only proposal, since it is not a real
+    # channel yet. Stored on the pending artefact below and re-read at
+    # advance time so `extract_copy` validates against exactly this set,
+    # not whatever the plan has become by the time the run completes.
+    #
+    # Raises 409 when the approved plan predates the taxonomy migration —
+    # every entry the old free-text shape, none carrying a channel_key — the
+    # explicit "existing dev data" answer (#76 increment 2): rather than
+    # silently producing copy with no channel to reference, or crashing on a
+    # missing key, this campaign must have channel planning re-run before
+    # copy can be generated for it.
+    try:
+        channel_plan_channels = pipeline.channel_plan_channel_map(channel_plan_body)
+    except pipeline.StaleChannelPlanError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
     causation_id, run_id = await pipeline.start_copy(
         gateway,
         positioning_body=_body(approved_positioning),
-        channel_plan_body=_body(approved_channel_plan),
+        channel_plan_body=channel_plan_body,
     )
 
     created = await admin_app._core(
@@ -113,6 +131,9 @@ async def start_copy_route(
             "status": "pending",
             "causation_id": causation_id,
             "agent_run_id": run_id,
+            # Pending-state payload, overwritten with the real result once
+            # proposed — same pattern as `channel_plan_routes.py`'s own.
+            "body": json.dumps({"channel_plan_channels": channel_plan_channels}),
         },
     )
     created.raise_for_status()

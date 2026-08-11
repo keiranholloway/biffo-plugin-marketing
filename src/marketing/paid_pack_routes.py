@@ -85,50 +85,59 @@ def get_campaign_client(
     return principal_client.PrincipalCoreClient(admin.token)
 
 
+async def _channel_ad_platforms(admin_token: str) -> dict[str, str | None]:
+    """`{channel_key: ad_platform}` for this tenant's channel taxonomy (#76
+    increment 2) — what `_platform_for_channel` looks up, replacing the
+    substring-keyword guess it used to be."""
+    resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin_token)
+    resp.raise_for_status()
+    rows = resp.json() or []
+    return {row["key"]: row.get("ad_platform") for row in rows}
+
+
 # ── Ad copy at real platform character limits ───────────────────────────────
 
-#: Character limits by guessed platform, per field. Deliberately conservative,
+#: Character limits by ad platform, per field. Deliberately conservative,
 #: published numbers (Meta/Google/TikTok/LinkedIn ad-copy guidance), not
 #: fetched from anywhere — this milestone calls no platform API, so these are
 #: static data, the same way `definitions.PLACEMENTS`'s aspect ratios are.
-#: `"generic"` is the fallback for a channel this table does not recognise,
-#: sized to the narrowest of the known platforms so a guess never overstates
-#: how much room the operator actually has.
+#: `"generic"` is the fallback for a channel with no (or an unrecognised)
+#: `ad_platform`, sized to the narrowest of the known platforms so a gap
+#: never overstates how much room the operator actually has.
+#:
+#: Keyed by `marketing_channel.ad_platform` (#76 increment 2) — "google"
+#: covers both Google Search ads and YouTube ads, which is coarser than
+#: ideal (search and video ad copy specs genuinely differ), but the taxonomy
+#: does not carry a finer-grained platform today and these limits are already
+#: declared conservative, static guidance rather than authoritative ones —
+#: see the module docstring. Splitting it further is a taxonomy change, not
+#: a lookup-table one.
 _PLATFORM_LIMITS: dict[str, dict[str, int]] = {
     "meta": {"headline": 40, "body": 125, "cta": 20},
-    "google_search": {"headline": 30, "body": 90, "cta": 30},
+    "google": {"headline": 30, "body": 90, "cta": 30},
     "tiktok": {"headline": 100, "body": 100, "cta": 20},
     "linkedin": {"headline": 70, "body": 150, "cta": 20},
     "generic": {"headline": 30, "body": 90, "cta": 20},
 }
 
-#: Ordered so a more specific keyword (e.g. "google") is checked before a
-#: channel name that happens to also mention a competitor in passing —
-#: not currently ambiguous with real channel names, but order is still
-#: significant and worth being explicit about.
-_PLATFORM_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("meta", ("facebook", "instagram", "meta")),
-    ("google_search", ("google",)),
-    ("tiktok", ("tiktok",)),
-    ("linkedin", ("linkedin",)),
-)
-
 _ELLIPSIS = "…"
 
 
-def _platform_for_channel(channel: str) -> str:
-    """The best-guess ad platform for a free-text channel name (e.g.
-    "Instagram Reels", "Google Search ads") — there is no channel enum
-    anywhere in this pipeline (`ChannelRecommendation.channel` is free text
-    the channel-plan agent names itself), so this is a keyword guess, not a
-    lookup. Falls back to `"generic"`'s narrower limits rather than raising:
-    an unrecognised channel still deserves a pack, just a more conservative
+def _platform_for_channel(channel_key: str, ad_platforms: dict[str, str | None]) -> str:
+    """The ad platform this channel's spend and character limits belong to —
+    a lookup on `marketing_channel.ad_platform` (#76 increment 2), replacing
+    the substring-keyword guess this function used to be (matching "google"
+    against a free-text channel name such as "Google Search ads", with no
+    channel enum anywhere in the pipeline to check against instead). The
+    keyword table itself is deleted, not kept as an unreachable fallback —
+    a dead fallback is a thing a later author "fixes" back into use.
+
+    Falls back to `"generic"`'s narrower limits when the channel has no
+    `ad_platform` set, or names one this table does not (yet) carry: an
+    unrecognised platform still deserves a pack, just a more conservative
     one."""
-    lowered = channel.lower()
-    for platform, keywords in _PLATFORM_KEYWORDS:
-        if any(keyword in lowered for keyword in keywords):
-            return platform
-    return "generic"
+    platform = ad_platforms.get(channel_key)
+    return platform if platform in _PLATFORM_LIMITS else "generic"
 
 
 def _fit_to_limit(text: str, limit: int) -> tuple[str, bool]:
@@ -161,8 +170,12 @@ def _fit_to_limit(text: str, limit: int) -> tuple[str, bool]:
     return f"{candidate.rstrip()}{_ELLIPSIS}", True
 
 
-def _ad_copy_variant(channel_copy: dict[str, Any]) -> dict[str, Any]:
-    """One paid channel's copy, trimmed to its guessed platform's limits.
+def _ad_copy_variant(
+    channel_copy: dict[str, Any], ad_platforms: dict[str, str | None]
+) -> dict[str, Any]:
+    """One paid channel's copy, trimmed to its actual platform's limits —
+    looked up from the taxonomy (`ad_platforms`, #76 increment 2), not
+    guessed from the channel's name.
 
     The original headline/body/cta are never returned alongside the trimmed
     ones — this pack is meant to be pasted straight into Ads Manager, and a
@@ -170,8 +183,8 @@ def _ad_copy_variant(channel_copy: dict[str, Any]) -> dict[str, Any]:
     invitation to paste the wrong one. Each field's own `_limit` and
     `_truncated` flag says what happened, so the trim is never silent.
     """
-    channel = channel_copy.get("channel") or ""
-    platform = _platform_for_channel(channel)
+    channel_key = channel_copy.get("channel_key") or ""
+    platform = _platform_for_channel(channel_key, ad_platforms)
     limits = _PLATFORM_LIMITS[platform]
 
     headline, headline_truncated = _fit_to_limit(
@@ -181,7 +194,13 @@ def _ad_copy_variant(channel_copy: dict[str, Any]) -> dict[str, Any]:
     cta, cta_truncated = _fit_to_limit(channel_copy.get("cta") or "", limits["cta"])
 
     return {
-        "channel": channel,
+        # Outward key kept as "channel" (not renamed to "channel_key") for
+        # admin-UI backward compatibility — `PaidPack.tsx` already renders
+        # `.channel`/`.platform`, and this dict is one this plugin builds
+        # itself, not a verbatim artefact-body passthrough. The value is now
+        # a channel_key rather than a free-text label — see
+        # `pack_routes._ensure_links`'s identical choice.
+        "channel": channel_key,
         "platform": platform,
         "headline": headline,
         "headline_limit": limits["headline"],
@@ -288,7 +307,12 @@ async def get_paid_pack_route(
     copy_body = (
         json.loads(raw_copy_body) if isinstance(raw_copy_body, str) else (raw_copy_body or {})
     )
-    paid_channels = [c for c in (copy_body.get("channels") or []) if c.get("motion") == "paid"]
+    channels = copy_body.get("channels") or []
+    try:
+        pipeline.require_channel_keyed_copy(channels)
+    except pipeline.StaleChannelPlanError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    paid_channels = [c for c in channels if c.get("motion") == "paid"]
     if not paid_channels:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -330,6 +354,8 @@ async def get_paid_pack_route(
             detail="The approved positioning artefact has no segments to target.",
         )
 
+    ad_platforms = await _channel_ad_platforms(admin.token)
+
     assets, missing_placements = await pack_routes._existing_assets(
         campaign_id, campaign_client=campaign_client
     )
@@ -352,12 +378,12 @@ async def get_paid_pack_route(
     # also describes (a paid channel sharing an organic channel's exact name
     # would still surface that organic link instead of minting a paid one) —
     # that half needs the source fix.
-    paid_channel_names = {c["channel"] for c in paid_channels}
-    links = [link for link in links if link.get("channel") in paid_channel_names]
+    paid_channel_keys = {c["channel_key"] for c in paid_channels}
+    links = [link for link in links if link.get("channel") in paid_channel_keys]
 
     return {
         "campaign_id": campaign_id,
-        "ad_copy": [_ad_copy_variant(c) for c in paid_channels],
+        "ad_copy": [_ad_copy_variant(c, ad_platforms) for c in paid_channels],
         "assets": assets_with_urls,
         "missing_placements": missing_placements,
         "targeting": targeting,

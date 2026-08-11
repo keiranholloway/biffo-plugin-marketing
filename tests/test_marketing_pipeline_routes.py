@@ -26,9 +26,32 @@ class _FakeCore:
     """An in-memory `marketing_campaign` + `marketing_artefact` store, reached
     the same way `admin_app._core` reaches the real one."""
 
+    #: The tenant's seeded channel taxonomy (#76 increment 2) —
+    #: `start_channel_plan_route` fetches this to build the agent's
+    #: `channel_taxonomy` input and the `{channel_key: motion}` map every
+    #: fixture below's `_channel_plan_call`/`_copy_call` channel_keys must
+    #: resolve against.
+    DEFAULT_CHANNELS: list[dict[str, Any]] = [
+        {
+            "key": "instagram_organic",
+            "label": "Instagram — organic",
+            "motion": "organic",
+            "category": "social",
+            "ad_platform": None,
+        },
+        {
+            "key": "google_search_paid",
+            "label": "Google Search ads",
+            "motion": "paid",
+            "category": "search",
+            "ad_platform": "google",
+        },
+    ]
+
     def __init__(self, *, brief: str | None = "Reach multi-location operators.") -> None:
         self.campaign = {"id": _CAMPAIGN, "brief": brief}
         self.artefacts: dict[str, dict[str, Any]] = {}
+        self.channels: list[dict[str, Any]] = [dict(c) for c in self.DEFAULT_CHANNELS]
         self._next_id = 0
 
     async def __call__(self, method: str, path: str, token: str, **kw: Any) -> httpx.Response:
@@ -38,6 +61,8 @@ class _FakeCore:
             return httpx.Response(200, json=self.campaign, request=request)
         if method == "GET" and path.startswith(f"{prefix}/campaigns/"):
             return httpx.Response(404, json={"detail": "not found"}, request=request)
+        if method == "GET" and path == f"{prefix}/channels":
+            return httpx.Response(200, json=self.channels, request=request)
         if method == "GET" and path == f"{prefix}/artefacts":
             params = kw.get("params") or {}
             rows = [
@@ -204,15 +229,13 @@ def _channel_plan_call(url: str = "https://example.com/thread") -> list[dict[str
                         "arguments": {
                             "channels": [
                                 {
-                                    "channel": "Instagram Reels",
-                                    "motion": "organic",
+                                    "channel_key": "instagram_organic",
                                     "rank": 1,
                                     "rationale": "r",
                                     "sources": [{"url": url, "note": "n"}],
                                 },
                                 {
-                                    "channel": "Google Search ads",
-                                    "motion": "paid",
+                                    "channel_key": "google_search_paid",
                                     "rank": 1,
                                     "rationale": "r",
                                     "sources": [{"url": url, "note": "n"}],
@@ -529,6 +552,10 @@ def test_start_channel_plan_runs_once_positioning_is_approved(ctx) -> None:
     assert channel_plan_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == (
         "Segment"
     )
+    # The taxonomy fetched from `GET /channels` (#76 increment 2) rides along
+    # as the agent's own input, not something it has to be told separately.
+    taxonomy = channel_plan_requests[0]["input_payload"]["channel_taxonomy"]
+    assert {c["channel_key"] for c in taxonomy} == {"instagram_organic", "google_search_paid"}
 
 
 def test_get_channel_plan_artefact_proposes_organic_and_paid_once_it_succeeds(ctx) -> None:
@@ -595,8 +622,7 @@ def _copy_call(url: str = "https://example.com/thread") -> list[dict[str, Any]]:
                         "arguments": {
                             "channels": [
                                 {
-                                    "channel": "Instagram Reels",
-                                    "motion": "organic",
+                                    "channel_key": "instagram_organic",
                                     "headline": "Run every site the same way, finally.",
                                     "body": "One dashboard, every location.",
                                     "cta": "See how it works",
@@ -692,8 +718,8 @@ def test_start_copy_runs_once_both_upstream_artefacts_are_approved(ctx) -> None:
     copy_requests = [r for r in gateway.requested if r["agent_name"] == "marketing-copy"]
     assert len(copy_requests) == 1
     assert copy_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == "Segment"
-    assert copy_requests[0]["input_payload"]["channel_plan"]["channels"][0]["channel"] == (
-        "Instagram Reels"
+    assert copy_requests[0]["input_payload"]["channel_plan"]["channels"][0]["channel_key"] == (
+        "instagram_organic"
     )
 
 
@@ -711,7 +737,8 @@ def test_get_copy_artefact_proposes_once_it_succeeds(ctx) -> None:
     body = resp.json()
     assert body["status"] == "proposed"
     stored_body = json.loads(body["body"])
-    assert stored_body["channels"][0]["channel"] == "Instagram Reels"
+    assert stored_body["channels"][0]["channel_key"] == "instagram_organic"
+    assert stored_body["channels"][0]["motion"] == "organic"  # derived from the plan
 
 
 def test_get_copy_artefact_502s_a_zero_citation_run_and_leaves_it_pending(ctx) -> None:

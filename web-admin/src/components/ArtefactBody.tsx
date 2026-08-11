@@ -7,6 +7,8 @@ import type {
   ResearchSynthesisBody,
   Source,
 } from '../lib/api'
+import type { ChannelLookup } from '../lib/useChannelTaxonomy'
+import { ChannelName } from './ChannelName'
 
 /** Every artefact kind's body is grounded in citations, and the citations are
  * the whole reason a human approval gate exists here at all — see
@@ -112,16 +114,24 @@ export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
   )
 }
 
-export function ChannelPlanArtefact({ body }: { body: ChannelPlanBodyT }) {
+export function ChannelPlanArtefact({
+  body,
+  channelLookup,
+}: {
+  body: ChannelPlanBodyT
+  channelLookup: ChannelLookup
+}) {
   const byRank = [...body.channels].sort((a, b) => a.rank - b.rank)
   return (
     <div className="artefact-body">
       <FindingGroup
         items={byRank.map((c, i) => ({
-          key: `${c.channel}-${i}`,
+          key: `${c.channel_key ?? c.suggested_label ?? 'proposal'}-${i}`,
           heading: (
             <h4>
-              #{c.rank} {c.channel} <span className={`motion motion-${c.motion}`}>{c.motion}</span>
+              #{c.rank}{' '}
+              <ChannelName channelKey={c.channel_key} suggestedLabel={c.suggested_label} lookup={channelLookup} />{' '}
+              <span className={`motion motion-${c.motion}`}>{c.motion}</span>
             </h4>
           ),
           body: <p>{c.rationale}</p>,
@@ -132,15 +142,16 @@ export function ChannelPlanArtefact({ body }: { body: ChannelPlanBodyT }) {
   )
 }
 
-export function CopyArtefact({ body }: { body: CopySetBody }) {
+export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; channelLookup: ChannelLookup }) {
   return (
     <div className="artefact-body">
       <FindingGroup
         items={body.channels.map((c, i) => ({
-          key: `${c.channel}-${i}`,
+          key: `${c.channel_key}-${i}`,
           heading: (
             <h4>
-              {c.channel} <span className={`motion motion-${c.motion}`}>{c.motion}</span>
+              <ChannelName channelKey={c.channel_key} suggestedLabel={null} lookup={channelLookup} />{' '}
+              <span className={`motion motion-${c.motion}`}>{c.motion}</span>
             </h4>
           ),
           body: (

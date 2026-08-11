@@ -26,7 +26,7 @@ _SOURCE_MEDIA_ID = "media-source"
 _BASE_URL = "https://dev.example.invalid"
 
 _ORGANIC_CHANNEL = {
-    "channel": "Instagram Reels",
+    "channel_key": "instagram_organic",
     "motion": "organic",
     "headline": "Run every site the same way, finally.",
     "body": "One dashboard, every location.",
@@ -35,7 +35,7 @@ _ORGANIC_CHANNEL = {
 }
 
 _PAID_CHANNEL_META = {
-    "channel": "Facebook feed ads",
+    "channel_key": "facebook_paid",
     "motion": "paid",
     "headline": ("Run every one of your sites exactly the same way, finally, at last, for good"),
     "body": (
@@ -47,13 +47,40 @@ _PAID_CHANNEL_META = {
 }
 
 _PAID_CHANNEL_GOOGLE = {
-    "channel": "Google Search ads",
+    "channel_key": "google_search_paid",
     "motion": "paid",
     "headline": "Short headline",
     "body": "Short body",
     "cta": "Go",
     "sources": [{"url": "https://example.com/w", "note": "n"}],
 }
+
+#: The taxonomy rows behind the channel_keys above (#76 increment 2) — what
+#: `_channel_ad_platforms` fetches from `GET /channels` and
+#: `_platform_for_channel` looks `ad_platform` up in.
+_CHANNEL_TAXONOMY = [
+    {
+        "key": "instagram_organic",
+        "label": "Instagram — organic",
+        "motion": "organic",
+        "category": "social",
+        "ad_platform": None,
+    },
+    {
+        "key": "facebook_paid",
+        "label": "Facebook ads",
+        "motion": "paid",
+        "category": "social",
+        "ad_platform": "meta",
+    },
+    {
+        "key": "google_search_paid",
+        "label": "Google Search ads",
+        "motion": "paid",
+        "category": "search",
+        "ad_platform": "google",
+    },
+]
 
 _SEGMENTS = [
     {
@@ -125,6 +152,7 @@ class _FakeCore:
         self.copy_artefact = copy_artefact
         self.positioning_artefact = positioning_artefact
         self.links: list[dict[str, Any]] = []
+        self.channels: list[dict[str, Any]] = list(_CHANNEL_TAXONOMY)
         self._next_link_id = 0
 
     async def __call__(self, method: str, path: str, token: str, **kw: Any) -> httpx.Response:
@@ -134,6 +162,8 @@ class _FakeCore:
             if self.campaign is None:
                 return httpx.Response(404, json={"detail": "not found"}, request=request)
             return httpx.Response(200, json=self.campaign, request=request)
+        if method == "GET" and path == f"{prefix}/channels":
+            return httpx.Response(200, json=self.channels, request=request)
         if method == "GET" and path == f"{prefix}/artefacts":
             params = kw.get("params") or {}
             kind = params.get("kind")
@@ -336,6 +366,36 @@ def test_assembles_with_no_assets_reporting_every_placement_missing(
     assert set(body["missing_placements"]) == set(PLACEMENTS)
 
 
+def test_409s_a_pre_migration_copy_artefact_with_no_channel_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same guard as `test_marketing_pack_routes.py`'s equivalent, the paid
+    half: a copy artefact approved before the taxonomy migration existed
+    must not reach `_ad_copy_variant` at all."""
+    pre_migration_channels = [
+        {
+            "channel": "Google Search ads (non-brand, long-tail intent)",
+            "motion": "paid",
+            "headline": "h",
+            "body": "b",
+            "cta": "c",
+            "sources": [{"url": "https://example.com/y", "note": "n"}],
+        }
+    ]
+    core = _FakeCore(
+        copy_artefact=_copy_artefact(pre_migration_channels),
+        positioning_artefact=_positioning_artefact(_SEGMENTS),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
+
+    assert resp.status_code == 409
+    assert "channel_key" in resp.json()["detail"]
+
+
 # ── the happy path ───────────────────────────────────────────────────────────
 
 
@@ -355,12 +415,13 @@ def test_assembles_the_paid_pack(monkeypatch: pytest.MonkeyPatch) -> None:
     body = resp.json()
 
     # 1. Ad copy: only the PAID channels, never the organic one, each fit to
-    # its guessed platform's limits.
+    # its ACTUAL platform's limits — looked up from the taxonomy's
+    # `ad_platform` (#76 increment 2), not guessed from the channel's name.
     assert {c["channel"] for c in body["ad_copy"]} == {
-        "Facebook feed ads",
-        "Google Search ads",
+        "facebook_paid",
+        "google_search_paid",
     }
-    meta_copy = next(c for c in body["ad_copy"] if c["channel"] == "Facebook feed ads")
+    meta_copy = next(c for c in body["ad_copy"] if c["channel"] == "facebook_paid")
     assert meta_copy["platform"] == "meta"
     assert len(meta_copy["headline"]) <= meta_copy["headline_limit"] == 40
     assert len(meta_copy["body"]) <= meta_copy["body_limit"] == 125
@@ -368,8 +429,8 @@ def test_assembles_the_paid_pack(monkeypatch: pytest.MonkeyPatch) -> None:
     assert meta_copy["headline"].endswith("…")
     assert " " not in meta_copy["headline"][-2:]  # never cut mid-word
 
-    google_copy = next(c for c in body["ad_copy"] if c["channel"] == "Google Search ads")
-    assert google_copy["platform"] == "google_search"
+    google_copy = next(c for c in body["ad_copy"] if c["channel"] == "google_search_paid")
+    assert google_copy["platform"] == "google"
     # Short enough already: untouched, not truncated.
     assert google_copy["headline"] == "Short headline"
     assert google_copy["headline_truncated"] is False
@@ -419,7 +480,7 @@ def test_does_not_leak_an_existing_organic_link_into_the_paid_pack(
             "id": "link-organic",
             "campaign_id": _CAMPAIGN,
             "token": "organic-token",
-            "channel": _ORGANIC_CHANNEL["channel"],
+            "channel": _ORGANIC_CHANNEL["channel_key"],
             "variant": None,
             "is_paid": False,
             "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
@@ -433,7 +494,7 @@ def test_does_not_leak_an_existing_organic_link_into_the_paid_pack(
 
     assert resp.status_code == 200
     links = resp.json()["links"]
-    assert {link["channel"] for link in links} == {_PAID_CHANNEL_META["channel"]}
+    assert {link["channel"] for link in links} == {_PAID_CHANNEL_META["channel_key"]}
     assert all(link["is_paid"] for link in links)
 
 
@@ -449,7 +510,7 @@ def test_does_not_remint_a_paid_link_for_a_channel_that_already_has_one(
             "id": "link-existing",
             "campaign_id": _CAMPAIGN,
             "token": "existing-token",
-            "channel": "Facebook feed ads",
+            "channel": "facebook_paid",
             "variant": None,
             "is_paid": True,
             "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
@@ -505,20 +566,37 @@ def test_fit_to_limit_handles_a_limit_smaller_than_the_ellipsis() -> None:
 
 
 @pytest.mark.parametrize(
-    ("channel", "expected"),
+    ("channel_key", "ad_platforms", "expected"),
     [
-        ("Facebook feed ads", "meta"),
-        ("Instagram Stories ads", "meta"),
-        ("Meta Advantage+", "meta"),
-        ("Google Search ads", "google_search"),
-        ("Google Performance Max", "google_search"),
-        ("TikTok Spark ads", "tiktok"),
-        ("LinkedIn Sponsored Content", "linkedin"),
-        ("Pinterest ads", "generic"),
+        # A real, recognised platform is a straight lookup (#76 increment 2 —
+        # no more keyword-guessing a channel's name).
+        ("facebook_paid", {"facebook_paid": "meta"}, "meta"),
+        ("instagram_paid", {"instagram_paid": "meta"}, "meta"),
+        ("google_search_paid", {"google_search_paid": "google"}, "google"),
+        ("youtube_paid", {"youtube_paid": "google"}, "google"),
+        ("tiktok_paid", {"tiktok_paid": "tiktok"}, "tiktok"),
+        ("linkedin_paid", {"linkedin_paid": "linkedin"}, "linkedin"),
+        # No ad_platform set on the channel (organic, or a platform-agnostic
+        # medium like direct mail) falls back to generic.
+        ("direct_mail", {"direct_mail": None}, "generic"),
+        # A platform this table does not (yet) carry limits for also falls
+        # back to generic, same as an unrecognised one used to.
+        ("x_paid", {"x_paid": "x"}, "generic"),
+        # A channel_key missing from the map entirely (defensive) — also generic.
+        ("unknown_channel", {}, "generic"),
     ],
 )
-def test_platform_for_channel(channel: str, expected: str) -> None:
-    assert paid_pack_routes._platform_for_channel(channel) == expected
+def test_platform_for_channel(
+    channel_key: str, ad_platforms: dict[str, str | None], expected: str
+) -> None:
+    assert paid_pack_routes._platform_for_channel(channel_key, ad_platforms) == expected
+
+
+def test_platform_keyword_table_is_gone() -> None:
+    """The substring-keyword table this function used to guess from is
+    DELETED (#76 increment 2), not kept as an unreachable fallback — a dead
+    fallback is a thing a later author "fixes" back into use."""
+    assert not hasattr(paid_pack_routes, "_PLATFORM_KEYWORDS")
 
 
 def test_budget_recommendation_scales_with_channel_count() -> None:

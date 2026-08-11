@@ -35,7 +35,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
 
@@ -105,6 +105,26 @@ class ArtefactNotApprovedError(PipelineError):
     """A stage that requires an approved input artefact was asked to proceed
     against one that is not ``approved``. ``proposed`` output must never be
     usable by the next stage, or the gate is decorative."""
+
+
+class UnknownChannelError(PipelineError):
+    """A channel-plan or copy run referenced a ``channel_key`` outside the set
+    it was actually given (#76 increment 2) — the agent inventing or altering
+    a key rather than copying one from the taxonomy/plan it was shown, or a
+    copy run referencing a channel the approved plan did not include. This is
+    the structural half of the join #75/#67 exist to make real: "must match
+    exactly" used to be prose nobody enforced; this is the enforcement.
+    """
+
+
+class StaleChannelPlanError(PipelineError):
+    """A copy run was started against an approved channel plan that predates
+    the taxonomy migration (#76 increment 2) — every one of its entries is
+    the old free-text shape, with no ``channel_key`` at all, so there is
+    structurally nothing for a copy run to reference. Distinct from
+    :class:`UnknownChannelError` (which fires when the *agent* invents a key)
+    because the cause here is upstream data, not agent behaviour: the fix is
+    re-running channel planning on this campaign, not retrying copy."""
 
 
 def _tool_call_arguments(messages: list[dict[str, Any]], tool_name: str) -> Any:
@@ -226,14 +246,27 @@ def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
     )
 
 
-def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
+def extract_channel_plan(
+    messages: list[dict[str, Any]], *, taxonomy: dict[str, Literal["organic", "paid"]]
+) -> ChannelPlan:
     """The channel-plan agent's output, or a hard failure — the same two
     failure modes as :func:`extract_positioning`, for the same reason (M4,
     issue #3): a channel recommendation is exactly as fabricable as a
     positioning claim, and arguably the most confident-sounding one in the
     whole pipeline, because channel advice reads as generic wisdom whether or
-    not anyone researched it."""
-    return _extract_cited_artefact(
+    not anyone researched it.
+
+    ``taxonomy`` is ``{channel_key: motion}`` for exactly the taxonomy this
+    run was shown (#76 increment 2) — stored on the artefact at start time,
+    not re-fetched, so this validates against what the agent actually saw
+    rather than whatever the taxonomy happens to be *now*. Every
+    recommendation naming a ``channel_key`` is checked against it
+    (:class:`UnknownChannelError` on a miss — the agent inventing or
+    mangling a key) and has its ``motion`` **overwritten** from the taxonomy:
+    the agent stops asserting motion independently for a real channel, full
+    stop, regardless of what it put in the field.
+    """
+    plan = _extract_cited_artefact(
         messages,
         tool_name=CHANNEL_PLAN_TOOL_NAME,
         model_cls=ChannelPlan,
@@ -244,15 +277,38 @@ def extract_channel_plan(messages: list[dict[str, Any]]) -> ChannelPlan:
             "was produced — try running channel planning again."
         ),
     )
+    for recommendation in plan.channels:
+        if recommendation.channel_key is None:
+            continue  # a suggested_label proposal — motion is the agent's own, required already
+        if recommendation.channel_key not in taxonomy:
+            raise UnknownChannelError(
+                f"The channel-plan run referenced channel_key {recommendation.channel_key!r}, "
+                "which was not in the taxonomy it was given."
+            )
+        recommendation.motion = taxonomy[recommendation.channel_key]  # derived, not asserted
+    return plan
 
 
-def extract_copy(messages: list[dict[str, Any]]) -> CopySet:
+def extract_copy(
+    messages: list[dict[str, Any]], *, channel_plan_channels: dict[str, Literal["organic", "paid"]]
+) -> CopySet:
     """The copy agent's output, or a hard failure — the same two failure
     modes as :func:`extract_channel_plan` (M5, issue #4): copy is exactly as
     fabricable as a channel recommendation, and arguably the most
     publishable-looking one in the whole pipeline, since prose reads as
-    correct whether or not any pillar or CTA actually backs it."""
-    return _extract_cited_artefact(
+    correct whether or not any pillar or CTA actually backs it.
+
+    ``channel_plan_channels`` is ``{channel_key: motion}`` for exactly the
+    approved channel plan entries that themselves carried a ``channel_key``
+    (#76 increment 2) — a proposal with only a ``suggested_label`` is
+    excluded, since it is not yet a real channel. This is the join #67/#75
+    exist to make structural: every copy channel must be one this run was
+    actually given (:class:`UnknownChannelError` otherwise — "the copy stage
+    cannot reference a channel the plan did not include"), and ``motion`` is
+    **overwritten** from the plan rather than trusted from the copy agent,
+    same reasoning as :func:`extract_channel_plan`.
+    """
+    result = _extract_cited_artefact(
         messages,
         tool_name=COPY_TOOL_NAME,
         model_cls=CopySet,
@@ -263,6 +319,14 @@ def extract_copy(messages: list[dict[str, Any]]) -> CopySet:
             "was produced — try running copy generation again."
         ),
     )
+    for channel_copy in result.channels:
+        if channel_copy.channel_key not in channel_plan_channels:
+            raise UnknownChannelError(
+                f"The copy run referenced channel_key {channel_copy.channel_key!r}, which the "
+                "approved channel plan did not include."
+            )
+        channel_copy.motion = channel_plan_channels[channel_copy.channel_key]  # derived
+    return result
 
 
 def flatten_citations(
@@ -506,12 +570,24 @@ async def start_channel_plan(
     gateway: AgentGateway,
     *,
     positioning_body: dict[str, Any],
+    taxonomy: list[dict[str, Any]],
     channel_plan_model: str = DEFAULT_CHANNEL_PLAN_MODEL,
 ) -> tuple[str, str]:
     """Request the single channel-plan agent (M4), given the *approved*
-    positioning artefact's body as its whole input.
+    positioning artefact's body AND the tenant's channel taxonomy as input.
 
-    Mirrors :func:`start_positioning` exactly, one stage further down the
+    ``taxonomy`` (#76 increment 2) is a list of
+    ``{channel_key, label, motion, category}`` dicts — the tenant's
+    ``marketing_channel`` rows, fetched by the caller — so the agent can pick
+    real, stable ids rather than inventing free text the copy stage and
+    ``marketing_link`` would then have to trust exactly (#75). The caller is
+    also responsible for keeping a ``{channel_key: motion}`` copy of this same
+    taxonomy to validate against later (:func:`extract_channel_plan`'s
+    ``taxonomy`` parameter) — passed here rather than re-derived, because it
+    must be exactly what THIS run was shown, not whatever the taxonomy has
+    grown to by the time the run completes.
+
+    Mirrors :func:`start_positioning` otherwise, one stage further down the
     chain: a single-run chain, not fanned out, because nothing fans in on it.
     """
     causation_id = str(uuid.uuid4())
@@ -522,22 +598,26 @@ async def start_channel_plan(
             instructions=CHANNEL_PLAN_INSTRUCTIONS,
         ),
         output_tool=channel_plan_tool_schema(),
-        input_payload={"positioning": positioning_body},
+        input_payload={"positioning": positioning_body, "channel_taxonomy": taxonomy},
         causation_id=causation_id,
     )
     return causation_id, run_id
 
 
-async def advance_channel_plan(gateway: AgentGateway, *, run_id: str) -> ChannelPlan | None:
+async def advance_channel_plan(
+    gateway: AgentGateway, *, run_id: str, taxonomy: dict[str, Literal["organic", "paid"]]
+) -> ChannelPlan | None:
     """Read the channel-plan run, advancing nothing else — mirrors
     :func:`advance_positioning`: a single run, not a chain, so there is no
-    fan-in to discover."""
+    fan-in to discover. ``taxonomy`` is ``{channel_key: motion}`` for exactly
+    what :func:`start_channel_plan` gave this run — see
+    :func:`extract_channel_plan` for how it is used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
-    return extract_channel_plan(view.messages)
+    return extract_channel_plan(view.messages, taxonomy=taxonomy)
 
 
 async def start_copy(
@@ -566,16 +646,75 @@ async def start_copy(
     return causation_id, run_id
 
 
-async def advance_copy(gateway: AgentGateway, *, run_id: str) -> CopySet | None:
+async def advance_copy(
+    gateway: AgentGateway,
+    *,
+    run_id: str,
+    channel_plan_channels: dict[str, Literal["organic", "paid"]],
+) -> CopySet | None:
     """Read the copy run, advancing nothing else — mirrors
     :func:`advance_channel_plan`: a single run, not a chain, so there is no
-    fan-in to discover."""
+    fan-in to discover. ``channel_plan_channels`` is ``{channel_key: motion}``
+    for exactly the approved channel plan's real (non-proposal) entries — see
+    :func:`extract_copy` for how it is used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The copy run did not complete successfully.")
-    return extract_copy(view.messages)
+    return extract_copy(view.messages, channel_plan_channels=channel_plan_channels)
+
+
+def channel_plan_channel_map(
+    channel_plan_body: dict[str, Any],
+) -> dict[str, Literal["organic", "paid"]]:
+    """``{channel_key: motion}`` for an approved channel plan's real entries
+    (#76 increment 2) — those carrying a ``channel_key``. A
+    ``suggested_label``-only proposal is excluded: it is not a real channel
+    until an operator accepts it, so copy must not be written for it yet.
+
+    Raises :class:`StaleChannelPlanError` when the plan has entries but NONE
+    of them carry a ``channel_key`` — every entry is the pre-#76 free-text
+    shape (``{"channel": ..., "motion": ...}``, no id at all). This is the
+    explicit answer to "what happens to dev's existing approved plans/copy":
+    rather than silently building a copy run with nothing to reference, or a
+    bare ``KeyError``, this campaign needs channel planning re-run before
+    copy can be generated for it. An empty plan (``channels: []``, or no
+    ``channels`` key at all) is not this case — a plan can legitimately
+    recommend nothing yet — so it returns ``{}`` rather than raising.
+    """
+    channels = channel_plan_body.get("channels") or []
+    mapping = {c["channel_key"]: c["motion"] for c in channels if c.get("channel_key")}
+    if channels and not mapping:
+        raise StaleChannelPlanError(
+            "This campaign's approved channel plan predates channel taxonomy ids (#76) "
+            "— none of its entries carry a channel_key. Re-run channel planning (and then "
+            "copy) for this campaign before generating copy."
+        )
+    return mapping
+
+
+def require_channel_keyed_copy(channels: list[dict[str, Any]]) -> None:
+    """Raise :class:`StaleChannelPlanError` when an approved copy artefact's
+    ``channels`` has entries but NONE carry a ``channel_key`` — the same
+    pre-#76-increment-2 free-text shape :func:`channel_plan_channel_map`
+    detects, checked here at **pack-assembly** time.
+
+    This is a distinct call site from that function's own guard because a
+    copy artefact approved before this migration existed never passed through
+    :func:`start_copy_route`'s check at all — it predates the code that
+    checks it. A campaign whose plan AND copy were both approved on dev
+    before #76 increment 2, including the 121-character free-text channel
+    name that overflowed ``marketing_link.channel`` in #75, reaches this
+    check the first time anyone opens its pack, and gets a named, actionable
+    error instead of a ``KeyError``/bare 500 out of ``_ensure_links``.
+    """
+    if channels and not any(c.get("channel_key") for c in channels):
+        raise StaleChannelPlanError(
+            "This campaign's approved copy predates channel taxonomy ids (#76) — none of "
+            "its channels carry a channel_key. Re-run channel planning and copy generation "
+            "for this campaign before assembling a pack."
+        )
 
 
 def require_approved(status: str, *, what: str) -> None:
