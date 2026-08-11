@@ -62,12 +62,12 @@ from typing import Any
 import httpx
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import pipeline, principal_client
-from .config import public_base_url
+from .config import public_base_url_for
 from .definitions import ARTEFACT_KINDS, MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
 from .image_routes import router as image_router
 from .links import destination_with_utms, mint_token, tracked_url
@@ -163,7 +163,10 @@ class MintBody(BaseModel):
 
 @router.post("/campaigns/{campaign_id}/links", status_code=status.HTTP_201_CREATED)
 async def mint_links(
-    campaign_id: str, body: MintBody, admin: Any = Depends(require_admin)
+    campaign_id: str,
+    body: MintBody,
+    request: Request,
+    admin: Any = Depends(require_admin),
 ) -> dict[str, Any]:
     """Mint tracked links for a campaign, and return the URLs to publish.
 
@@ -179,7 +182,7 @@ async def mint_links(
     and they are an authenticated admin of this tenant. The public route's
     silence is about not confirming a *stranger's* guess.
     """
-    base_url = public_base_url()
+    base_url = public_base_url_for(request.headers.get("origin"), request.headers.get("referer"))
     if not base_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -15,6 +15,7 @@ side of that arrangement.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 from aws_lambda_powertools import Logger
 
@@ -96,3 +97,37 @@ def reset_cache() -> None:
     """Forget the resolved value. For tests only."""
     global _cached
     _cached = None
+
+
+def public_base_url_for(origin: str | None, referer: str | None) -> str:
+    """This deployment's public origin, preferring what the caller actually used.
+
+    **Why the request, and not configuration.** A plugin's Terraform sets
+    environment on the plugin's OWN Lambda, but an ``admin_ingress`` app runs on
+    the SHARED PLUGIN HOST — a different function, with a different role and a
+    different environment. So `BIFFO_PUBLIC_BASE_URL_PARAMETER` and the SSM read
+    grant both landed somewhere this code never executes, and
+    ``public_base_url()`` correctly reported "not configured" forever. That gap
+    is keiranholloway/biffo-template#1456.
+
+    The origin an operator is looking at IS the public base URL, by definition —
+    they loaded this panel from it. CloudFront's `AllViewerExceptHostHeader`
+    policy drops `Host` but forwards every other viewer header, so `Origin` (and
+    `Referer` as a fallback) arrive intact.
+
+    **Safe because of what this value is used for.** It composes only the URL
+    *shown* to the operator. The link's stored ``destination_url`` is built from
+    the campaign's own destination, server-side, and is never derived from a
+    header — so a forged `Origin` can at worst show a caller a link on the
+    origin they already control, and cannot redirect anyone anywhere.
+
+    Falls back to the configured value, which is still right for any caller that
+    sends neither header.
+    """
+    for candidate in (origin, referer):
+        if not candidate:
+            continue
+        parts = urlsplit(candidate)
+        if parts.scheme in ("http", "https") and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    return public_base_url()
