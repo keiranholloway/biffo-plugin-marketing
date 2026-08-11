@@ -299,8 +299,13 @@ export interface PositioningBody {
   ctas: CallToAction[]
 }
 
+/** #76 increment 2: exactly one of `channel_key`/`suggested_label` is set —
+ * a `channel_key` from the taxonomy, or a free-text proposal for a channel
+ * outside it (#67). Never both, never neither — enforced server-side by
+ * `definitions.ChannelRecommendation`'s own validator, not re-checked here. */
 export interface ChannelRecommendation {
-  channel: string
+  channel_key: string | null
+  suggested_label: string | null
   motion: 'organic' | 'paid'
   rank: number
   rationale: string
@@ -311,8 +316,11 @@ export interface ChannelPlanBody {
   channels: ChannelRecommendation[]
 }
 
+/** #76 increment 2: `channel` → `channel_key`, always a real taxonomy key —
+ * a proposal is never promoted into copy without operator acceptance, so
+ * `ChannelCopy` (unlike `ChannelRecommendation`) has no `suggested_label`. */
 export interface ChannelCopy {
-  channel: string
+  channel_key: string
   motion: 'organic' | 'paid'
   headline: string
   body: string
@@ -322,6 +330,23 @@ export interface ChannelCopy {
 
 export interface CopySetBody {
   channels: ChannelCopy[]
+}
+
+/** One `marketing_channel` taxonomy row (#67, #76) — `list`/`read` open to
+ * any authenticated tenant caller (manifest note on `marketing_channel`),
+ * which is what lets this UI resolve a `channel_key` to its operator-facing
+ * `label` without an admin-only round trip. */
+export interface ChannelTaxonomyEntry {
+  key: string
+  label: string
+  motion: 'organic' | 'paid'
+  category: string
+  ad_platform: string | null
+}
+
+export async function listChannels(): Promise<ChannelTaxonomyEntry[]> {
+  const body = await request<unknown>('GET', '/channels')
+  return Array.isArray(body) ? (body as ChannelTaxonomyEntry[]) : []
 }
 
 export type ArtefactKind = 'research' | 'positioning' | 'channel_plan' | 'copy'

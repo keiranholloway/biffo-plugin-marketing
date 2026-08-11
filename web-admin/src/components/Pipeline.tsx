@@ -16,6 +16,7 @@ import {
   type PositioningBody,
   type ResearchSynthesisBody,
 } from '../lib/api'
+import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import { ChannelPlanArtefact, CopyArtefact, PositioningArtefact, ResearchArtefact } from './ArtefactBody'
 import { PipelineStage } from './PipelineStage'
 
@@ -50,8 +51,10 @@ interface StageConfig {
   title: string
   start: (campaignId: string) => Promise<Artefact>
   /** The stage's real output, once it has one — never called for a `null`
-   * or still-`pending` artefact (see `Pipeline`'s render loop). */
-  renderBody: (artefact: Artefact) => ReactNode
+   * or still-`pending` artefact (see `Pipeline`'s render loop). `channelLookup`
+   * is only read by the channel-plan and copy stages; research and
+   * positioning's renderers simply ignore the second argument. */
+  renderBody: (artefact: Artefact, channelLookup: ChannelLookup) => ReactNode
   gate: (approved: Approved, hasBrief: boolean) => Gate
 }
 
@@ -84,9 +87,13 @@ const STAGES: StageConfig[] = [
     kind: 'channel_plan',
     title: 'Channel plan',
     start: startChannelPlan,
-    renderBody: (artefact) => {
+    renderBody: (artefact, channelLookup) => {
       const body = parseArtefactBody<ChannelPlanBody>(artefact)
-      return body !== null ? <ChannelPlanArtefact body={body} /> : <p className="empty">No content to show.</p>
+      return body !== null ? (
+        <ChannelPlanArtefact body={body} channelLookup={channelLookup} />
+      ) : (
+        <p className="empty">No content to show.</p>
+      )
     },
     gate: (approved) => reason(approved.positioning, 'Approve the positioning stage first.'),
   },
@@ -94,9 +101,13 @@ const STAGES: StageConfig[] = [
     kind: 'copy',
     title: 'Copy',
     start: startCopy,
-    renderBody: (artefact) => {
+    renderBody: (artefact, channelLookup) => {
       const body = parseArtefactBody<CopySetBody>(artefact)
-      return body !== null ? <CopyArtefact body={body} /> : <p className="empty">No content to show.</p>
+      return body !== null ? (
+        <CopyArtefact body={body} channelLookup={channelLookup} />
+      ) : (
+        <p className="empty">No content to show.</p>
+      )
     },
     gate: (approved) => {
       // Names only the stage(s) actually still unapproved — a caller with
@@ -128,7 +139,15 @@ function initialState(): Record<ArtefactKind, StageState> {
  * campaign with no brief, and nothing else in this pipeline can run before
  * research does.
  */
-export function Pipeline({ campaignId, hasBrief }: { campaignId: string; hasBrief: boolean }) {
+export function Pipeline({
+  campaignId,
+  hasBrief,
+  channelLookup,
+}: {
+  campaignId: string
+  hasBrief: boolean
+  channelLookup: ChannelLookup
+}) {
   const [state, setState] = useState<Record<ArtefactKind, StageState>>(initialState)
 
   function patch(kind: ArtefactKind, next: Partial<StageState>) {
@@ -181,7 +200,8 @@ export function Pipeline({ campaignId, hasBrief }: { campaignId: string; hasBrie
         // ids), not the real stage output — see `Artefact`'s own doc
         // comment. Nothing to render until the gate has actually produced
         // something.
-        const body = s.artefact !== null && s.artefact.status !== 'pending' ? stage.renderBody(s.artefact) : null
+        const body =
+          s.artefact !== null && s.artefact.status !== 'pending' ? stage.renderBody(s.artefact, channelLookup) : null
         return (
           <PipelineStage
             key={stage.kind}
