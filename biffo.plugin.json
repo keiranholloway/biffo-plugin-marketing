@@ -324,6 +324,71 @@
           "required_role": ["admin"]
         }
       }
+    },
+    {
+      "name": "marketing_channel",
+      "description": "The channel taxonomy (#67, #76 increment 1): a closed, admin-extensible vocabulary of stable channel ids, replacing the free-text `channel` strings that let a 121-character agent-generated name overflow `marketing_link.channel` (#75). `key` is the stable, machine-safe identifier a future `ChannelRecommendation`/`ChannelCopy`/`marketing_link` will reference (#76 increment 2, not this table) — it plays the role the manifest's auto-injected `id` (a Core-generated UUID) cannot, since that is neither short nor stable across a re-seed. Nothing here is platform-, vertical- or tenant-specific: this plugin installs on every Biffo platform, and the taxonomy is deliberately broad (digital and offline/field) rather than encoding any one operator's vocabulary.",
+      "columns": [
+        {
+          "name": "key",
+          "type": "String(64)",
+          "nullable": false,
+          "description": "Stable machine-safe identifier, e.g. 'google_search_paid'. Short by construction — every seeded key is well under this column's 64-character ceiling — so the #75 overflow class cannot recur through a channel referenced by key rather than by a hand-typed name. Relabelling must never change this: it is what a future recommendation/copy/link row will reference, and changing it under an existing reference would silently break the join it exists to make structural."
+        },
+        {
+          "name": "label",
+          "type": "String(200)",
+          "nullable": false,
+          "description": "Operator-facing name, e.g. 'Google Search ads'. May be long and descriptive — this is the field an operator reads; `key` is the field code and storage join on. Splitting the two is what makes #75's overflow impossible rather than merely unlikely: the field that can be long is never the field that is stored short."
+        },
+        {
+          "name": "motion",
+          "type": "String(16)",
+          "nullable": false,
+          "description": "organic | paid. Lives on the channel, not only on a recommendation: 'Google Search ads' is inherently paid, and LinkedIn-organic/LinkedIn-paid are different channels with different work attached, so this is a property of what the channel IS rather than something an agent asserts independently each time. Plain String — plugin tables have no enum type."
+        },
+        {
+          "name": "category",
+          "type": "String(32)",
+          "nullable": false,
+          "description": "One of: search, social, video, email, content, communities, partner, events, trade_press, direct_mail, local_field (#67's taxonomy shape). Groups channels for display; not itself referenced by any other table."
+        },
+        {
+          "name": "ad_platform",
+          "type": "String(32)",
+          "nullable": true,
+          "description": "Optional. The ad platform this channel's spend and character limits belong to (e.g. 'google', 'meta', 'linkedin', 'tiktok'), NULL for channels with no platform-specific limits (organic search, direct mail, events, ...). Exists now so the shape a future `_platform_for_channel` lookup needs (replacing today's substring guessing) does not require a second schema change — the lookup itself is #76 increment 2, out of scope here."
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_marketing_channel_tenant_key",
+          "columns": ["tenant_id", "key"],
+          "unique": true
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": []
+        },
+        "read": {
+          "allowed": true,
+          "required_role": []
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
     }
   ],
   "api_routes": [
@@ -452,6 +517,41 @@
       "table": "marketing_click",
       "operation": "read",
       "description": "Read one click."
+    },
+    {
+      "method": "GET",
+      "path": "/channels",
+      "table": "marketing_channel",
+      "operation": "list",
+      "description": "List the channel taxonomy for the caller's tenant. Readable by any authenticated caller — the operator selection UI (#67) and the seed script both need it."
+    },
+    {
+      "method": "GET",
+      "path": "/channels/{id}",
+      "table": "marketing_channel",
+      "operation": "read",
+      "description": "Read one channel."
+    },
+    {
+      "method": "POST",
+      "path": "/channels",
+      "table": "marketing_channel",
+      "operation": "create",
+      "description": "Add a channel (admin only) — used by the default-taxonomy seed script and by an instance adding its own channel."
+    },
+    {
+      "method": "PATCH",
+      "path": "/channels/{id}",
+      "table": "marketing_channel",
+      "operation": "update",
+      "description": "Relabel, recategorise or reassign a channel (admin only). `key` is not editable through this generic route in practice — nothing calls it — but Core does not restrict which columns a generic update may touch, so this is a documented convention, not an enforced one."
+    },
+    {
+      "method": "DELETE",
+      "path": "/channels/{id}",
+      "table": "marketing_channel",
+      "operation": "delete",
+      "description": "Remove a channel (admin only). A future recommendation/copy/link row that already referenced this channel's key would be orphaned, same trade-off as idea-scout's business-model categories."
     }
   ],
   "event_subscriptions": [
