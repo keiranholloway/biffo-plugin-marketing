@@ -113,3 +113,63 @@ button:disabled {
   font-size: 0.85rem;
   margin: 0.75rem 0 0;
 }
+
+.mint form {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+}
+
+.mint label {
+  font-size: 0.75rem;
+  margin-bottom: 0.15rem;
+}
+
+.mint input[type='text'],
+.mint input:not([type]) {
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.mint .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 400;
+  margin-bottom: 0.6rem;
+}
+
+.mint .checkbox input {
+  width: auto;
+  margin: 0;
+}
+
+.mint button {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.7rem;
+}
+
+.minted {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+
+.minted li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid #eee;
+}
+
+.minted .chan {
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.minted code {
+  word-break: break-all;
+  font-size: 0.75rem;
+}
