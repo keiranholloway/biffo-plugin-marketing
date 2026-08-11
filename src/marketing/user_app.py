@@ -280,8 +280,13 @@ async def get_pack_route(
         # learn a draft/in-flight campaign exists at all.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
 
-    copy_artefact = await admin_app._latest_artefact(campaign_id, "copy", founder.token)
-    if copy_artefact is None or copy_artefact.get("status") != "approved":
+    # `_latest_approved_artefact`, not `_latest_artefact` (issue #41): a
+    # newer pending/proposed copy re-run must not make a pack that was
+    # serving fine start 404ing the moment an admin starts an edit — the
+    # previously-approved copy is still sitting one row back and this is
+    # exactly what a unit should still be served.
+    copy_artefact = await admin_app._latest_approved_artefact(campaign_id, "copy", founder.token)
+    if copy_artefact is None:
         # Collapsed to one outcome rather than admin_app's 409-for-proposed:
         # a founder cannot approve anything, so "exists but not approved yet"
         # and "does not exist yet" carry the same actionable information —

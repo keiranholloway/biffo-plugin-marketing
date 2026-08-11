@@ -391,22 +391,69 @@ def get_agent_gateway() -> pipeline.AgentGateway:
     return _CoreAgentGateway(create_core_client())
 
 
-async def _latest_artefact(campaign_id: str, kind: str, token: str) -> dict[str, Any] | None:
-    """This campaign's most recent artefact of `kind`, or `None`.
+async def _artefacts_of_kind(campaign_id: str, kind: str, token: str) -> list[dict[str, Any]]:
+    """Every artefact Core holds for this campaign/kind, unsorted and
+    unfiltered by status.
 
     `campaign_id` and `kind` are both plain `String` columns, so Core's
     generic list route accepts them as equality filters without any manifest
     change (`filterable_columns` derives from column type, never a hardcoded
-    list). Sorted defensively rather than trusting insertion order — a fake
-    Core in a test may not preserve it."""
+    list). Shared by `_latest_artefact` and `_latest_approved_artefact` so
+    both read Core the same way and cannot drift from each other."""
     params = {"campaign_id": campaign_id, "kind": kind}
     resp = await _core("GET", f"{_INTERNAL_PREFIX}/artefacts", token, params=params)
     resp.raise_for_status()
-    rows = resp.json() or []
+    return resp.json() or []
+
+
+async def _latest_artefact(campaign_id: str, kind: str, token: str) -> dict[str, Any] | None:
+    """This campaign's most recent artefact of `kind`, **whatever its
+    status**, or `None`.
+
+    This answers "what is the latest attempt at this stage" — right for
+    polling/advancing a possibly-still-running run (`get_artefact_route`) and
+    for acting on whatever the newest attempt is (`approve_artefact_route`/
+    `reject_artefact_route`, which must find a `pending` or freshly-run
+    attempt to approve, not an already-approved older one). It is the WRONG
+    question for any gate that requires an *approved* input — see
+    `_latest_approved_artefact` (issue #41): a newer `pending`/`proposed` row
+    sorts ahead of an older `approved` one here, so a caller that treats this
+    return value as "the approved artefact" is reading the wrong row the
+    moment someone starts a fresh attempt on a campaign that already has one
+    approved.
+
+    Sorted defensively rather than trusting insertion order — a fake Core in
+    a test may not preserve it."""
+    rows = await _artefacts_of_kind(campaign_id, kind, token)
     if not rows:
         return None
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return rows[0]
+
+
+async def _latest_approved_artefact(
+    campaign_id: str, kind: str, token: str
+) -> dict[str, Any] | None:
+    """This campaign's most recent **approved** artefact of `kind`, or
+    `None` if none is approved yet — even when a newer, not-yet-approved
+    attempt of the same kind exists.
+
+    This is what every downstream-stage gate and pack route actually wants
+    (issue #41): "latest" and "latest approved" coincide only until an admin
+    starts a newer attempt on a campaign that already has an approved one.
+    From that point, `_latest_artefact` returns the newer, unapproved row —
+    which would silently hide a perfectly good approved artefact from a gate
+    that conflated the two questions. Every caller of this function still
+    needs its own `None` check: "no approved artefact yet" covers both "none
+    exists at all" and "one exists but nothing is approved", and a caller
+    that must tell those apart (for a 404 vs. 409, say) calls
+    `_latest_artefact` too, for the informative case."""
+    rows = await _artefacts_of_kind(campaign_id, kind, token)
+    approved = [r for r in rows if r.get("status") == "approved"]
+    if not approved:
+        return None
+    approved.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return approved[0]
 
 
 def _require_known_kind(kind: str) -> None:
@@ -638,12 +685,28 @@ async def start_positioning_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No research artefact for this campaign yet.",
         )
-    try:
-        pipeline.require_approved(research.get("status") or "", what="The research artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # Gated on the latest APPROVED research, not the latest attempt overall
+    # (issue #41) — a newer pending/proposed re-run must not hide an older
+    # approved one. `research` above is used only for the 404-vs-409 split
+    # and, on failure, to report the newest attempt's real status.
+    approved_research = await _latest_approved_artefact(campaign_id, "research", admin.token)
+    if approved_research is None:
+        try:
+            pipeline.require_approved(research.get("status") or "", what="The research artefact")
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        # require_approved raises whenever status != "approved"; it is only
+        # possible to reach this line if research.status == "approved" while
+        # approved_research is None, which cannot happen — the row
+        # _latest_artefact returned would then be one of the rows
+        # _latest_approved_artefact filters for. Kept so a broken invariant
+        # is loud rather than silently falling through to `approved_research`.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The research artefact must be approved before this can proceed.",
+        )
 
-    raw_body = research.get("body")
+    raw_body = approved_research.get("body")
     research_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
 
     causation_id, run_id = await pipeline.start_positioning(gateway, research_body=research_body)

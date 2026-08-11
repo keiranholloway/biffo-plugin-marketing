@@ -102,6 +102,7 @@ class _FakeCore:
         *,
         campaign: dict[str, Any] | None | object = _DEFAULT_CAMPAIGN,
         copy_artefact: dict[str, Any] | None = None,
+        extra_artefacts: list[dict[str, Any]] | None = None,
     ) -> None:
         self.campaign = (
             {
@@ -113,6 +114,11 @@ class _FakeCore:
             else campaign
         )
         self.copy_artefact = copy_artefact
+        #: Additional `marketing_artefact` rows of any kind/status, alongside
+        #: `copy_artefact` — the divergence test (issue #41) uses this to add
+        #: a newer, still-`pending` `copy` row on top of an older `approved`
+        #: one, the same way a real re-run would.
+        self.extra_artefacts = list(extra_artefacts or [])
         self.links: list[dict[str, Any]] = []
         self._next_link_id = 0
 
@@ -125,8 +131,8 @@ class _FakeCore:
             return httpx.Response(200, json=self.campaign, request=request)
         if method == "GET" and path == f"{prefix}/artefacts":
             params = kw.get("params") or {}
-            is_copy = params.get("kind") == "copy" and self.copy_artefact
-            rows = [self.copy_artefact] if is_copy else []
+            candidates = ([self.copy_artefact] if self.copy_artefact else []) + self.extra_artefacts
+            rows = [a for a in candidates if a.get("kind") == params.get("kind")]
             return httpx.Response(200, json=rows, request=request)
         if method == "GET" and path == f"{prefix}/links":
             return httpx.Response(200, json=self.links, request=request)
@@ -230,6 +236,30 @@ def test_409s_when_copy_is_not_approved(monkeypatch: pytest.MonkeyPatch) -> None
     resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
 
     assert resp.status_code == 409
+
+
+def test_serves_the_approved_pack_even_with_a_newer_pending_copy_re_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The divergence case issue #41 is about — the "pack still serving"
+    shape: a founder-facing pack that was serving fine must not start
+    404ing/409ing purely because an admin started a copy re-run. The newer
+    `pending` row must not hide the older `approved` one that is still
+    perfectly good."""
+    newer_pending = _copy_artefact(_CHANNELS, status="pending")
+    newer_pending = {**newer_pending, "id": "artefact-copy-2", "created_at": "2026-08-10T00:00:99Z"}
+    core = _FakeCore(
+        copy_artefact=_copy_artefact(_CHANNELS),  # approved, created_at ...01Z
+        extra_artefacts=[newer_pending],
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    assert resp.json()["copy"] == _CHANNELS
 
 
 def test_assembles_with_no_assets_reporting_every_placement_missing(

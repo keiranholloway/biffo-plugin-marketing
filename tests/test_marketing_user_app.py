@@ -404,6 +404,47 @@ def test_pack_404s_when_copy_is_not_yet_approved(fake_signed_client) -> None:
     assert resp.status_code == 404
 
 
+def test_pack_serves_approved_copy_even_with_a_newer_pending_re_run(fake_signed_client) -> None:
+    """The divergence case issue #41 is about — the "pack still serving"
+    shape, this surface's half: a founder-facing pack that was serving fine
+    must not start 404ing purely because an admin started a copy re-run. The
+    newer `pending` row (later `created_at`, no `created_at` column needed
+    here since both rows are returned together) must not hide the older
+    `approved` one that is still perfectly good."""
+    fake_signed_client(
+        {
+            f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
+                200,
+                json.dumps(_campaign_row()).encode(),
+            ),
+            f"{user_app._INTERNAL_PREFIX}/artefacts": (
+                200,
+                json.dumps(
+                    [
+                        _approved_copy_artefact(
+                            id="artefact-1",
+                            status="approved",
+                            created_at="2026-08-10T00:00:01Z",
+                        ),
+                        _approved_copy_artefact(
+                            id="artefact-2",
+                            status="pending",
+                            body=json.dumps({"channels": []}),
+                            created_at="2026-08-10T00:00:99Z",
+                        ),
+                    ]
+                ).encode(),
+            ),
+        }
+    )
+    client = TestClient(_app(core_client=_FakeCoreClient(), campaign_client=_FakeCampaignClient()))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    assert resp.json()["copy"] == [{"channel": "instagram", "text": "Great offer!"}]
+
+
 def test_pack_forwards_the_founders_own_token(fake_signed_client) -> None:
     """`admin_app._core`/`_latest_artefact`, reused here, must carry THIS
     founder's token — not a hardcoded or admin one — through to Core."""

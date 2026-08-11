@@ -407,6 +407,35 @@ def test_start_positioning_refuses_when_no_research_exists(ctx) -> None:
     assert resp.status_code == 404
 
 
+def test_start_positioning_uses_approved_research_even_with_a_newer_pending_run(ctx) -> None:
+    """The divergence case issue #41 is about: an admin approves research,
+    then re-runs it (to refresh it, say). The re-run creates a second
+    `research` row with a later `created_at` and status `pending` — from
+    that point, `_latest_artefact` alone returns the newer, unapproved row,
+    so a caller that only checked that row's status would 409 a campaign
+    that has perfectly good approved research sitting one row back. This is
+    the "downstream stage still starts" shape from the two the issue names.
+    """
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+
+    # Re-run research: a second, newer, still-`pending` `research` artefact
+    # now sorts ahead of the approved one by `created_at`.
+    client.post(f"/campaigns/{_CAMPAIGN}/research")
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/positioning")
+
+    assert resp.status_code == 201
+    positioning_requests = [
+        r for r in gateway.requested if r["agent_name"] == "marketing-positioning"
+    ]
+    assert len(positioning_requests) == 1
+    # Grounded in the APPROVED research's synthesis, not the newer pending
+    # run's (still-empty) one.
+    assert positioning_requests[0]["input_payload"]["research"]["summary"] == "One clear signal."
+
+
 def test_start_positioning_runs_once_research_is_approved(ctx) -> None:
     client, core, gateway = ctx
     _propose_research(client, core, gateway)
