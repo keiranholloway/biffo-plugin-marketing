@@ -202,7 +202,7 @@ def _base_url(monkeypatch: pytest.MonkeyPatch):
     # `_ensure_links` (reused from `pack_routes`) reads `public_base_url`
     # through that module's own imported name — patched there, matching
     # `test_marketing_pack_routes.py`'s own fixture exactly.
-    monkeypatch.setattr(pack_routes, "public_base_url", lambda: _BASE_URL)
+    monkeypatch.setattr(paid_pack_routes.config, "public_base_url_for", lambda *_: _BASE_URL)
 
 
 # ── failure paths ────────────────────────────────────────────────────────────
