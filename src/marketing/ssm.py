@@ -75,6 +75,12 @@ def read_parameter(parameter: str, *, purpose: str) -> str | None:
       never cache this** — the next call should try again, not repeat a
       non-answer forever.
     """
+    # Imported inside the function, not at module level: neither boto3 nor a
+    # region needs to exist for `marketing.ssm` itself to import, matching
+    # the deferred-import discipline `config._from_ssm` and
+    # `image_provider._api_key` each used before this module existed. Tests
+    # and any local run should never need AWS reachable just to import this
+    # file — only calling `read_parameter` should.
     try:
         import boto3
         from botocore.exceptions import ClientError

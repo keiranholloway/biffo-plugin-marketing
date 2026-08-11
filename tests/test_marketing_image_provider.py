@@ -127,6 +127,24 @@ async def test_generate_still_raises_without_a_configured_key(
         await _provider(handler).generate_still(prompt="anything")
 
 
+def test_the_no_key_message_does_not_claim_the_parameter_is_unset_when_it_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_api_key()` returning `""` is not always "nobody configured
+    anything" — a parameter CAN be configured and still fail to read (denied,
+    throttled, genuinely absent). The old fixed message ("are both unset")
+    was false in every one of those cases; this checks both branches of the
+    corrected one."""
+    monkeypatch.delenv("MARKETING_IMAGE_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER", raising=False)
+    assert "are both unset" in image_provider._no_api_key_message()
+
+    monkeypatch.setenv("MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER", "/marketing/image-key")
+    message = image_provider._no_api_key_message()
+    assert "are both unset" not in message
+    assert "/marketing/image-key" in message
+
+
 def test_a_transient_ssm_failure_does_not_poison_the_api_key_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

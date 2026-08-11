@@ -194,6 +194,30 @@ def _api_key() -> str:
     return _cached_api_key
 
 
+def _no_api_key_message() -> str:
+    """Why `_api_key()` came back empty, stated as accurately as this module
+    can without re-deriving the SSM outcome (`ssm.read_parameter` already
+    logged the specific reason — genuinely absent, denied, or transient).
+
+    Distinguishes "nobody configured a source for this key at all" from "a
+    source IS configured and reading it did not work" — collapsing the two
+    into one fixed "are both unset" message (as this used to) is exactly the
+    class of misleading diagnosis issue #25 is about: telling an operator to
+    fix configuration that is not the problem.
+    """
+    parameter = os.environ.get(_PARAMETER_ENV, "").strip()
+    if not parameter:
+        return (
+            f"No image provider API key configured ({_DIRECT_ENV} / "
+            f"{_PARAMETER_ENV} are both unset)."
+        )
+    return (
+        f"No image provider API key configured: {_DIRECT_ENV} is unset, and the configured "
+        f"parameter ({_PARAMETER_ENV}={parameter!r}) had no readable value — see the logs "
+        "for why (absent, denied, or a transient SSM error)."
+    )
+
+
 def reset_api_key_cache() -> None:
     """Forget the resolved key. For tests only."""
     global _cached_api_key
@@ -227,10 +251,7 @@ class OpenAIImageProvider:
     async def generate_still(self, *, prompt: str) -> GeneratedImage:
         api_key = _api_key()
         if not api_key:
-            raise ImageProviderError(
-                f"No image provider API key configured ({_DIRECT_ENV} / "
-                f"{_PARAMETER_ENV} are both unset)."
-            )
+            raise ImageProviderError(_no_api_key_message())
 
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             try:
@@ -318,10 +339,7 @@ class OpenRouterImageProvider:
     async def generate_still(self, *, prompt: str) -> GeneratedImage:
         api_key = _api_key()
         if not api_key:
-            raise ImageProviderError(
-                f"No image provider API key configured ({_DIRECT_ENV} / "
-                f"{_PARAMETER_ENV} are both unset)."
-            )
+            raise ImageProviderError(_no_api_key_message())
 
         model = _openrouter_model()
 

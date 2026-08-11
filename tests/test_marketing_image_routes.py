@@ -69,7 +69,7 @@ class _FakeCoreClient:
     def __init__(
         self,
         *,
-        max_bytes: int = 10_000_000,
+        max_bytes: Any = 10_000_000,
         presign_status: int | None = None,
         ledger_status: int | None = None,
         ledger_missing_id: bool = False,
@@ -131,9 +131,16 @@ class _FakeCampaignClient:
     the plugin's own generated-CRUD tables (`marketing_campaign`,
     `marketing_asset`) — Core's internal, per-plugin mount, per issue #27."""
 
-    def __init__(self, *, exists: bool = True, fail_asset_creation: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        exists: bool = True,
+        fail_asset_creation: bool = False,
+        asset_missing_id: bool = False,
+    ) -> None:
         self.exists = exists
         self.fail_asset_creation = fail_asset_creation
+        self.asset_missing_id = asset_missing_id
         self.created_assets: list[dict[str, Any]] = []
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -147,7 +154,9 @@ class _FakeCampaignClient:
         if path == f"{image_routes._INTERNAL_PREFIX}/assets":
             if self.fail_asset_creation:
                 raise BiffoAPIError(502, "asset service unavailable")
-            row = {**(json or {}), "id": f"asset-{len(self.created_assets) + 1}"}
+            row = {**(json or {})}
+            if not self.asset_missing_id:
+                row["id"] = f"asset-{len(self.created_assets) + 1}"
             self.created_assets.append(row)
             return row
         raise AssertionError(f"unexpected POST {path}")
@@ -541,6 +550,54 @@ def test_a_malformed_confirm_response_names_the_ledger(_s3_upload_ok) -> None:
     assert resp.status_code == 502
     detail = resp.json()["detail"]
     assert _LEDGER_ID in detail, f"the error must name the ledger entry: {detail!r}"
+
+
+def test_a_non_numeric_max_bytes_is_a_diagnosable_502_not_a_crash() -> None:
+    """`presigned["max_bytes"]` is read straight into a numeric comparison
+    (`len(image.content) > max_bytes`). If Core's response carries the key
+    but with the wrong type — `null`, a JSON string — a bare `TypeError`
+    would raise straight out of that comparison, past every `except
+    HTTPException` guard in the route, as an unstyled 500 with no
+    committed-state note — even though the charge has already happened by
+    this point (issue #24).
+
+    Fails before this round's fix: `max_bytes` was read via `_required_field`
+    alone, which only guards presence, not type.
+    """
+    core = _FakeCoreClient(max_bytes="not-a-number")
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "max_bytes" in detail
+    assert _LEDGER_ID in detail, f"the error must name the ledger entry: {detail!r}"
+
+
+def test_a_malformed_asset_response_does_not_fail_an_otherwise_successful_generation(
+    _s3_upload_ok,
+) -> None:
+    """A missing `id` on the asset response is Core response-shape drift,
+    but by the time it is read the charge, the upload AND the asset row have
+    all already committed — `asset_id` from here on is used only to enrich a
+    LATER failure's error message, never to build a request. Hard-failing an
+    otherwise fully successful generation over a field that is purely
+    cosmetic at this point would be worse than the gap it closes, so this
+    must still return 201.
+    """
+    core = _FakeCoreClient()
+    campaign = _FakeCampaignClient(asset_missing_id=True)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 201
+    assert "id" not in resp.json()["asset"]
 
 
 def test_rejects_an_empty_prompt() -> None:

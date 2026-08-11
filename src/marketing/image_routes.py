@@ -220,6 +220,29 @@ def _required_field(payload: Any, key: str, *, context: str) -> Any:
         ) from exc
 
 
+def _required_number(payload: Any, key: str, *, context: str) -> float:
+    """`_required_field(payload, key, context=context)`, additionally
+    checked to actually be a number.
+
+    A response with the key present but the wrong type (`null`, a JSON
+    string) is the same class of Core response-shape drift `_required_field`
+    exists to catch — but comparing against a non-number (`len(...) >
+    None`) raises `TypeError` directly out of the comparison, not out of
+    `_required_field`, so it would slip past every `except HTTPException`
+    guard in `generate_still_route` as a bare 500 with no committed-state
+    note. Every field this route reads and then uses in arithmetic (only
+    `max_bytes`, currently) goes through this instead of `_required_field`.
+    """
+    value = _required_field(payload, key, context=context)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        logger.error("%s response's %r was not a number: %r", context, key, value)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{context} response's '{key}' was not a number.",
+        )
+    return value
+
+
 def _committed_note(*, charged: bool = False, **ids: str | None) -> str:
     """A human-readable list of what already committed, appended to an error
     raised after the provider has been charged (issue #24) — so an operator
@@ -275,7 +298,7 @@ async def _upload(core_client: BiffoAPIClient, image: GeneratedImage) -> dict[st
     except BiffoAPIError as exc:
         raise _core_error(exc) from exc
 
-    max_bytes = _required_field(presigned, "max_bytes", context="Presign")
+    max_bytes = _required_number(presigned, "max_bytes", context="Presign")
     if len(image.content) > max_bytes:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -354,7 +377,7 @@ async def generate_still_route(
     That gap is logged loudly (see below) but not closed — closing it needs
     an idempotency key Core's `/internal/media-generations` route does not
     yet accept, which is a Core-side change, not something this route can
-    build around on its own.
+    build around on its own. Tracked as biffo-template#1515.
     """
     campaign_id = _validated_campaign_id(campaign_id)
 
@@ -437,10 +460,20 @@ async def generate_still_route(
     except BiffoAPIError as exc:
         raise _with_committed_note(_core_error(exc), ledger=ledger_id, media=media_id) from exc
 
-    try:
-        asset_id = _required_field(asset, "id", context="Asset")
-    except HTTPException as exc:
-        raise _with_committed_note(exc, ledger=ledger_id, media=media_id) from exc
+    # Unlike ledger_id/media_id above, a missing asset id does not block
+    # anything: the asset row has already committed, `asset` (whatever shape
+    # it has) is returned to the caller either way, and `asset_id` below is
+    # used only to enrich a LATER failure's committed-state note — never to
+    # build a request. Hard-failing an otherwise fully successful generation
+    # over a field that is cosmetic at this point would be worse than the
+    # gap it closes, so this logs the drift rather than raising on it.
+    asset_id = asset.get("id") if isinstance(asset, dict) else None
+    if not isinstance(asset_id, str):
+        logger.warning(
+            "Asset response had no usable 'id' — later error context (if any) will not name it: %r",
+            asset,
+        )
+        asset_id = None
 
     try:
         url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
