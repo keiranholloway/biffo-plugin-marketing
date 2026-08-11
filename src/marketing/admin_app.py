@@ -712,6 +712,16 @@ def build_app() -> FastAPI:
 
     app.include_router(pack_router)
 
+    # The paid brief pack (M9, issue #8) — the paid-specific additions on top
+    # of the same pack shape `pack_router` above assembles: ad copy at
+    # platform character limits, targeting from the approved positioning, a
+    # budget recommendation, and spend reported as explicitly unmeasurable
+    # (issue #31) rather than a silent zero. Same lazy-import reasoning as
+    # every other route module included above.
+    from .paid_pack_routes import router as paid_pack_router
+
+    app.include_router(paid_pack_router)
+
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.
     static = _static_dir()

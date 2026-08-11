@@ -222,8 +222,8 @@ def test_the_internal_prefix_constant_agrees_across_every_copy() -> None:
     `_INTERNAL_PREFIX` copies this file's own docstring explains
     (`admin_app.py`, `channel_plan_routes.py`, `image_routes.py`,
     `results_routes.py`, `copy_routes.py`, `pack_routes.py`, `user_app.py`,
-    each forced local because the AST walk resolves a named constant only
-    within the file that defines it) actually agree with each other or with
+    `paid_pack_routes.py`, each forced local because the AST walk resolves a
+    named constant only within the file that defines it) actually agree with
     the real mounted path. Verified empirically before this test was written: a
     single-character typo in one copy (`marketting` for `marketing`) sends
     every call in that file to an unmounted path while the rest of this
@@ -242,6 +242,7 @@ def test_the_internal_prefix_constant_agrees_across_every_copy() -> None:
         copy_routes,
         image_routes,
         pack_routes,
+        paid_pack_routes,
         results_routes,
         user_app,
     )
@@ -254,3 +255,4 @@ def test_the_internal_prefix_constant_agrees_across_every_copy() -> None:
     assert results_routes._INTERNAL_PREFIX == canonical
     assert copy_routes._INTERNAL_PREFIX == canonical
     assert pack_routes._INTERNAL_PREFIX == canonical
+    assert paid_pack_routes._INTERNAL_PREFIX == canonical
