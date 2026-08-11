@@ -608,3 +608,74 @@ def test_picks_the_newest_source_deterministically_when_more_than_one_exists(
         assert len(body["assets"]) == 1
         assert body["assets"][0]["is_source"] is True
         assert body["assets"][0]["media_id"] == "media-newer"
+
+        # The drop is disclosed, not silent — same discipline as
+        # `missing_placements`: an operator or future maintainer reading
+        # only the response still learns a source was superseded.
+        assert body["superseded_source_count"] == 1
+
+
+def test_reports_zero_superseded_sources_when_at_most_one_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The disclosure field itself must not read as "something was hidden"
+    when nothing was — a bare source-only pack (the common case today) must
+    report 0, not omit the field or report a stale count."""
+    core = _FakeCore(copy_artefact=_copy_artefact(_CHANNELS))
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    assert resp.json()["superseded_source_count"] == 0
+
+
+def test_does_not_remint_or_drop_a_link_with_null_is_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`marketing_link.is_paid` is nullable, and generic CRUD's own `create`
+    is exposed to any admin — not only `_ensure_links`'s own mint loop,
+    which always writes a concrete bool — so a `NULL` row is a real
+    possibility. `results_routes.py` already refuses to fold that NULL into
+    `organic`/`False` for this same column; `_ensure_links` must not either,
+    or an ambiguous existing link both gets duplicate-minted (it satisfies
+    neither "already have paid" nor "already have organic") and vanishes
+    from the pack's own `links` (it matches neither filter). A NULL row
+    must be treated as already covering whichever motion is actually asked
+    for."""
+    awkward_channels = [
+        {
+            "channel_key": "event_sponsorship",
+            "motion": "paid",
+            "headline": "Meet us on the show floor this quarter",
+            "body": "Live demos, no queue, real answers from the people who built it.",
+            "cta": "Book a slot",
+            "sources": [{"url": "https://example.com/e", "note": "n"}],
+        }
+    ]
+    core = _FakeCore(copy_artefact=_copy_artefact(awkward_channels))
+    core.links.append(
+        {
+            "id": "link-null-is-paid",
+            "campaign_id": _CAMPAIGN,
+            "token": "null-is-paid-token",
+            "channel": "event_sponsorship",
+            "variant": None,
+            "is_paid": None,
+            "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
+        }
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    links = resp.json()["links"]
+
+    # The existing NULL-is_paid link is treated as already covering the
+    # paid request: no second link minted, and the existing one still shows.
+    assert len(links) == 1
+    assert links[0]["url"] == f"{_BASE_URL}/c/null-is-paid-token"
+    assert core.links == [core.links[0]]

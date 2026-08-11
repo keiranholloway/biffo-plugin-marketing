@@ -140,7 +140,7 @@ def _core_error(exc: BiffoAPIError) -> HTTPException:
 
 async def _existing_assets(
     campaign_id: str, *, campaign_client: principal_client.PrincipalCoreClient
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], int]:
     """Whatever ``marketing_asset`` rows already exist for this campaign,
     plus the subset of ``PLACEMENTS`` that has no row yet. Never renders —
     see the module docstring for why generation time, not pack time, is
@@ -185,6 +185,15 @@ async def _existing_assets(
     for the same underlying rows; it does not touch Core, so it cannot by
     itself restore "exactly one source per campaign" as a stored fact — only
     ``generate_still_route`` superseding the prior row can do that.
+
+    The count dropped is returned as this function's third element rather
+    than only logged: this module's own convention for "the API silently
+    hid something" is response-level disclosure (``missing_placements``
+    already does exactly this), not a log line only CloudWatch sees — and
+    without it, every request looks clean regardless of how many duplicate
+    source rows have piled up, so nothing short of reading the raw
+    ``marketing_asset`` table would ever surface the underlying #54 gap to
+    an operator or a future maintainer.
     """
     assets = await campaign_client.get(
         f"{_INTERNAL_PREFIX}/assets", params={"campaign_id": campaign_id}
@@ -192,15 +201,17 @@ async def _existing_assets(
     assets = assets or []
 
     sources = [a for a in assets if a.get("is_source")]
+    superseded_source_count = 0
     if len(sources) > 1:
         canonical_id = max(sources, key=lambda a: (a.get("created_at") or "", a.get("id") or ""))[
             "id"
         ]
+        superseded_source_count = len(sources) - 1
         assets = [a for a in assets if not a.get("is_source") or a.get("id") == canonical_id]
 
     have_placements = {a["placement"] for a in assets if a.get("placement")}
     missing_placements = [p for p in PLACEMENTS if p not in have_placements]
-    return assets, missing_placements
+    return assets, missing_placements, superseded_source_count
 
 
 async def _asset_with_url(core_client: BiffoAPIClient, asset: dict[str, Any]) -> dict[str, Any]:
@@ -287,6 +298,26 @@ async def _ensure_links(
     tenant's own custom channel keeps a key motion-exclusive — a bare
     ``channel_key`` match would let an existing organic link suppress the
     mint of the paid one this call actually asked for.
+
+    Both the "already have" and "is wanted" checks below go through
+    :func:`_link_motions`/``_requested_key`` rather than a tuple literal
+    repeated at each call site — two symmetric-looking expressions that are
+    actually asymmetric (``channel``/``is_paid`` vs ``channel_key``/
+    ``motion``) is exactly the shape that lets one future edit (e.g. adding
+    ``variant`` to the key) update three of four sites and silently reopen
+    #48. ``marketing_link.is_paid`` is nullable, and generic CRUD's own
+    ``create`` is exposed to any admin, not only this function's own mint
+    loop (which always writes a concrete bool) — so a ``NULL`` row is a real
+    possibility, not a hypothetical. It is deliberately NOT folded to
+    ``False``: ``results_routes.py`` already rejected that exact fold for
+    this same column ("folding that into organic ... is exactly the 'share
+    over classifiable inputs' mistake"), and doing it here would let one
+    ambiguous row both trigger a duplicate mint (it would not satisfy the
+    paid request) and vanish from a paid pack's own ``links`` (it would not
+    match the paid filter either). A ``NULL`` row is instead treated as
+    already covering *whichever* motion is asked for — "don't know" must
+    never justify writing a second link, and must never make an existing
+    one disappear from the pack that already shows it.
     """
     links_resp = await admin_app._core(
         "GET", f"{_INTERNAL_PREFIX}/links", admin_token, params={"campaign_id": campaign_id}
@@ -294,8 +325,14 @@ async def _ensure_links(
     links_resp.raise_for_status()
     existing = links_resp.json() or []
 
-    requested = {(c.get("channel_key"), c.get("motion") == "paid") for c in channels}
-    have = {(link["channel"], bool(link.get("is_paid"))) for link in existing}
+    def _requested_key(c: dict[str, Any]) -> tuple[Any, bool]:
+        return c.get("channel_key"), c.get("motion") == "paid"
+
+    def _link_motions(link: dict[str, Any]) -> set[bool]:
+        is_paid = link.get("is_paid")
+        return {True, False} if is_paid is None else {bool(is_paid)}
+
+    requested = {_requested_key(c) for c in channels}
 
     # The response's own "channel" key is kept (not renamed to "channel_key")
     # for admin-UI backward compatibility — `PackParts.tsx`/`PaidPack.tsx`
@@ -311,10 +348,18 @@ async def _ensure_links(
             "url": tracked_url(base_url, link["token"]) if base_url else None,
         }
         for link in existing
-        if (link["channel"], bool(link.get("is_paid"))) in requested
+        if any((link["channel"], motion) in requested for motion in _link_motions(link))
     ]
 
-    missing = [c for c in channels if (c.get("channel_key"), c.get("motion") == "paid") not in have]
+    channel_motions: dict[Any, set[bool]] = {}
+    for link in existing:
+        channel_motions.setdefault(link["channel"], set()).update(_link_motions(link))
+
+    missing = [
+        c
+        for c in channels
+        if _requested_key(c)[1] not in channel_motions.get(_requested_key(c)[0], set())
+    ]
     if not missing:
         return out
 
@@ -420,7 +465,7 @@ async def get_pack_route(
     except pipeline.StaleChannelPlanError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    assets, missing_placements = await _existing_assets(
+    assets, missing_placements, superseded_source_count = await _existing_assets(
         campaign_id, campaign_client=campaign_client
     )
     assets_with_urls = [await _asset_with_url(core_client, a) for a in assets]
@@ -437,6 +482,7 @@ async def get_pack_route(
         "campaign_id": campaign_id,
         "assets": assets_with_urls,
         "missing_placements": missing_placements,
+        "superseded_source_count": superseded_source_count,
         "copy": channels,
         "links": links,
         "guidance": campaign.get("guidance") or "",

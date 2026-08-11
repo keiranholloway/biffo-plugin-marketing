@@ -356,7 +356,7 @@ async def get_paid_pack_route(
 
     ad_platforms = await _channel_ad_platforms(admin.token)
 
-    assets, missing_placements = await pack_routes._existing_assets(
+    assets, missing_placements, superseded_source_count = await pack_routes._existing_assets(
         campaign_id, campaign_client=campaign_client
     )
     assets_with_urls = [await pack_routes._asset_with_url(core_client, a) for a in assets]
@@ -379,6 +379,7 @@ async def get_paid_pack_route(
         "ad_copy": [_ad_copy_variant(c, ad_platforms) for c in paid_channels],
         "assets": assets_with_urls,
         "missing_placements": missing_placements,
+        "superseded_source_count": superseded_source_count,
         "targeting": targeting,
         "budget": _budget_recommendation(len(paid_channels)),
         "links": links,
