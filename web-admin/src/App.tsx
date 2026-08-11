@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
 
 /** The campaign studio's admin surface.
@@ -92,6 +93,7 @@ export default function App() {
               <th>Name</th>
               <th>Status</th>
               <th>Destination</th>
+              <th>Tracked links</th>
             </tr>
           </thead>
           <tbody>
@@ -100,6 +102,9 @@ export default function App() {
                 <td>{c.name}</td>
                 <td>{c.status}</td>
                 <td>{c.destination_url ?? '—'}</td>
+                <td>
+                  <MintLinks campaignId={c.id} />
+                </td>
               </tr>
             ))}
           </tbody>

@@ -29,6 +29,11 @@ export interface Campaign {
 
 const BASE = '/api/v1/plugins/marketing'
 
+//: Minting is NOT generated CRUD — it reads one row and writes several, and the
+//: values it writes are derived (the token, and the destination with its UTMs).
+//: So it lives on the plugin's own admin app, one path segment deeper.
+const ADMIN_BASE = '/api/v1/plugins/marketing/admin'
+
 /** What a person supplies to create a campaign. Everything else Core derives. */
 export interface NewCampaign {
   name: string
@@ -91,4 +96,58 @@ export async function listCampaigns(): Promise<Campaign[]> {
 
   const body: unknown = await response.json()
   return Array.isArray(body) ? (body as Campaign[]) : []
+}
+
+
+/** One tracked link, as minted. */
+export interface MintedLink {
+  id: string
+  channel: string
+  variant: string | null
+  is_paid: boolean
+  /** The URL to publish. `c/<token>` on this instance's own origin. */
+  url: string
+}
+
+/** Mint tracked links for a campaign.
+ *
+ * The caller supplies only a channel (and optionally a variant, and whether it
+ * is paid). The token and the destination — including `utm_campaign`, which is
+ * the campaign's own id — are derived server-side and cannot be supplied. That
+ * is the point of the whole milestone, so the form does not offer them.
+ */
+export async function mintLinks(
+  campaignId: string,
+  links: { channel: string; variant?: string; is_paid?: boolean }[],
+): Promise<MintedLink[]> {
+  const session = await getCurrentSession()
+  const idToken = session?.getIdToken().getJwtToken() ?? null
+
+  const response = await fetch(`${ADMIN_BASE}/campaigns/${campaignId}/links`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+    },
+    body: JSON.stringify({ links }),
+  })
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('not signed in (401) — sign in to the portal, then reload')
+    }
+    if (response.status === 403) {
+      throw new Error('you need the admin role to mint links (403)')
+    }
+    if (response.status === 422) {
+      throw new Error('this campaign has no destination URL, so its links would lead nowhere')
+    }
+    if (response.status === 503) {
+      throw new Error('this deployment has no public base URL configured, so links cannot be minted')
+    }
+    throw new Error(`could not mint links (${response.status})`)
+  }
+
+  const body = (await response.json()) as { links?: MintedLink[] }
+  return body.links ?? []
 }
