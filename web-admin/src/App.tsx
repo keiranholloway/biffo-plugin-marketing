@@ -1,37 +1,88 @@
 import { useEffect, useState } from 'react'
 
-import { listCampaigns, type Campaign } from './lib/api'
+import { createCampaign, listCampaigns, type Campaign } from './lib/api'
 
 /** The campaign studio's admin surface.
  *
- * Deliberately a list and nothing else for now. It exists because the shared
- * plugin host will not package a plugin declaring `admin_ingress` without a
- * built `web-admin/dist` — a shell that shows real data is the smallest honest
- * thing that satisfies that, and it is what makes M2 demonstrable.
+ * A list, and a form to add to it. The form exists because a campaign studio
+ * you cannot create a campaign in is not a campaign studio — the first version
+ * of this panel was list-only, and the only way to add anything was a `fetch`
+ * pasted into devtools.
  */
 export default function App() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const [name, setName] = useState('')
+  const [destination, setDestination] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  function load() {
     listCampaigns()
       .then(setCampaigns)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-  }, [])
+  }
+
+  useEffect(load, [])
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await createCampaign({ name: name.trim(), destination_url: destination.trim() })
+      setName('')
+      setDestination('')
+      load()
+    } catch (e: unknown) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const canSubmit = name.trim() !== '' && destination.trim() !== '' && !saving
 
   return (
     <main>
       <h1>Campaign studio</h1>
       <p className="lede">Campaigns for this tenant, and the tracked links minted from them.</p>
 
-      {error !== null && <p className="empty">Could not load campaigns: {error}</p>}
+      <form onSubmit={submit} aria-label="Create a campaign">
+        <h2>New campaign</h2>
+        <label htmlFor="name">Name</label>
+        <input
+          id="name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Spring demo push"
+        />
 
+        <label htmlFor="destination">Destination URL</label>
+        <input
+          id="destination"
+          value={destination}
+          onChange={(e) => setDestination(e.target.value)}
+          placeholder="https://dev.tabsii.com/intake/demo"
+        />
+        <p className="hint">
+          Where tracked links send people. Every minted link carries this URL with the
+          campaign&rsquo;s own id as <code>utm_campaign</code>.
+        </p>
+
+        <button type="submit" disabled={!canSubmit}>
+          {saving ? 'Creating…' : 'Create campaign'}
+        </button>
+
+        {saveError !== null && <p className="error">{saveError}</p>}
+      </form>
+
+      {error !== null && <p className="empty">Could not load campaigns: {error}</p>}
       {error === null && campaigns === null && <p className="empty">Loading…</p>}
 
       {campaigns !== null && campaigns.length === 0 && (
-        <p className="empty">
-          No campaigns yet. Create one with <code>POST /api/v1/plugins/marketing/campaigns</code>.
-        </p>
+        <p className="empty">No campaigns yet — create one above.</p>
       )}
 
       {campaigns !== null && campaigns.length > 0 && (
