@@ -16,6 +16,37 @@
  * resolved from the portal's shared session — `auth.ts`/`identity.ts` here are
  * idea-scout's, copied rather than rewritten, because this is exactly the part
  * that should not be reinvented per plugin.
+ *
+ * ## Why this file does NOT delegate its fetching to `./api-core`
+ *
+ * `createRequest` (biffo-template#1492) is deliberately shared plumbing: fetch
+ * + bearer header + a generic `ApiError(status, text)` built from
+ * `res.text()`. This plugin's endpoints do something `createRequest` does not
+ * — they read the JSON `detail` field the plugin's own admin routes author
+ * specifically for an operator (`throwForResponse`/`detailMessage` below), and
+ * they reword 401/403/422/503 per endpoint ("you need the admin role to mint
+ * links", "this campaign has no destination URL"). `createRequest` throws
+ * before handing back the `Response`, so there is no seam left to layer that
+ * per-endpoint wording on top of it — adopting it here would collapse every
+ * one of those messages into one generic status-coded string, which is a
+ * behaviour change, not a refactor. That mismatch belongs upstream as a
+ * question for `api-core` (e.g. a hook to inspect the body before throwing),
+ * not silently absorbed here.
+ *
+ * `getFreshIdToken()` (auth.ts) was tried as a drop-in for the
+ * `getCurrentSession()` + `.getIdToken().getJwtToken()` pair every request
+ * function here repeats inline, and rejected for the same reason: not because
+ * it behaves differently (it doesn't — it is that exact pair, under one name,
+ * and this file already re-resolved a fresh token per call before this
+ * migration, by this same route), but because `api.test.ts` stubs
+ * `auth.getCurrentSession` via `vi.spyOn`, and `getFreshIdToken`'s internal
+ * call to `getCurrentSession` is a same-module reference Vitest's ESM spy does
+ * not intercept — three tests then hit the real (unmocked) Cognito pool
+ * resolution instead of the stub. Fixing that means changing what the test
+ * stubs, which is outside this migration's remit ("behaviour must not change,
+ * tests pass unchanged"). Kept as `getCurrentSession()` inline, exactly as
+ * before, in all four call sites (`createCampaign`, `listCampaigns`,
+ * `mintLinks`, `authedFetch`) — still per-request, still fresh every time.
  */
 
 import { getCurrentSession } from './auth'
