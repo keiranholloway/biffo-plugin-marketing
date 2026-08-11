@@ -15,10 +15,13 @@ dependencies = [
   # dual-auth (SigV4 + forwarded user token) mechanism this plugin's
   # `principal_client` module depends on for every call to Core's internal,
   # per-plugin CRUD mount (issue #27, keiranholloway/biffo-template#1480).
-  # Confirmed live on PyPI (releases: 1.0.0, 1.1.0, 1.2.0) before this pin
-  # was bumped, so `uv sync` resolves it with no local `[tool.uv.sources]`
-  # override needed.
-  "biffo-plugin-sdk[sigv4,user-serving]>=1.2,<2.0",
+  # >=1.3 because `principal_client` now builds on the SDK's own
+  # `PrincipalCoreClient` (added in 1.3.0, keiranholloway/biffo-template#1490)
+  # rather than hand-rolling the same dual-auth mechanism locally.
+  # Confirmed live on PyPI (releases: 1.0.0, 1.1.0, 1.2.0, 1.3.0) before this
+  # pin was bumped, so `uv sync` resolves it with no local
+  # `[tool.uv.sources]` override needed.
+  "biffo-plugin-sdk[sigv4,user-serving]>=1.3,<2.0",
   "aws-lambda-powertools[tracer]>=3.4.0",
   # Already present for the SDK; also used by admin_app to call Core directly —
   # one hop, rather than the host calling itself through the public path.

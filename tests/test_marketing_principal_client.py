@@ -90,7 +90,7 @@ def fake_client(monkeypatch: pytest.MonkeyPatch) -> _FakeSignedCoreClient:
     `httpx.AsyncClient`, and every test below makes exactly one call."""
     client = _FakeSignedCoreClient()
 
-    def _build(**kwargs: Any) -> _FakeSignedCoreClient:
+    def _build(token: str, **kwargs: Any) -> _FakeSignedCoreClient:
         client.init_kwargs.append(kwargs)
         return client
 

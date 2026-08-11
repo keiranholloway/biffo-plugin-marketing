@@ -26,22 +26,32 @@ So a call through here needs BOTH credentials, together, not either alone:
   authorization one — see this plugin's own `admin_app._core` before this
   module existed, and issue #27.
 
-`SignedCoreClient.raw_request(method, path, content=..., extra_signed_headers=
-...)` is the one SDK method that signs a request AND carries an extra header
-through that signature (so the header can't be stripped or altered between
-signing and arrival) — released in `biffo-plugin-sdk` 1.2.0
-(keiranholloway/biffo-template#1480; PyPI had only 1.1.0, which lacked it,
-when issue #27 was filed). It is also exactly what the shared plugin host's
-own forwarder uses to relay a plugin's declared `api_routes` to Core
-(`services/_plugin-host/src/plugin_host/app.py::core_sender`, read directly
-rather than guessed at) — this module is the same shape, for this plugin's
-own bespoke (non-generated-CRUD) routes.
+`biffo_plugin_sdk.PrincipalCoreClient` — released in `biffo-plugin-sdk` 1.3.0
+(`biffo-template#1490`) — now owns the dual-auth mechanism itself: it
+overrides `SignedCoreClient._sign` to fold `X-Biffo-User-Token` in BEFORE
+signing, so every request path it exposes (`get`/`post`/`patch`/`raw_request`/
+...) carries the forwarded token inside the SigV4 signature automatically.
+That class's shape — and its name — came from THIS module: before 1.3.0, this
+file hand-built a `SignedCoreClient` per call and passed the token through
+`raw_request`'s `extra_signed_headers=`, which is the one SDK primitive that
+signs a request AND carries an extra header through that signature. The SDK
+class now does the same thing structurally rather than at each call site, so
+this module builds on it instead of re-implementing it.
 
-Built directly on `SignedCoreClient`, not `create_core_client()`: the latter
-can build either a signing or a plain client depending on
-`BIFFO_CORE_AUTH_MODE`, and its declared return type is the plain base
-(`BiffoAPIClient`), which has no `raw_request` at all. `core_sender()` makes
-the same choice for the same reason.
+Two things below are deliberately NOT part of the SDK class — they were
+judged per-plugin adapter concerns, not shared mechanism, when the SDK class
+was written — and stay here:
+
+- **`None`-valued query params are dropped**, not stringified. The SDK's
+  `_send`/`raw_request` callers pass `urlencode(params)` straight through, so
+  `{"a": None}` would render as the literal query text `a=None` — a real
+  value that matches nothing, not the omitted filter a caller almost
+  certainly means. No current caller passes one (verified), but a future
+  optional filter reaching here should omit cleanly, not silently break.
+- **The `httpx.Response` wrapper** (`request()`, below) over the SDK's raw
+  `(status, body, content_type)` tuple, for `admin_app._core` and every
+  existing call site that already does `.status_code` /
+  `.raise_for_status()` / `.json()`.
 
 Every path passed in here is expected to already be the FULL internal path
 (`/api/v1/internal/plugins/<name>/...`), never a bare one — this module does
@@ -58,12 +68,10 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-from biffo_plugin_sdk import BiffoAPIClient, SignedCoreClient
+from biffo_plugin_sdk import FORWARDED_USER_HEADER, BiffoAPIClient
+from biffo_plugin_sdk import PrincipalCoreClient as SignedCoreClient
 
-#: Matches `plugin_host.forward.FORWARDED_USER_HEADER` exactly (biffo-template)
-#: — the header `require_principal_crud_permission` reads a user token from
-#: when the transport is SigV4 rather than a bearer `Authorization` header.
-FORWARDED_USER_HEADER = "X-Biffo-User-Token"
+__all__ = ["FORWARDED_USER_HEADER", "request", "PrincipalCoreClient"]
 
 
 async def _raw(
@@ -78,20 +86,18 @@ async def _raw(
 ) -> tuple[int, bytes, str]:
     """The one signed, dual-credential send every helper below builds on.
 
-    Builds and closes its own `SignedCoreClient` per call, deliberately
-    matching the lifecycle discipline of the `httpx.AsyncClient` this
-    replaced in `admin_app._core` (`async with httpx.AsyncClient(...) as
-    client:`) — a `SignedCoreClient` owns exactly such a client
-    (`BiffoAPIClient.__init__` builds one whenever `client=` isn't passed),
-    so skipping the `async with` here would leak one connection pool per
-    call rather than one per request, which is what a caller reading the
+    Builds and closes its own `SignedCoreClient` (the SDK's
+    `PrincipalCoreClient`, imported under its predecessor's name — see the
+    module docstring) per call, deliberately matching the lifecycle
+    discipline of the `httpx.AsyncClient` this replaced in `admin_app._core`
+    (`async with httpx.AsyncClient(...) as client:`) — it owns exactly such a
+    client (`BiffoAPIClient.__init__` builds one whenever `client=` isn't
+    passed), so skipping the `async with` here would leak one connection pool
+    per call rather than one per request, which is what a caller reading the
     code this replaced would reasonably expect not to happen.
     """
-    # `None`-valued entries are dropped, not stringified: `urlencode` alone
-    # would render `{"a": None}` as the literal query text `a=None`, sending
-    # Core a filter that matches the string "None" instead of omitting the
-    # filter — no current caller passes one (verified), but a future
-    # optional filter reaching here should omit cleanly, not silently break.
+    # `None`-valued entries are dropped, not stringified — see module
+    # docstring. The SDK's own `_send`/`raw_request` callers do not do this.
     if params:
         clean_params = {k: v for k, v in params.items() if v is not None}
         full_path = f"{path}?{urlencode(clean_params)}" if clean_params else path
@@ -101,14 +107,22 @@ async def _raw(
     kwargs: dict[str, Any] = {"base_url": base_url}
     if timeout is not None:
         kwargs["timeout"] = timeout
-    # Not `async with SignedCoreClient(**kwargs) as client:` — the SDK's
-    # `BiffoAPIClient.__aenter__` is declared `-> BiffoAPIClient`, not
+    # Not `async with SignedCoreClient(token, **kwargs) as client:` — the
+    # SDK's `BiffoAPIClient.__aenter__` is declared `-> BiffoAPIClient`, not
     # `Self`, so pyright resolves `client`'s type through the base class and
-    # loses `raw_request` (only defined on `SignedCoreClient`). A plain
-    # try/finally closes the same connection pool `__aexit__` would, without
-    # depending on a return-type annotation this module doesn't own.
-    client = SignedCoreClient(**kwargs)
+    # loses `raw_request` (only defined on `SignedCoreClient`/
+    # `PrincipalCoreClient`). A plain try/finally closes the same connection
+    # pool `__aexit__` would, without depending on a return-type annotation
+    # this module doesn't own.
+    client = SignedCoreClient(token, **kwargs)
     try:
+        # This client's own `_sign` override (see module docstring) already
+        # folds the forwarded user token in before signing — passing it again
+        # here via `extra_signed_headers` is redundant with that (`_sign`
+        # merges by key, so the duplicate is a same-value no-op) but keeps
+        # the token's presence observable at THIS call's boundary, which is
+        # what `tests/test_marketing_principal_client.py`'s fake asserts on:
+        # it stands in for the whole client, so it never runs `_sign` itself.
         return await client.raw_request(
             method,
             full_path,
@@ -154,6 +168,12 @@ class PrincipalCoreClient:
     on a non-2xx, for callers already written against that interface
     (`image_routes.get_campaign_client`, whose call sites already do
     `except BiffoAPIError`).
+
+    Not simply an alias for the SDK's own `PrincipalCoreClient.get`/`post`/
+    `patch` (which return parsed JSON the same way): those go through
+    `_send`, which does not drop `None`-valued query params (see module
+    docstring) — so this class stays on top of `request()`/`_raw` above,
+    which does.
     """
 
     def __init__(

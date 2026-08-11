@@ -86,7 +86,7 @@ class _FakeSignedCoreClient:
 @pytest.fixture
 def fake_signed_client(monkeypatch: pytest.MonkeyPatch) -> _FakeSignedCoreClient:
     client = _FakeSignedCoreClient()
-    monkeypatch.setattr(principal_client, "SignedCoreClient", lambda **kw: client)
+    monkeypatch.setattr(principal_client, "SignedCoreClient", lambda token, **kw: client)
     return client
 
 
@@ -183,7 +183,7 @@ def test_approve_artefact_forwards_the_real_admins_token(
             return None
 
     fake = _ProposedThenApproved()
-    monkeypatch.setattr(principal_client, "SignedCoreClient", lambda **kw: fake)
+    monkeypatch.setattr(principal_client, "SignedCoreClient", lambda token, **kw: fake)
 
     app = admin_app.build_app()
     app.dependency_overrides[admin_app.require_admin] = lambda: type(
