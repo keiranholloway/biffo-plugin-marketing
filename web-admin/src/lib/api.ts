@@ -19,6 +19,7 @@
  */
 
 import { getCurrentSession } from './auth'
+import { createRequest } from './api-core'
 
 export interface Campaign {
   id: string
@@ -36,6 +37,105 @@ const BASE = '/api/v1/plugins/marketing'
 //: So it lives on the plugin's own admin app, one path segment deeper.
 const ADMIN_BASE = '/api/v1/plugins/marketing/admin'
 
+/** Resolved fresh on every call — never snapshotted. See `createRequest`'s own
+ * doc in `api-core.ts` for why: a client built from a token captured once at
+ * mount sends whatever was left on that token's remaining lifetime, and once
+ * it lapses every call 401s for the rest of the page's life (ideation#69).
+ *
+ * This is NOT `auth.ts`'s own `getFreshIdToken()` — that helper calls
+ * `getCurrentSession()` from *within* `auth.ts`, a same-module call that
+ * `vi.spyOn(auth, 'getCurrentSession')` cannot intercept (the spy replaces the
+ * export binding on the module namespace object, which a same-module callsite
+ * never goes through). Every test here stubs `getCurrentSession` that way, so
+ * adopting `getFreshIdToken` would silently stop being testable rather than
+ * fail loudly. Calling `getCurrentSession` from this module instead is a
+ * cross-module call the spy does intercept, and is behaviourally identical to
+ * `getFreshIdToken`'s own body.
+ */
+async function getIdToken(): Promise<string | null> {
+  const session = await getCurrentSession()
+  return session?.getIdToken().getJwtToken() ?? null
+}
+
+async function detailMessage(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json()
+    if (
+      body !== null &&
+      typeof body === 'object' &&
+      'detail' in body &&
+      typeof (body as { detail?: unknown }).detail === 'string'
+    ) {
+      return (body as { detail: string }).detail
+    }
+  } catch {
+    // Not JSON, or an empty body — nothing safe to extract, fall through to a
+    // generic message rather than guessing at unstructured text.
+  }
+  return null
+}
+
+/**
+ * The `onError` mapper for `createRequest` (biffo-template#1492). Every
+ * endpoint's error wording is reproduced here byte-for-byte, dispatched on the
+ * per-call `context` string — nothing here is new behaviour, it is the same
+ * hand-written branches that used to live inline in each function, moved
+ * behind the hook `api-core.ts` added specifically so they would not have to
+ * collapse into a generic status message.
+ *
+ * `createCampaign`/`listCampaigns`/`mintLinks` hit Core's *generic* CRUD, whose
+ * 403 text ("Administrator access required") is Core's own wording, not this
+ * plugin's — the tests deliberately do not surface it verbatim, so those three
+ * keep their own hand-authored messages rather than reading `detail`.
+ * Everything else hits THIS plugin's own admin routes, whose `detail` text is
+ * hand-authored specifically to be read by the operator — extracting and
+ * showing it is the point (see the file-level comment below for the fuller
+ * version of this split).
+ */
+async function onError(response: Response, context: string | undefined): Promise<never> {
+  if (response.status === 401) {
+    throw new Error('not signed in (401) — sign in to the portal, then reload')
+  }
+  switch (context) {
+    case undefined:
+      // listCampaigns: the status, not the body. A body can be an HTML error
+      // page — rendering it is how another plugin displayed
+      // `{"detail":"Administrator access required"}` where its content
+      // belonged.
+      throw new Error(`request failed (${response.status})`)
+    case 'create a campaign':
+      if (response.status === 403) {
+        throw new Error('you need the admin role to create a campaign (403)')
+      }
+      throw new Error(`could not create the campaign (${response.status})`)
+    case 'mint links':
+      if (response.status === 403) {
+        throw new Error('you need the admin role to mint links (403)')
+      }
+      if (response.status === 422) {
+        throw new Error('this campaign has no destination URL, so its links would lead nowhere')
+      }
+      if (response.status === 503) {
+        throw new Error('this deployment has no public base URL configured, so links cannot be minted')
+      }
+      throw new Error(`could not mint links (${response.status})`)
+    default: {
+      const detail = await detailMessage(response)
+      if (response.status === 403) {
+        throw new Error(detail !== null ? `${detail} (403)` : `you need the admin role to ${context} (403)`)
+      }
+      if (detail !== null) {
+        throw new Error(`${detail} (${response.status})`)
+      }
+      throw new Error(`could not ${context} (${response.status})`)
+    }
+  }
+}
+
+/** Bound to a fresh-per-call token source and the plugin's own default base.
+ * `request(method, path, body?, base?, context?)` — see `api-core.ts`. */
+const request = createRequest(getIdToken, BASE, onError)
+
 /** What a person supplies to create a campaign. Everything else Core derives. */
 export interface NewCampaign {
   name: string
@@ -49,57 +149,15 @@ export interface NewCampaign {
  * 403 and is told so, rather than the form appearing to work.
  */
 export async function createCampaign(input: NewCampaign): Promise<Campaign> {
-  const session = await getCurrentSession()
-  const idToken = session?.getIdToken().getJwtToken() ?? null
-
-  const response = await fetch(`${BASE}/campaigns`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-    },
-    // `status` is the pipeline's own vocabulary (definitions.PIPELINE_STAGES);
-    // a new campaign always starts at draft, so the form does not offer it.
-    body: JSON.stringify({ ...input, status: 'draft' }),
-  })
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error('not signed in (401) — sign in to the portal, then reload')
-    }
-    if (response.status === 403) {
-      throw new Error('you need the admin role to create a campaign (403)')
-    }
-    throw new Error(`could not create the campaign (${response.status})`)
-  }
-
-  return (await response.json()) as Campaign
+  // `status` is the pipeline's own vocabulary (definitions.PIPELINE_STAGES); a
+  // new campaign always starts at draft, so the form does not offer it.
+  return request<Campaign>('POST', '/campaigns', { ...input, status: 'draft' }, BASE, 'create a campaign')
 }
 
 export async function listCampaigns(): Promise<Campaign[]> {
-  const session = await getCurrentSession()
-  const idToken = session?.getIdToken().getJwtToken() ?? null
-
-  const response = await fetch(`${BASE}/campaigns`, {
-    headers: {
-      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-    },
-  })
-
-  if (!response.ok) {
-    // The status, not the body. A body can be an HTML error page — rendering it
-    // is how another plugin displayed `{"detail":"Administrator access
-    // required"}` where its content belonged.
-    if (response.status === 401) {
-      throw new Error('not signed in (401) — sign in to the portal, then reload')
-    }
-    throw new Error(`request failed (${response.status})`)
-  }
-
-  const body: unknown = await response.json()
+  const body = await request<unknown>('GET', '/campaigns')
   return Array.isArray(body) ? (body as Campaign[]) : []
 }
-
 
 /** One tracked link, as minted. */
 export interface MintedLink {
@@ -122,35 +180,13 @@ export async function mintLinks(
   campaignId: string,
   links: { channel: string; variant?: string; is_paid?: boolean }[],
 ): Promise<MintedLink[]> {
-  const session = await getCurrentSession()
-  const idToken = session?.getIdToken().getJwtToken() ?? null
-
-  const response = await fetch(`${ADMIN_BASE}/campaigns/${campaignId}/links`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-    },
-    body: JSON.stringify({ links }),
-  })
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error('not signed in (401) — sign in to the portal, then reload')
-    }
-    if (response.status === 403) {
-      throw new Error('you need the admin role to mint links (403)')
-    }
-    if (response.status === 422) {
-      throw new Error('this campaign has no destination URL, so its links would lead nowhere')
-    }
-    if (response.status === 503) {
-      throw new Error('this deployment has no public base URL configured, so links cannot be minted')
-    }
-    throw new Error(`could not mint links (${response.status})`)
-  }
-
-  const body = (await response.json()) as { links?: MintedLink[] }
+  const body = await request<{ links?: MintedLink[] }>(
+    'POST',
+    `/campaigns/${campaignId}/links`,
+    { links },
+    ADMIN_BASE,
+    'mint links',
+  )
   return body.links ?? []
 }
 
@@ -163,10 +199,10 @@ export async function mintLinks(
 // `mintLinks` above does not: each of these reads one row and writes several,
 // or assembles several tables into one response.
 //
-// `throwForResponse` differs from `listCampaigns`/`createCampaign`/
-// `mintLinks` above on purpose: those hit Core's *generic* CRUD, whose 403
-// text ("Administrator access required") is Core's own wording, not this
-// plugin's, and the test above deliberately does not surface it verbatim.
+// `onError` above (`api-core.ts`'s hook) treats these differently on purpose:
+// `listCampaigns`/`createCampaign`/`mintLinks` hit Core's *generic* CRUD,
+// whose 403 text ("Administrator access required") is Core's own wording, not
+// this plugin's, and the tests deliberately do not surface it verbatim.
 // Everything below hits THIS plugin's own admin routes, whose `detail` text
 // is hand-authored specifically to be read by the operator — "This surface
 // requires the 'admin' group" (`require_group`'s own message), "This
@@ -178,6 +214,11 @@ export async function mintLinks(
 // unparseable body still falls back to a plain status-coded message rather
 // than being dumped on screen.
 
+/** `getArtefact` below is the one caller left on the manual fetch path: a 404
+ * there is a legitimate "not started yet" result, not an error, and it has to
+ * inspect the response *before* deciding whether to throw — which
+ * `createRequest`'s `onError` (bound once, for every call `request` makes)
+ * cannot do per-call. Kept only for that one case. */
 async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const session = await getCurrentSession()
   const idToken = session?.getIdToken().getJwtToken() ?? null
@@ -189,24 +230,6 @@ async function authedFetch(path: string, init: RequestInit = {}): Promise<Respon
       ...(init.headers ?? {}),
     },
   })
-}
-
-async function detailMessage(response: Response): Promise<string | null> {
-  try {
-    const body: unknown = await response.json()
-    if (
-      body !== null &&
-      typeof body === 'object' &&
-      'detail' in body &&
-      typeof (body as { detail?: unknown }).detail === 'string'
-    ) {
-      return (body as { detail: string }).detail
-    }
-  } catch {
-    // Not JSON, or an empty body — nothing safe to extract, fall through to a
-    // generic message rather than guessing at unstructured text.
-  }
-  return null
 }
 
 async function throwForResponse(response: Response, context: string): Promise<never> {
@@ -231,12 +254,7 @@ export async function updateCampaign(
   campaignId: string,
   patch: Partial<Pick<Campaign, 'name' | 'destination_url' | 'brief' | 'guidance'>>,
 ): Promise<Campaign> {
-  const response = await authedFetch(`${BASE}/campaigns/${campaignId}`, {
-    method: 'PATCH',
-    body: JSON.stringify(patch),
-  })
-  if (!response.ok) return throwForResponse(response, 'update the campaign')
-  return (await response.json()) as Campaign
+  return request<Campaign>('PATCH', `/campaigns/${campaignId}`, patch, BASE, 'update the campaign')
 }
 
 // ── The pipeline (M3/M4/M5): research → positioning → channel plan → copy ───
@@ -349,53 +367,51 @@ export async function getArtefact(campaignId: string, kind: ArtefactKind): Promi
 }
 
 export async function approveArtefact(campaignId: string, kind: ArtefactKind): Promise<Artefact> {
-  const response = await authedFetch(
-    `${ADMIN_BASE}/campaigns/${campaignId}/artefacts/${kind}/approve`,
-    { method: 'POST' },
+  return request<Artefact>(
+    'POST',
+    `/campaigns/${campaignId}/artefacts/${kind}/approve`,
+    undefined,
+    ADMIN_BASE,
+    `approve the ${kind.replace('_', ' ')} stage`,
   )
-  if (!response.ok) return throwForResponse(response, `approve the ${kind.replace('_', ' ')} stage`)
-  return (await response.json()) as Artefact
 }
 
 export async function rejectArtefact(campaignId: string, kind: ArtefactKind): Promise<Artefact> {
-  const response = await authedFetch(
-    `${ADMIN_BASE}/campaigns/${campaignId}/artefacts/${kind}/reject`,
-    { method: 'POST' },
+  return request<Artefact>(
+    'POST',
+    `/campaigns/${campaignId}/artefacts/${kind}/reject`,
+    undefined,
+    ADMIN_BASE,
+    `reject the ${kind.replace('_', ' ')} stage`,
   )
-  if (!response.ok) return throwForResponse(response, `reject the ${kind.replace('_', ' ')} stage`)
-  return (await response.json()) as Artefact
 }
 
 export async function startResearch(campaignId: string): Promise<Artefact> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/research`, {
-    method: 'POST',
-  })
-  if (!response.ok) return throwForResponse(response, 'start research')
-  return (await response.json()) as Artefact
+  return request<Artefact>('POST', `/campaigns/${campaignId}/research`, undefined, ADMIN_BASE, 'start research')
 }
 
 export async function startPositioning(campaignId: string): Promise<Artefact> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/positioning`, {
-    method: 'POST',
-  })
-  if (!response.ok) return throwForResponse(response, 'start positioning')
-  return (await response.json()) as Artefact
+  return request<Artefact>(
+    'POST',
+    `/campaigns/${campaignId}/positioning`,
+    undefined,
+    ADMIN_BASE,
+    'start positioning',
+  )
 }
 
 export async function startChannelPlan(campaignId: string): Promise<Artefact> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/channel-plan`, {
-    method: 'POST',
-  })
-  if (!response.ok) return throwForResponse(response, 'start channel planning')
-  return (await response.json()) as Artefact
+  return request<Artefact>(
+    'POST',
+    `/campaigns/${campaignId}/channel-plan`,
+    undefined,
+    ADMIN_BASE,
+    'start channel planning',
+  )
 }
 
 export async function startCopy(campaignId: string): Promise<Artefact> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/copy`, {
-    method: 'POST',
-  })
-  if (!response.ok) return throwForResponse(response, 'start copy generation')
-  return (await response.json()) as Artefact
+  return request<Artefact>('POST', `/campaigns/${campaignId}/copy`, undefined, ADMIN_BASE, 'start copy generation')
 }
 
 // ── Images (M6) ───────────────────────────────────────────────────────────────
@@ -411,12 +427,13 @@ export interface GenerateStillResponse {
 }
 
 export async function generateStill(campaignId: string, prompt: string): Promise<GenerateStillResponse> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/stills`, {
-    method: 'POST',
-    body: JSON.stringify({ prompt }),
-  })
-  if (!response.ok) return throwForResponse(response, 'generate an image')
-  return (await response.json()) as GenerateStillResponse
+  return request<GenerateStillResponse>(
+    'POST',
+    `/campaigns/${campaignId}/stills`,
+    { prompt },
+    ADMIN_BASE,
+    'generate an image',
+  )
 }
 
 // ── The distribution pack (M5) and paid pack (M9) ────────────────────────────
@@ -453,9 +470,7 @@ export interface Pack {
 }
 
 export async function getPack(campaignId: string): Promise<Pack> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/pack`)
-  if (!response.ok) return throwForResponse(response, 'load the distribution pack')
-  return (await response.json()) as Pack
+  return request<Pack>('GET', `/campaigns/${campaignId}/pack`, undefined, ADMIN_BASE, 'load the distribution pack')
 }
 
 export interface AdCopyVariant {
@@ -497,9 +512,7 @@ export interface PaidPack {
 }
 
 export async function getPaidPack(campaignId: string): Promise<PaidPack> {
-  const response = await authedFetch(`${ADMIN_BASE}/campaigns/${campaignId}/paid-pack`)
-  if (!response.ok) return throwForResponse(response, 'load the paid pack')
-  return (await response.json()) as PaidPack
+  return request<PaidPack>('GET', `/campaigns/${campaignId}/paid-pack`, undefined, ADMIN_BASE, 'load the paid pack')
 }
 
 // ── Results (M8) ──────────────────────────────────────────────────────────────
@@ -542,7 +555,5 @@ export interface ResultsResponse {
 }
 
 export async function getResults(): Promise<ResultsResponse> {
-  const response = await authedFetch(`${ADMIN_BASE}/results`)
-  if (!response.ok) return throwForResponse(response, 'load results')
-  return (await response.json()) as ResultsResponse
+  return request<ResultsResponse>('GET', '/results', undefined, ADMIN_BASE, 'load results')
 }
