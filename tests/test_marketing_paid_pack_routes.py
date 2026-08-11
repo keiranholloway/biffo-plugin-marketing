@@ -311,7 +311,14 @@ def test_404s_when_the_approved_positioning_has_no_segments(
     assert "segments" in resp.json()["detail"].lower()
 
 
-def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_assembles_with_no_assets_reporting_every_placement_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #64, same root cause as `test_marketing_pack_routes.py`'s own
+    regression test: `pack_routes._existing_assets` (reused here) used to
+    404 ("No approved source creative for this campaign yet.") whenever no
+    `marketing_asset` row existed at all, even with copy and positioning both
+    fully approved — a campaign whose still was never generated (#63)."""
     core = _FakeCore(
         copy_artefact=_copy_artefact([_PAID_CHANNEL_META]),
         positioning_artefact=_positioning_artefact(_SEGMENTS),
@@ -323,8 +330,10 @@ def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) ->
 
     resp = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
 
-    assert resp.status_code == 404
-    assert "source creative" in resp.json()["detail"].lower()
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["assets"] == []
+    assert set(body["missing_placements"]) == set(PLACEMENTS)
 
 
 # ── the happy path ───────────────────────────────────────────────────────────
