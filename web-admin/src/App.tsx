@@ -1,18 +1,22 @@
 import { useEffect, useState } from 'react'
 
+import { CampaignDetail } from './components/CampaignDetail'
 import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
 
 /** The campaign studio's admin surface.
  *
- * A list, and a form to add to it. The form exists because a campaign studio
- * you cannot create a campaign in is not a campaign studio — the first version
- * of this panel was list-only, and the only way to add anything was a `fetch`
- * pasted into devtools.
+ * A list, and a form to add to it, and — once a campaign exists — the whole
+ * studio behind it: the brief, the pipeline gates (M3–M5), image generation
+ * (M6), both distribution packs (M5/M9), and results (M8). The first version
+ * of this panel was list-only, and the only way to add anything was a
+ * `fetch` pasted into devtools; this is the second gap of the same shape —
+ * seven milestones of API with no way to reach them from a browser.
  */
 export default function App() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Campaign | null>(null)
 
   const [name, setName] = useState('')
   const [destination, setDestination] = useState('')
@@ -26,6 +30,23 @@ export default function App() {
   }
 
   useEffect(load, [])
+
+  function handleCampaignUpdated(updated: Campaign) {
+    setSelected(updated)
+    setCampaigns((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev)
+  }
+
+  if (selected !== null) {
+    return (
+      <main>
+        <CampaignDetail
+          campaign={selected}
+          onBack={() => setSelected(null)}
+          onCampaignUpdated={handleCampaignUpdated}
+        />
+      </main>
+    )
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -94,6 +115,7 @@ export default function App() {
               <th>Status</th>
               <th>Destination</th>
               <th>Tracked links</th>
+              <th>Studio</th>
             </tr>
           </thead>
           <tbody>
@@ -104,6 +126,11 @@ export default function App() {
                 <td>{c.destination_url ?? '—'}</td>
                 <td>
                   <MintLinks campaignId={c.id} />
+                </td>
+                <td>
+                  <button type="button" onClick={() => setSelected(c)}>
+                    Open
+                  </button>
                 </td>
               </tr>
             ))}
