@@ -96,6 +96,60 @@ _PARAMETER_ENV = "MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER"
 _OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 _OPENAI_MODEL = "gpt-image-1"
 
+#: OpenRouter's dedicated Image API. **Not** chat completions — issue #63
+#: went in assuming image models were only reachable through
+#: `/api/v1/chat/completions`, with the image folded into message content.
+#: That assumption did not survive contact with OpenRouter's current docs:
+#: as of 2026-08-11 there is a first-class `POST /api/v1/images` endpoint
+#: (openrouter.ai/docs/guides/overview/multimodal/image-generation),
+#: confirmed live by posting `{}` to it and reading back a validation error
+#: naming exactly `model` and `prompt` as the required fields. Its response
+#: shape is close cousin to OpenAI's own Images API below — a `data` array
+#: of `{"b64_json", "media_type"}` — which is what keeps this adapter this
+#: short.
+_OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images"
+
+#: The model is configuration, not a constant like `_OPENAI_MODEL` above —
+#: direct env only, no SSM parameter, because a model slug is not a secret.
+_MODEL_ENV = "MARKETING_IMAGE_PROVIDER_MODEL"
+
+#: ``google/gemini-3.1-flash-image`` ("Nano Banana 2"): the cheapest of the
+#: 11 image-output models in OpenRouter's live catalogue at issue-filing time
+#: (2026-08-11), and one confirmed (via its own `/endpoints` discovery
+#: response) to price per output *token* rather than per flat image — which
+#: is exactly the shape this adapter needs to report a real, non-fabricated
+#: cost. Override with `_MODEL_ENV` for a different model without a code
+#: change.
+_DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-flash-image"
+
+#: Filename extension for each `media_type` OpenRouter's Image API can return
+#: (`output_format`: png/jpeg/webp, or svg from vectorization models). Falls
+#: back to `png` for anything unrecognised or absent, matching
+#: `OpenAIImageProvider`'s own fixed choice.
+_EXTENSION_BY_CONTENT_TYPE = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+}
+
+
+def _openrouter_model() -> str:
+    """The configured OpenRouter image model, or the default."""
+    return os.environ.get(_MODEL_ENV, "").strip() or _DEFAULT_OPENROUTER_MODEL
+
+
+def _as_number(value: object) -> float | None:
+    """``value`` as a ``float``, or ``None`` if it is missing or not a
+    number. ``bool`` is deliberately excluded even though it is an ``int``
+    subclass — a JSON ``true``/``false`` here would mean OpenRouter's
+    response shape changed underneath this adapter, not a real cost/token
+    count."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
 #: Resolved once per Lambda container, mirroring `config.public_base_url`'s
 #: cache: `None` means "not yet looked up", distinct from `""` meaning
 #: "looked up, and there is nothing there" — without that distinction an
@@ -215,3 +269,149 @@ class OpenAIImageProvider:
             unit_kind="image",
             cost_usd=None,
         )
+
+
+class OpenRouterImageProvider:
+    """`ImageProvider` backed by OpenRouter's dedicated Image API
+    (`POST /api/v1/images`) — one key for both this plugin's text stages
+    (via Core's agent runtime) and its stills, and the second, independent
+    proof of issue #5's requirement 3: a provider swap that needed no change
+    to `image_routes.py`, this time for real rather than only via the tests'
+    fake.
+
+    **This provider's responses carry a real price**, unlike
+    `OpenAIImageProvider` above. OpenRouter's Image API returns a `usage`
+    object with `prompt_tokens` / `completion_tokens` / `total_tokens` /
+    `cost` on every successful generation (confirmed against the live docs,
+    2026-08-11 — see `_OPENROUTER_IMAGES_URL`'s comment). `cost_usd` is
+    populated from `usage.cost` whenever it comes back as a number; the
+    `ImageProvider` contract's null case stays reachable rather than dead
+    code by falling back to `None` if OpenRouter ever omits it for a given
+    model or provider route, instead of fabricating `0.0`.
+
+    **Units stay verbatim in OpenRouter's own accounting unit: tokens**, not
+    a normalised "1 image". OpenRouter's own `/endpoints` discovery API shows
+    some providers billing per image and others per megapixel or token
+    internally, but the Image API always reports usage back to the caller in
+    tokens (`total_tokens`) alongside the resulting `cost` — that is the
+    provider's own unit for this response, in the same sense
+    `agent_runs.cost_usd` elsewhere in this estate is sourced from a chat
+    completion's own token-based `usage`. Reducing it to `units=1.0,
+    unit_kind="image"` here would bake in the exact conversion the module
+    docstring's contract says never to perform.
+    """
+
+    def __init__(
+        self, *, timeout: float = 60.0, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        self._timeout = timeout
+        #: `None` in production — real network. Tests pass an
+        #: `httpx.MockTransport`, matching `OpenAIImageProvider`.
+        self._transport = transport
+
+    async def generate_still(self, *, prompt: str) -> GeneratedImage:
+        api_key = _api_key()
+        if not api_key:
+            raise ImageProviderError(
+                f"No image provider API key configured ({_DIRECT_ENV} / "
+                f"{_PARAMETER_ENV} are both unset)."
+            )
+
+        model = _openrouter_model()
+
+        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+            try:
+                response = await client.post(
+                    _OPENROUTER_IMAGES_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"model": model, "prompt": prompt},
+                )
+            except httpx.HTTPError as exc:
+                raise ImageProviderError(f"OpenRouter request failed: {exc}") from exc
+
+        if response.status_code != httpx.codes.OK:
+            raise ImageProviderError(
+                f"OpenRouter returned {response.status_code}: {response.text[:500]}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ImageProviderError("OpenRouter response was not valid JSON.") from exc
+
+        items = body.get("data") or []
+        if not items:
+            raise ImageProviderError("OpenRouter returned no image data.")
+
+        b64 = items[0].get("b64_json")
+        if not b64:
+            raise ImageProviderError("OpenRouter response had no b64_json payload.")
+
+        try:
+            content = base64.b64decode(b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ImageProviderError("OpenRouter's b64_json payload did not decode.") from exc
+
+        content_type = items[0].get("media_type") or "image/png"
+        extension = _EXTENSION_BY_CONTENT_TYPE.get(content_type, "png")
+
+        usage = body.get("usage") or {}
+        cost_usd = _as_number(usage.get("cost"))
+        units = _as_number(usage.get("total_tokens")) or 0.0
+
+        return GeneratedImage(
+            content=content,
+            content_type=content_type,
+            filename=f"{uuid.uuid4()}.{extension}",
+            provider="openrouter",
+            model=model,
+            units=units,
+            unit_kind="token",
+            cost_usd=cost_usd,
+        )
+
+
+#: Chooses which concrete `ImageProvider` a deployment uses. Values are
+#: vendor names, never a platform or tenant name — this plugin installs on
+#: every Biffo platform, so nothing configuration-facing here may assume one
+#: of them (the class of defect biffo-template#1450's shared-set writeup
+#: calls out: a group/vocabulary that exists on one product leaking into
+#: code meant for all of them).
+_PROVIDER_ENV = "MARKETING_IMAGE_PROVIDER"
+
+#: OpenRouter is the default (issue #63): it is the only implementation here
+#: whose response carries a real, non-fabricated cost, and getting the
+#: ledger off permanent `unpriced` rows is the reason this provider exists.
+_DEFAULT_PROVIDER = "openrouter"
+
+#: One factory per accepted `_PROVIDER_ENV` value. A `dict` rather than an
+#: `if`/`elif` chain so the accepted-values list in
+#: :func:`create_image_provider`'s error message and this mapping cannot
+#: drift apart.
+_PROVIDER_FACTORIES: dict[str, type[ImageProvider]] = {
+    "openrouter": OpenRouterImageProvider,
+    "openai": OpenAIImageProvider,
+}
+
+
+def create_image_provider() -> ImageProvider:
+    """This deployment's configured `ImageProvider`, chosen by
+    `MARKETING_IMAGE_PROVIDER` (default: ``"openrouter"``).
+
+    An **unset** value picks the default. An **unrecognised** one is a hard
+    `ImageProviderError`, never a silent fallback to the default or to
+    whichever entry happens to be first in `_PROVIDER_FACTORIES` — a typo'd
+    value (``"openrouetr"``) must surface as a failure, not quietly bill an
+    operator through a provider they did not choose and hand back a cost
+    field shaped differently from the one they expected. Comparison is
+    case-insensitive and trims whitespace only; it does not otherwise guess.
+    """
+    choice = os.environ.get(_PROVIDER_ENV, "").strip().lower() or _DEFAULT_PROVIDER
+    try:
+        factory = _PROVIDER_FACTORIES[choice]
+    except KeyError:
+        accepted = ", ".join(sorted(_PROVIDER_FACTORIES))
+        raise ImageProviderError(
+            f"Unknown {_PROVIDER_ENV}={choice!r}. Expected one of: {accepted}."
+        ) from None
+    return factory()
