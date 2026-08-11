@@ -148,4 +148,27 @@ describe('Pipeline', () => {
 
     expect(await within(research).findByText('Approved')).toBeInTheDocument()
   })
+
+  it("names only the copy stage's actual missing upstream approval, not both every time", async () => {
+    // Positioning is already approved here — copy's blocked message must not
+    // tell the operator to redo it too, only to approve channel plan.
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      fetchStub({
+        research: { status: 'approved', body: JSON.stringify({ summary: 'x', findings: [] }) },
+        positioning: {
+          status: 'approved',
+          body: JSON.stringify({ segments: [], pillars: [], ctas: [] }),
+        },
+        channel_plan: { status: 'proposed', body: JSON.stringify({ channels: [] }) },
+      }),
+    )
+
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} />)
+
+    const copy = await screen.findByTestId('stage-copy')
+    expect(await within(copy).findByText(/approve the channel plan stage first/i)).toBeInTheDocument()
+    expect(within(copy).queryByText(/positioning/i)).not.toBeInTheDocument()
+  })
 })
