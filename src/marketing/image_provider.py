@@ -369,3 +369,49 @@ class OpenRouterImageProvider:
             unit_kind="token",
             cost_usd=cost_usd,
         )
+
+
+#: Chooses which concrete `ImageProvider` a deployment uses. Values are
+#: vendor names, never a platform or tenant name — this plugin installs on
+#: every Biffo platform, so nothing configuration-facing here may assume one
+#: of them (the class of defect biffo-template#1450's shared-set writeup
+#: calls out: a group/vocabulary that exists on one product leaking into
+#: code meant for all of them).
+_PROVIDER_ENV = "MARKETING_IMAGE_PROVIDER"
+
+#: OpenRouter is the default (issue #63): it is the only implementation here
+#: whose response carries a real, non-fabricated cost, and getting the
+#: ledger off permanent `unpriced` rows is the reason this provider exists.
+_DEFAULT_PROVIDER = "openrouter"
+
+#: One factory per accepted `_PROVIDER_ENV` value. A `dict` rather than an
+#: `if`/`elif` chain so the accepted-values list in
+#: :func:`create_image_provider`'s error message and this mapping cannot
+#: drift apart.
+_PROVIDER_FACTORIES: dict[str, type[ImageProvider]] = {
+    "openrouter": OpenRouterImageProvider,
+    "openai": OpenAIImageProvider,
+}
+
+
+def create_image_provider() -> ImageProvider:
+    """This deployment's configured `ImageProvider`, chosen by
+    `MARKETING_IMAGE_PROVIDER` (default: ``"openrouter"``).
+
+    An **unset** value picks the default. An **unrecognised** one is a hard
+    `ImageProviderError`, never a silent fallback to the default or to
+    whichever entry happens to be first in `_PROVIDER_FACTORIES` — a typo'd
+    value (``"openrouetr"``) must surface as a failure, not quietly bill an
+    operator through a provider they did not choose and hand back a cost
+    field shaped differently from the one they expected. Comparison is
+    case-insensitive and trims whitespace only; it does not otherwise guess.
+    """
+    choice = os.environ.get(_PROVIDER_ENV, "").strip().lower() or _DEFAULT_PROVIDER
+    try:
+        factory = _PROVIDER_FACTORIES[choice]
+    except KeyError:
+        accepted = ", ".join(sorted(_PROVIDER_FACTORIES))
+        raise ImageProviderError(
+            f"Unknown {_PROVIDER_ENV}={choice!r}. Expected one of: {accepted}."
+        ) from None
+    return factory()

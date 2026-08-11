@@ -8,7 +8,11 @@ that file concurrently, and `admin_app.py` gains exactly one line — the
 The flow, in the order issue #5 asks for it:
 
 1. `image_provider.ImageProvider.generate_still` — behind the port, so a
-   provider swap never touches this file (issue #5's requirement 3).
+   provider swap never touches the route, the storage upload, or the
+   ledger-write payload below (issue #5's requirement 3). The one place this
+   file is *meant* to know a choice exists is `get_image_provider()`, whose
+   body is entirely `image_provider.create_image_provider()` — it names no
+   vendor itself, only the generic call that resolves one (issue #63).
 2. Store the bytes via Core's plugin object-storage capability
    (biffo-template#1437): presign, upload, confirm with `head_object`. The
    documented flow is "browser PUT" because the capability's usual caller is
@@ -50,7 +54,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from . import principal_client
-from .image_provider import GeneratedImage, ImageProvider, ImageProviderError, OpenAIImageProvider
+from .image_provider import (
+    GeneratedImage,
+    ImageProvider,
+    ImageProviderError,
+    create_image_provider,
+)
 
 require_admin = require_group("admin")
 
@@ -93,12 +102,27 @@ def _validated_campaign_id(campaign_id: str) -> str:
 
 def get_image_provider() -> ImageProvider:
     """One provider per request, matching `admin_app.get_agent_gateway`'s
-    shape. `OpenAIImageProvider` is the only production implementation this
-    milestone ships; tests override this dependency with a fake — proving
-    issue #5's requirement 3 (a provider swap is an implementation change,
-    not a rewrite) rather than merely asserting it in prose.
+    shape. Which concrete class gets constructed is
+    `image_provider.create_image_provider`'s call, driven by the
+    `MARKETING_IMAGE_PROVIDER` env var — this function, and this file, still
+    name no vendor directly. Tests override this dependency with a fake —
+    proving issue #5's requirement 3 (a provider swap is an implementation
+    change, not a rewrite) rather than merely asserting it in prose; the
+    live `create_image_provider` choice (issue #63) is the same claim proven
+    a second, independent way, because a factory naming which concrete
+    implementation to build is the one place that is *meant* to know about
+    them — the route handler below, the storage upload, and the ledger
+    payload it writes still touch none of it.
+
+    A misconfigured `MARKETING_IMAGE_PROVIDER` fails here, as a 502, rather
+    than reaching the route body at all — the same mapping `ImageProviderError`
+    gets everywhere else in this router (see `generate_still_route` below),
+    not a bare 500 an operator would have to guess the cause of.
     """
-    return OpenAIImageProvider()
+    try:
+        return create_image_provider()
+    except ImageProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 def get_core_client() -> BiffoAPIClient:
