@@ -361,6 +361,9 @@ async def get_paid_pack_route(
     )
     assets_with_urls = [await pack_routes._asset_with_url(core_client, a) for a in assets]
 
+    # `_ensure_links` filters to the `paid_channels` subset passed in, and
+    # dedups motion-aware, at the source — issue #48. This route used to
+    # filter the result back down again itself; that workaround is gone.
     links = await pack_routes._ensure_links(
         campaign_id,
         paid_channels,
@@ -370,16 +373,6 @@ async def get_paid_pack_route(
             request.headers.get("origin"), request.headers.get("referer")
         ),
     )
-    # `_ensure_links` returns every link Core holds for this campaign, not
-    # just the `paid_channels` subset passed in — see issue #48. Filtered
-    # back down here rather than at the source, since fixing it properly
-    # needs `pack_routes.py`, which several agents work in concurrently and
-    # this change does not touch. This does not fix the rarer case issue #48
-    # also describes (a paid channel sharing an organic channel's exact name
-    # would still surface that organic link instead of minting a paid one) —
-    # that half needs the source fix.
-    paid_channel_keys = {c["channel_key"] for c in paid_channels}
-    links = [link for link in links if link.get("channel") in paid_channel_keys]
 
     return {
         "campaign_id": campaign_id,

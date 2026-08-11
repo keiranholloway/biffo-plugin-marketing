@@ -486,3 +486,125 @@ def test_link_urls_come_from_the_request_origin_not_from_configuration(
 
     assert resp.status_code == 200
     assert resp.json()["links"][0]["url"] == "https://tenant.example.test/c/existing-token"
+
+
+# ── issue #48: leaked links, motion-blind dedup ──────────────────────────────
+
+
+def test_does_not_leak_stale_channel_links_and_mints_paid_when_only_organic_shares_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #48, both halves, against the real taxonomy shape rather than a
+    hand-rolled short channel name.
+
+    `existing` can hold more than the current copy's channels ever asked
+    about — channel planning gets re-run, and old links are never deleted —
+    so a stale `search_organic` link (from an earlier plan that no longer
+    survives into this approved copy) must not leak into a pack that no
+    longer requests it. And the seeded taxonomy gives an organic and a paid
+    version of "the same" channel distinct `channel_key`s (#76), but nothing
+    in this plugin enforces that a tenant's own custom channel keeps a key
+    motion-exclusive — so an existing ORGANIC link for `event_sponsorship`
+    must not suppress minting the PAID one this copy actually asks for.
+    """
+    awkward_channels = [
+        {
+            "channel_key": "event_sponsorship",
+            "motion": "paid",
+            "headline": "Meet us on the show floor this quarter",
+            "body": "Live demos, no queue, real answers from the people who built it.",
+            "cta": "Book a slot",
+            "sources": [{"url": "https://example.com/e", "note": "n"}],
+        }
+    ]
+    core = _FakeCore(copy_artefact=_copy_artefact(awkward_channels))
+    core.links.extend(
+        [
+            {
+                "id": "link-stale-unrelated-channel",
+                "campaign_id": _CAMPAIGN,
+                "token": "stale-token",
+                "channel": "search_organic",
+                "variant": None,
+                "is_paid": False,
+                "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
+            },
+            {
+                "id": "link-same-key-organic-motion",
+                "campaign_id": _CAMPAIGN,
+                "token": "organic-token",
+                "channel": "event_sponsorship",
+                "variant": None,
+                "is_paid": False,
+                "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
+            },
+        ]
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    links = resp.json()["links"]
+
+    # Neither the unrelated stale link nor the same-key organic one leaked;
+    # exactly the requested paid channel comes back.
+    assert len(links) == 1
+    assert links[0]["channel"] == "event_sponsorship"
+    assert links[0]["is_paid"] is True
+    assert links[0]["url"] != f"{_BASE_URL}/c/organic-token"
+
+    # The dedup did not skip minting because an organic link already "had"
+    # the channel_key — a new paid link was actually written.
+    assert core.links[-1]["channel"] == "event_sponsorship"
+    assert core.links[-1]["is_paid"] is True
+
+
+# ── issue #54: source creative selection ─────────────────────────────────────
+
+
+def test_picks_the_newest_source_deterministically_when_more_than_one_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #54: `image_routes.generate_still_route` writes a new
+    `is_source=True` row on every call and nothing supersedes the one it
+    replaces, so more than one can exist for a campaign — the admin UI's
+    `ImageGenerator` makes "generate again" the obvious, one-click thing to
+    do. The pack must return the same single source on every request, not
+    whichever row Core happens to list first: newest `created_at` wins (the
+    most recent generation is what an operator who just re-generated means
+    by "the" creative — the UI already renders it first for the same
+    reason), and the superseded row must not still appear labelled "Source"
+    alongside it.
+
+    Fed in both list orders so the assertion cannot pass by accident of
+    Core's own ordering — the whole point is that it must not matter.
+    """
+    core = _FakeCore(copy_artefact=_copy_artefact(_CHANNELS))
+    monkeypatch.setattr(admin_app, "_core", core)
+    older = {
+        **_source_asset(),
+        "id": "asset-source-older",
+        "media_id": "media-older",
+        "created_at": "2026-08-01T00:00:00Z",
+    }
+    newer = {
+        **_source_asset(),
+        "id": "asset-source-newer",
+        "media_id": "media-newer",
+        "created_at": "2026-08-05T00:00:00Z",
+    }
+
+    for ordered_assets in ([older, newer], [newer, older]):
+        campaign_client = _FakeCampaignClient(assets=list(ordered_assets))
+        client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+        resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["assets"]) == 1
+        assert body["assets"][0]["is_source"] is True
+        assert body["assets"][0]["media_id"] == "media-newer"

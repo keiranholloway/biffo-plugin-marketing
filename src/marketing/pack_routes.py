@@ -159,11 +159,44 @@ async def _existing_assets(
     ``/pack`` and ``/paid-pack``, because this check runs *after* the copy
     gate in ``get_pack_route``/``get_paid_pack_route`` — a third 404 site in
     those functions that #64's own two-site reading of the source missed.
+    #64 deleted the single ``next((a for a in assets if a.get("is_source")),
+    None)`` pick along with the 404 it guarded — this function no longer
+    picks a source at all, which is issue #54's premise as originally filed:
+    that literal call site is gone.
+
+    **The invariant it guarded is not gone, though.**
+    ``image_routes.generate_still_route`` writes a new ``is_source=True``
+    row on every call and nothing supersedes the one it replaces (still
+    true today — issue #54, and out of scope for this function: that write
+    path belongs to a concurrent change, see ``image_routes.py``), so more
+    than one can exist for a real campaign. Left unfiltered, the pack would
+    show every one of them labelled "Source" (``PackParts.tsx``:
+    ``a.is_source === true ? 'Source' : ...``), with no way for an operator
+    to tell which is actually in effect, and no guarantee the set stays the
+    same between two requests. So this function picks, deterministically,
+    which single row gets to keep ``is_source: True`` in what it returns:
+    **newest ``created_at`` wins** — the most recent generation is what an
+    operator who just clicked "generate again" means by "the" creative, and
+    the admin UI already reinforces that reading by rendering the newest
+    generation first. Every other ``is_source=True`` row is dropped from the
+    response outright (not merely relabelled — a superseded source with no
+    placement carries nothing else worth showing). This is a presentation
+    fix, pure function of ``assets`` and therefore byte-identical on repeat
+    for the same underlying rows; it does not touch Core, so it cannot by
+    itself restore "exactly one source per campaign" as a stored fact — only
+    ``generate_still_route`` superseding the prior row can do that.
     """
     assets = await campaign_client.get(
         f"{_INTERNAL_PREFIX}/assets", params={"campaign_id": campaign_id}
     )
     assets = assets or []
+
+    sources = [a for a in assets if a.get("is_source")]
+    if len(sources) > 1:
+        canonical_id = max(sources, key=lambda a: (a.get("created_at") or "", a.get("id") or ""))[
+            "id"
+        ]
+        assets = [a for a in assets if not a.get("is_source") or a.get("id") == canonical_id]
 
     have_placements = {a["placement"] for a in assets if a.get("placement")}
     missing_placements = [p for p in PLACEMENTS if p not in have_placements]
@@ -239,13 +272,30 @@ async def _ensure_links(
     rather than composing a URL some fourth way. No SSRF-shaped surface
     here: both calls are to Core's own internal CRUD mount, never to a URL
     read out of a response.
+
+    Filtered to ``channels`` and keyed on ``(channel_key, is_paid)``, not
+    the bare ``channel_key`` alone (issue #48). ``existing`` is every link
+    Core has ever minted for the campaign — channel planning can be re-run,
+    so it can hold links for channels this call's ``channels`` no longer
+    names at all, and those must not leak into ``out``.
+    ``paid_pack_routes.get_paid_pack_route`` used to filter its own result
+    back down for exactly this reason; that workaround is gone now that the
+    filter lives here, at the source, where every caller gets it for free.
+    The dedup is motion-aware for the same reason: the seeded taxonomy gives
+    an organic and a paid version of "the same" channel distinct
+    ``channel_key``s (#76), but nothing in this plugin enforces that a
+    tenant's own custom channel keeps a key motion-exclusive — a bare
+    ``channel_key`` match would let an existing organic link suppress the
+    mint of the paid one this call actually asked for.
     """
     links_resp = await admin_app._core(
         "GET", f"{_INTERNAL_PREFIX}/links", admin_token, params={"campaign_id": campaign_id}
     )
     links_resp.raise_for_status()
     existing = links_resp.json() or []
-    have_channels = {link["channel"] for link in existing}
+
+    requested = {(c.get("channel_key"), c.get("motion") == "paid") for c in channels}
+    have = {(link["channel"], bool(link.get("is_paid"))) for link in existing}
 
     # The response's own "channel" key is kept (not renamed to "channel_key")
     # for admin-UI backward compatibility — `PackParts.tsx`/`PaidPack.tsx`
@@ -261,9 +311,10 @@ async def _ensure_links(
             "url": tracked_url(base_url, link["token"]) if base_url else None,
         }
         for link in existing
+        if (link["channel"], bool(link.get("is_paid"))) in requested
     ]
 
-    missing = [c for c in channels if c.get("channel_key") not in have_channels]
+    missing = [c for c in channels if (c.get("channel_key"), c.get("motion") == "paid") not in have]
     if not missing:
         return out
 
