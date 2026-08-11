@@ -94,7 +94,7 @@ def _from_ssm(parameter: str) -> str | None:
     - `None` when the call itself failed — must NOT be cached; see
       `public_base_url` for what the caller does with that.
     """
-    value = ssm.read_parameter(parameter)
+    value = ssm.read_parameter(parameter, purpose="public base URL")
     if value is None:
         return None
     return value.strip().rstrip("/")

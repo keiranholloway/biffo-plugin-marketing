@@ -9,15 +9,36 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 
 import marketing.image_provider as image_provider
 from marketing.image_provider import GeneratedImage, ImageProviderError, OpenAIImageProvider
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nnot a real png but bytes are bytes"
 _PNG_B64 = base64.b64encode(_PNG_BYTES).decode()
+
+
+class _FakeSSMClient:
+    """Stands in for `boto3.client("ssm")` at the lowest layer this module
+    reaches — used only by the "real wiring" test below, which exercises
+    `_api_key` -> `ssm.read_parameter` through the actual call rather than a
+    `image_provider.ssm.read_parameter` monkeypatch that would keep passing
+    even if the two modules' contract drifted apart."""
+
+    def __init__(self, *, value: str | None = None, error_code: str | None = None) -> None:
+        self._value = value
+        self._error_code = error_code
+
+    def get_parameter(self, Name: str, WithDecryption: bool) -> dict[str, Any]:  # noqa: N803
+        if self._error_code is not None:
+            raise ClientError(
+                {"Error": {"Code": self._error_code, "Message": "synthetic"}}, "GetParameter"
+            )
+        return {"Parameter": {"Value": self._value}}
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +146,7 @@ def test_a_transient_ssm_failure_does_not_poison_the_api_key_cache(
     responses: list[str | None] = [None, "sk-live-real-key"]
     calls: list[str] = []
 
-    def _flaky_then_fine(parameter: str) -> str | None:
+    def _flaky_then_fine(parameter: str, *, purpose: str) -> str | None:
         calls.append(parameter)
         return responses.pop(0)
 
@@ -140,3 +161,42 @@ def test_a_transient_ssm_failure_does_not_poison_the_api_key_cache(
     # A later call — same warm container — retries and gets the real key.
     assert image_provider._api_key() == "sk-live-real-key"
     assert len(calls) == 2
+
+
+def test_the_real_ssm_wiring_does_not_cache_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration test, through the real call chain: `_api_key` ->
+    `ssm.read_parameter` -> `boto3`, with only `boto3.client` stubbed —
+    everything above it is the actual production code, unlike the test
+    above, which monkeypatches `image_provider.ssm.read_parameter` directly
+    and would not notice if the two modules' contract drifted apart."""
+    monkeypatch.delenv("MARKETING_IMAGE_PROVIDER_API_KEY", raising=False)
+    monkeypatch.setenv("MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER", "/marketing/image-key")
+    image_provider.reset_api_key_cache()
+
+    clients = iter(
+        [
+            _FakeSSMClient(error_code="ThrottlingException"),
+            _FakeSSMClient(value="sk-live-real-key"),
+        ]
+    )
+    monkeypatch.setattr("boto3.client", lambda service: next(clients))
+
+    assert image_provider._api_key() == ""
+    assert image_provider._cached_api_key is None
+    assert image_provider._api_key() == "sk-live-real-key"
+
+
+def test_the_real_ssm_wiring_reports_a_confirmed_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As above, for the other half of the contract: a genuinely-absent
+    parameter through the real chain, not a mocked `ssm.read_parameter`."""
+    monkeypatch.delenv("MARKETING_IMAGE_PROVIDER_API_KEY", raising=False)
+    monkeypatch.setenv("MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER", "/marketing/image-key")
+    image_provider.reset_api_key_cache()
+    monkeypatch.setattr(
+        "boto3.client", lambda service: _FakeSSMClient(error_code="ParameterNotFound")
+    )
+
+    assert image_provider._api_key() == ""
+    assert image_provider._cached_api_key == ""

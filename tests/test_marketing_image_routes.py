@@ -72,17 +72,23 @@ class _FakeCoreClient:
         max_bytes: int = 10_000_000,
         presign_status: int | None = None,
         ledger_status: int | None = None,
+        ledger_missing_id: bool = False,
+        confirm_missing_id: bool = False,
     ) -> None:
         self.calls: list[tuple[str, str, Any]] = []
         self._max_bytes = max_bytes
         self._presign_status = presign_status
         self._ledger_status = ledger_status
+        self._ledger_missing_id = ledger_missing_id
+        self._confirm_missing_id = confirm_missing_id
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         self.calls.append(("POST", path, json))
         if path == image_routes._LEDGER_PATH:
             if self._ledger_status is not None:
                 raise BiffoAPIError(self._ledger_status, "ledger unavailable")
+            if self._ledger_missing_id:
+                return {"created_at": "2026-08-10T00:00:00Z"}
             return {"id": _LEDGER_ID, "created_at": "2026-08-10T00:00:00Z"}
         if path == f"{image_routes._STORAGE_PATH}/presign":
             if self._presign_status is not None:
@@ -95,6 +101,14 @@ class _FakeCoreClient:
                 "expires_in": 900,
             }
         if path == f"{image_routes._STORAGE_PATH}/confirm":
+            if self._confirm_missing_id:
+                return {
+                    "owner_plugin": "system:marketing",
+                    "storage_key": (json or {})["key"],
+                    "filename": "generated.png",
+                    "mime_type": "image/png",
+                    "size_bytes": len(b"fake-bytes"),
+                }
             return {
                 "id": _MEDIA_ID,
                 "owner_plugin": "system:marketing",
@@ -482,6 +496,51 @@ def test_a_ledger_failure_is_loud_even_though_it_cannot_be_prevented(
 
     assert resp.status_code == 502
     assert any("double-bill" in record.message for record in caplog.records)
+
+
+def test_a_malformed_ledger_response_still_reports_the_charge() -> None:
+    """The ledger POST can succeed (the charge IS recorded) while its
+    response is missing `id` — Core response-shape drift, not a failed
+    write. The 502 that follows must still say a charge happened, even
+    though there is no id left to name.
+
+    Fails before this round's fix: `ledger_id = _required_field(...)` was
+    not wrapped in `_with_committed_note`, so this case raised a bare
+    "Ledger response had no 'id'." with no mention that money had already
+    moved — the exact blind-retry risk issue #24 exists to prevent, at the
+    point closest to the charge.
+    """
+    core = _FakeCoreClient(ledger_missing_id=True)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "charged" in detail.lower(), f"the error must say a charge already happened: {detail!r}"
+
+
+def test_a_malformed_confirm_response_names_the_ledger(_s3_upload_ok) -> None:
+    """As above, one step later: storage confirms the upload but its
+    response is missing `id`. The ledger is already known at this point, so
+    the error must name it.
+
+    Fails before this round's fix: `media_id = _required_field(...)` was not
+    wrapped in `_with_committed_note`, so this case's 502 said nothing about
+    the ledger entry that already existed.
+    """
+    core = _FakeCoreClient(confirm_missing_id=True)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail, f"the error must name the ledger entry: {detail!r}"
 
 
 def test_rejects_an_empty_prompt() -> None:

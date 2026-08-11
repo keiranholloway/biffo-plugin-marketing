@@ -6,9 +6,32 @@ when nothing is configured, which is the state every deployment starts in.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from botocore.exceptions import ClientError
 
 from marketing import config
+
+
+class _FakeSSMClient:
+    """Stands in for `boto3.client("ssm")` at the lowest layer this module
+    reaches — used only by the two "real wiring" tests below, which exist so
+    `config._from_ssm` -> `ssm.read_parameter` is exercised through the
+    actual call, not just against a `config.ssm.read_parameter` monkeypatch
+    that would keep passing even if the two modules' contract drifted apart
+    (a renamed kwarg, a moved function)."""
+
+    def __init__(self, *, value: str | None = None, error_code: str | None = None) -> None:
+        self._value = value
+        self._error_code = error_code
+
+    def get_parameter(self, Name: str, WithDecryption: bool) -> dict[str, Any]:  # noqa: N803
+        if self._error_code is not None:
+            raise ClientError(
+                {"Error": {"Code": self._error_code, "Message": "synthetic"}}, "GetParameter"
+            )
+        return {"Parameter": {"Value": self._value}}
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +93,7 @@ def test_a_genuinely_missing_parameter_is_empty_and_cached(
     safe to cache (see the transient-failure test below for the contrast)."""
     monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
     monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
-    monkeypatch.setattr(config.ssm, "read_parameter", lambda parameter: "")
+    monkeypatch.setattr(config.ssm, "read_parameter", lambda parameter, *, purpose: "")
 
     assert config._from_ssm("/tabsii/dev/marketing/public-base-url") == ""
     assert config.public_base_url() == ""
@@ -95,7 +118,7 @@ def test_a_transient_ssm_failure_does_not_poison_the_cache(
     responses: list[str | None] = [None, "https://dev.tabsii.com"]
     calls: list[str] = []
 
-    def _flaky_then_fine(parameter: str) -> str | None:
+    def _flaky_then_fine(parameter: str, *, purpose: str) -> str | None:
         calls.append(parameter)
         return responses.pop(0)
 
@@ -111,6 +134,45 @@ def test_a_transient_ssm_failure_does_not_poison_the_cache(
     # gets the real value, because nothing poisoned the cache.
     assert config.public_base_url() == "https://dev.tabsii.com"
     assert len(calls) == 2
+
+
+def test_the_real_ssm_wiring_reports_a_confirmed_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Integration test, through the real call chain: `config._from_ssm` ->
+    `ssm.read_parameter` -> `boto3`, with only `boto3.client` stubbed —
+    everything above it is the actual production code, unlike every other
+    test in this file, which monkeypatches `config.ssm.read_parameter` or
+    `config._from_ssm` directly and would not notice if the two modules'
+    contract drifted apart."""
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
+    monkeypatch.setattr(
+        "boto3.client", lambda service: _FakeSSMClient(error_code="ParameterNotFound")
+    )
+
+    assert config._from_ssm("/tabsii/dev/marketing/public-base-url") == ""
+    assert config.public_base_url() == ""
+    assert config._cached == ""
+
+
+def test_the_real_ssm_wiring_does_not_cache_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As above, but through the real chain for the #25 contract itself: a
+    throttle must not be cached, and a later call must retry and succeed."""
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
+
+    clients = iter(
+        [
+            _FakeSSMClient(error_code="ThrottlingException"),
+            _FakeSSMClient(value="https://dev.tabsii.com"),
+        ]
+    )
+    monkeypatch.setattr("boto3.client", lambda service: next(clients))
+
+    assert config.public_base_url() == ""
+    assert config._cached is None
+    assert config.public_base_url() == "https://dev.tabsii.com"
 
 
 def test_an_unconfigured_deployment_does_not_re_query_on_every_request(

@@ -185,7 +185,7 @@ def _api_key() -> str:
         _cached_api_key = ""
         return _cached_api_key
 
-    value = ssm.read_parameter(parameter)
+    value = ssm.read_parameter(parameter, purpose="image provider API key")
     if value is None:
         # Could not ask — fail only this call. `_cached_api_key` stays `None`
         # so the next call retries rather than repeating a non-answer.

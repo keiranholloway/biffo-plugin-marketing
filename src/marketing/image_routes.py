@@ -190,9 +190,9 @@ def _core_error(exc: BiffoAPIError, *, not_found: str | None = None) -> HTTPExce
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.detail)
 
 
-def _required_field(payload: dict[str, Any], key: str, *, context: str) -> Any:
+def _required_field(payload: Any, key: str, *, context: str) -> Any:
     """``payload[key]``, or a 502 naming what broke instead of a bare
-    `KeyError`.
+    `KeyError` (or worse, an unhandled `TypeError`).
 
     Absorbed from issue #26 (see issue #24's comments): every call site below
     reads this straight off a Core response with no guard, so a response-shape
@@ -201,10 +201,18 @@ def _required_field(payload: dict[str, Any], key: str, *, context: str) -> Any:
     already been paid (issue #24), so losing the message here would also
     swallow the evidence (a ledger/media id) the caller needs to avoid a blind
     retry.
+
+    ``payload`` is typed `Any`, not `dict[str, Any]`, and both `KeyError` and
+    `TypeError` are caught: the SDK's own `_parse_json` returns `None` for any
+    empty-body 2xx, and `None[key]` raises `TypeError`, not `KeyError` — a
+    `dict`-only guard would miss exactly the response-shape drift this
+    function exists to catch. Not currently reachable against Core's own
+    routes (they all declare a `response_model`, so an empty body cannot pass
+    validation), but nothing here should depend on that staying true.
     """
     try:
         return payload[key]
-    except KeyError as exc:
+    except (KeyError, TypeError) as exc:
         logger.error("%s response had no %r: %r", context, key, payload)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -212,22 +220,36 @@ def _required_field(payload: dict[str, Any], key: str, *, context: str) -> Any:
         ) from exc
 
 
-def _committed_note(**ids: str | None) -> str:
+def _committed_note(*, charged: bool = False, **ids: str | None) -> str:
     """A human-readable list of what already committed, appended to an error
     raised after the provider has been charged (issue #24) — so an operator
     reading the failure knows a blind retry would double the charge rather
     than merely retry a step that never touched money.
+
+    ``charged=True`` with no ``ids`` covers the one case where there is a
+    charge but nothing to name yet: the ledger POST succeeded but its `id`
+    could not be read out of the response. There is still no id to print, but
+    "nothing to report" would be worse than silence — it would read as though
+    the charge itself were still in doubt, when it is not.
     """
     parts = [f"{name} {value}" for name, value in ids.items() if value]
-    if not parts:
-        return ""
-    return " Already recorded: " + ", ".join(parts) + ". Do not regenerate blindly."
+    if parts:
+        return " Already recorded: " + ", ".join(parts) + ". Do not regenerate blindly."
+    if charged:
+        return (
+            " The provider call already succeeded and WAS charged — its ledger id could "
+            "not be read from Core's response, so check the media-generations ledger by "
+            "hand before regenerating."
+        )
+    return ""
 
 
-def _with_committed_note(exc: HTTPException, **ids: str | None) -> HTTPException:
+def _with_committed_note(
+    exc: HTTPException, *, charged: bool = False, **ids: str | None
+) -> HTTPException:
     """`exc`, with `_committed_note`'s context appended to its detail and its
     status code preserved."""
-    note = _committed_note(**ids)
+    note = _committed_note(charged=charged, **ids)
     if not note:
         return exc
     return HTTPException(status_code=exc.status_code, detail=f"{exc.detail}{note}")
@@ -263,11 +285,21 @@ async def _upload(core_client: BiffoAPIClient, image: GeneratedImage) -> dict[st
             ),
         )
 
+    # Every field read off `presigned` from here on is guarded the same way
+    # as `max_bytes` above — a response missing any of these is exactly the
+    # same class of Core response-shape drift, and by this point in the
+    # module docstring's ordering (issue #24) the ledger has already been
+    # written, so an unguarded `KeyError` here would still be a post-charge
+    # failure worth a diagnosable message.
+    presign_url = _required_field(presigned, "url", context="Presign")
+    presign_fields = _required_field(presigned, "fields", context="Presign")
+    presign_key = _required_field(presigned, "key", context="Presign")
+
     async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT) as upload_client:
         try:
             upload = await upload_client.post(
-                presigned["url"],
-                data=presigned["fields"],
+                presign_url,
+                data=presign_fields,
                 files={"file": (image.filename, image.content, image.content_type)},
             )
         except httpx.HTTPError as exc:
@@ -283,7 +315,7 @@ async def _upload(core_client: BiffoAPIClient, image: GeneratedImage) -> dict[st
         )
 
     try:
-        return await core_client.post(f"{_STORAGE_PATH}/confirm", json={"key": presigned["key"]})
+        return await core_client.post(f"{_STORAGE_PATH}/confirm", json={"key": presign_key})
     except BiffoAPIError as exc:
         raise _core_error(exc) from exc
 
@@ -372,14 +404,24 @@ async def generate_still_route(
         )
         raise _core_error(exc) from exc
 
-    ledger_id = _required_field(ledger, "id", context="Ledger")
+    # The charge is already durably recorded at this point — see the
+    # docstring above. Every failure from here on wraps its error with
+    # `_with_committed_note` so a caller reading it sees what already
+    # committed, never a bare failure that reads like nothing happened.
+    try:
+        ledger_id = _required_field(ledger, "id", context="Ledger")
+    except HTTPException as exc:
+        raise _with_committed_note(exc, charged=True) from exc
 
     try:
         media = await _upload(core_client, image)
     except HTTPException as exc:
         raise _with_committed_note(exc, ledger=ledger_id) from exc
 
-    media_id = _required_field(media, "id", context="Storage confirm")
+    try:
+        media_id = _required_field(media, "id", context="Storage confirm")
+    except HTTPException as exc:
+        raise _with_committed_note(exc, ledger=ledger_id) from exc
 
     try:
         asset = await campaign_client.post(
@@ -395,7 +437,10 @@ async def generate_still_route(
     except BiffoAPIError as exc:
         raise _with_committed_note(_core_error(exc), ledger=ledger_id, media=media_id) from exc
 
-    asset_id = asset.get("id")
+    try:
+        asset_id = _required_field(asset, "id", context="Asset")
+    except HTTPException as exc:
+        raise _with_committed_note(exc, ledger=ledger_id, media=media_id) from exc
 
     try:
         url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
