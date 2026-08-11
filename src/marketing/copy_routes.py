@@ -45,16 +45,32 @@ async def start_copy_route(
     are decorative."""
     campaign_id = admin_app._validated_campaign_id(campaign_id)
 
+    # Both gates below follow `admin_app.start_positioning_route`'s pattern
+    # exactly: gated on the latest APPROVED artefact of each kind, not the
+    # latest attempt overall (issue #41) — a newer pending/proposed re-run of
+    # either upstream stage must not hide an older approved one. The bare
+    # `_latest_artefact` call is used only for the 404-vs-409 split and, on
+    # failure, to report the newest attempt's real status.
     positioning = await admin_app._latest_artefact(campaign_id, "positioning", admin.token)
     if positioning is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No positioning artefact for this campaign yet.",
         )
-    try:
-        pipeline.require_approved(positioning.get("status") or "", what="The positioning artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    approved_positioning = await admin_app._latest_approved_artefact(
+        campaign_id, "positioning", admin.token
+    )
+    if approved_positioning is None:
+        try:
+            pipeline.require_approved(
+                positioning.get("status") or "", what="The positioning artefact"
+            )
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The positioning artefact must be approved before this can proceed.",
+        )
 
     channel_plan = await admin_app._latest_artefact(campaign_id, "channel_plan", admin.token)
     if channel_plan is None:
@@ -62,12 +78,20 @@ async def start_copy_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No channel-plan artefact for this campaign yet.",
         )
-    try:
-        pipeline.require_approved(
-            channel_plan.get("status") or "", what="The channel-plan artefact"
+    approved_channel_plan = await admin_app._latest_approved_artefact(
+        campaign_id, "channel_plan", admin.token
+    )
+    if approved_channel_plan is None:
+        try:
+            pipeline.require_approved(
+                channel_plan.get("status") or "", what="The channel-plan artefact"
+            )
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The channel-plan artefact must be approved before this can proceed.",
         )
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     def _body(artefact: dict[str, Any]) -> dict[str, Any]:
         raw = artefact.get("body")
@@ -75,8 +99,8 @@ async def start_copy_route(
 
     causation_id, run_id = await pipeline.start_copy(
         gateway,
-        positioning_body=_body(positioning),
-        channel_plan_body=_body(channel_plan),
+        positioning_body=_body(approved_positioning),
+        channel_plan_body=_body(approved_channel_plan),
     )
 
     created = await admin_app._core(

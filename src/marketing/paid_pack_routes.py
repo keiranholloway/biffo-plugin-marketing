@@ -267,12 +267,24 @@ async def get_paid_pack_route(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No copy artefact for this campaign yet."
         )
-    try:
-        pipeline.require_approved(copy_artefact.get("status") or "", what="The copy artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # Gated on the latest APPROVED copy, not the latest attempt overall
+    # (issue #41 — this call site was not named in the issue but shares the
+    # exact same shape as `pack_routes.get_pack_route`'s copy gate): a newer
+    # pending/proposed re-run must not hide an older approved one.
+    # `copy_artefact` above is used only for the 404-vs-409 split and, on
+    # failure, to report the newest attempt's real status.
+    approved_copy = await admin_app._latest_approved_artefact(campaign_id, "copy", admin.token)
+    if approved_copy is None:
+        try:
+            pipeline.require_approved(copy_artefact.get("status") or "", what="The copy artefact")
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The copy artefact must be approved before this can proceed.",
+        )
 
-    raw_copy_body = copy_artefact.get("body")
+    raw_copy_body = approved_copy.get("body")
     copy_body = (
         json.loads(raw_copy_body) if isinstance(raw_copy_body, str) else (raw_copy_body or {})
     )
@@ -289,12 +301,23 @@ async def get_paid_pack_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No positioning artefact for this campaign yet.",
         )
-    try:
-        pipeline.require_approved(positioning.get("status") or "", what="The positioning artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # Same reasoning as the copy gate just above.
+    approved_positioning = await admin_app._latest_approved_artefact(
+        campaign_id, "positioning", admin.token
+    )
+    if approved_positioning is None:
+        try:
+            pipeline.require_approved(
+                positioning.get("status") or "", what="The positioning artefact"
+            )
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The positioning artefact must be approved before this can proceed.",
+        )
 
-    raw_positioning_body = positioning.get("body")
+    raw_positioning_body = approved_positioning.get("body")
     positioning_body = (
         json.loads(raw_positioning_body)
         if isinstance(raw_positioning_body, str)

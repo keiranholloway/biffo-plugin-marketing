@@ -299,12 +299,23 @@ async def get_pack_route(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No copy artefact for this campaign yet."
         )
-    try:
-        pipeline.require_approved(copy_artefact.get("status") or "", what="The copy artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # Gated on the latest APPROVED copy, not the latest attempt overall
+    # (issue #41) — a newer pending/proposed re-run must not make a pack
+    # that was serving fine start 404ing/409ing the moment someone starts an
+    # edit. `copy_artefact` above is used only for the 404-vs-409 split and,
+    # on failure, to report the newest attempt's real status.
+    approved_copy = await admin_app._latest_approved_artefact(campaign_id, "copy", admin.token)
+    if approved_copy is None:
+        try:
+            pipeline.require_approved(copy_artefact.get("status") or "", what="The copy artefact")
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The copy artefact must be approved before this can proceed.",
+        )
 
-    raw_body = copy_artefact.get("body")
+    raw_body = approved_copy.get("body")
     copy_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
     channels = copy_body.get("channels") or []
 

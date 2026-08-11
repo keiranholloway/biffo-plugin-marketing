@@ -54,12 +54,28 @@ async def start_channel_plan_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No positioning artefact for this campaign yet.",
         )
-    try:
-        pipeline.require_approved(positioning.get("status") or "", what="The positioning artefact")
-    except pipeline.ArtefactNotApprovedError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # Gated on the latest APPROVED positioning, not the latest attempt
+    # overall (issue #41) — a newer pending/proposed re-run must not hide an
+    # older approved one. `positioning` above is used only for the
+    # 404-vs-409 split and, on failure, to report the newest attempt's real
+    # status — see `admin_app.start_positioning_route` for the identical
+    # reasoning this mirrors.
+    approved_positioning = await admin_app._latest_approved_artefact(
+        campaign_id, "positioning", admin.token
+    )
+    if approved_positioning is None:
+        try:
+            pipeline.require_approved(
+                positioning.get("status") or "", what="The positioning artefact"
+            )
+        except pipeline.ArtefactNotApprovedError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The positioning artefact must be approved before this can proceed.",
+        )
 
-    raw_body = positioning.get("body")
+    raw_body = approved_positioning.get("body")
     positioning_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
 
     causation_id, run_id = await pipeline.start_channel_plan(
