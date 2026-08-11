@@ -43,7 +43,7 @@ _BASE_URL = "https://dev.example.invalid"
 
 _CHANNELS = [
     {
-        "channel": "Instagram Reels",
+        "channel_key": "instagram_organic",
         "motion": "organic",
         "headline": "Run every site the same way, finally.",
         "body": "One dashboard, every location.",
@@ -238,6 +238,45 @@ def test_409s_when_copy_is_not_approved(monkeypatch: pytest.MonkeyPatch) -> None
     assert resp.status_code == 409
 
 
+def test_409s_a_pre_migration_copy_artefact_with_no_channel_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The existing-dev-data answer (#76 increment 2): a copy artefact
+    approved BEFORE the taxonomy migration existed is the old free-text
+    shape — `{"channel": ..., "motion": ...}`, no `channel_key` on any
+    entry — and never passed through `start_copy_route`'s own guard (it
+    predates the code that checks it). Opening its pack must surface a
+    clear, actionable 409 naming the real cause, not a bare `KeyError`/500
+    out of `_ensure_links` reaching for a field that was never there. This
+    is the literal #75 shape: the free-text channel that overflowed
+    `marketing_link.channel` was 121 characters, from a campaign whose copy
+    would have looked exactly like this."""
+    pre_migration_channels = [
+        {
+            "channel": (
+                "Google Search ads (non-brand: terms like 'franchise management "
+                "software UK', 'franchise operations pricing per location')"
+            ),
+            "motion": "paid",
+            "headline": "h",
+            "body": "b",
+            "cta": "c",
+            "sources": [{"url": "https://example.com/y", "note": "n"}],
+        }
+    ]
+    core = _FakeCore(copy_artefact=_copy_artefact(pre_migration_channels))
+    monkeypatch.setattr(admin_app, "_core", core)
+    client = TestClient(
+        _app(core_client=_FakeStorageClient(), campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 409
+    assert "channel_key" in resp.json()["detail"]
+    assert "re-run" in resp.json()["detail"].lower()
+
+
 def test_serves_the_approved_pack_even_with_a_newer_pending_copy_re_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -340,7 +379,7 @@ def test_assembles_the_pack_from_the_source_asset_alone(monkeypatch: pytest.Monk
     # composition (links.py), never a hand-built URL.
     assert len(body["links"]) == 1
     link = body["links"][0]
-    assert link["channel"] == "Instagram Reels"
+    assert link["channel"] == "instagram_organic"
     assert link["url"].startswith(f"{_BASE_URL}/c/")
     assert core.links[0]["destination_url"].startswith("https://example.com/landing?")
     assert "utm_campaign=" + _CAMPAIGN in core.links[0]["destination_url"]
@@ -382,7 +421,7 @@ def test_does_not_remint_a_link_for_a_channel_that_already_has_one(
             "id": "link-existing",
             "campaign_id": _CAMPAIGN,
             "token": "existing-token",
-            "channel": "Instagram Reels",
+            "channel": "instagram_organic",
             "variant": None,
             "is_paid": False,
             "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,
@@ -424,7 +463,7 @@ def test_link_urls_come_from_the_request_origin_not_from_configuration(
             "id": "link-existing",
             "campaign_id": _CAMPAIGN,
             "token": "existing-token",
-            "channel": "Instagram Reels",
+            "channel": "instagram_organic",
             "variant": None,
             "is_paid": False,
             "destination_url": "https://example.com/landing?utm_campaign=" + _CAMPAIGN,

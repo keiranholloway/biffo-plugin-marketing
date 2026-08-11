@@ -78,8 +78,28 @@ async def start_channel_plan_route(
     raw_body = approved_positioning.get("body")
     positioning_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
 
+    channels_resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin.token)
+    channels_resp.raise_for_status()
+    channel_rows = channels_resp.json() or []
+    # What the agent is shown, and what it is later validated against
+    # (#76 increment 2) — the SAME set, stored on the pending artefact below
+    # rather than re-fetched at advance time, so a channel added to the
+    # taxonomy between start and advance cannot retroactively legalise (or a
+    # deleted one retroactively invalidate) a key this run was actually
+    # shown. See `pipeline.start_channel_plan`'s own docstring.
+    taxonomy = [
+        {
+            "channel_key": row["key"],
+            "label": row["label"],
+            "motion": row["motion"],
+            "category": row["category"],
+        }
+        for row in channel_rows
+    ]
+    taxonomy_motions = {row["key"]: row["motion"] for row in channel_rows}
+
     causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body=positioning_body
+        gateway, positioning_body=positioning_body, taxonomy=taxonomy
     )
 
     created = await admin_app._core(
@@ -92,6 +112,10 @@ async def start_channel_plan_route(
             "status": "pending",
             "causation_id": causation_id,
             "agent_run_id": run_id,
+            # Pending-state payload, overwritten with the real result once
+            # proposed — same shape `start_research_route` already uses for
+            # `research_run_ids`.
+            "body": json.dumps({"channel_taxonomy": taxonomy_motions}),
         },
     )
     created.raise_for_status()

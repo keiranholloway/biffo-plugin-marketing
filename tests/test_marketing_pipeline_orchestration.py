@@ -288,25 +288,31 @@ async def test_advance_positioning_raises_when_the_run_failed() -> None:
 async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body() -> None:
     gateway = _FakeGateway()
     positioning_body = {"segments": [], "pillars": [], "ctas": []}
+    taxonomy = [{"channel_key": "instagram_organic", "label": "Instagram", "motion": "organic"}]
 
     causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body=positioning_body
+        gateway, positioning_body=positioning_body, taxonomy=taxonomy
     )
 
     assert len(gateway.requested) == 1
     requested = gateway.requested[0]
     assert requested.agent_name == CHANNEL_PLAN_AGENT_NAME
     assert requested.causation_id == causation_id
-    assert requested.input_payload == {"positioning": positioning_body}
+    assert requested.input_payload == {
+        "positioning": positioning_body,
+        "channel_taxonomy": taxonomy,
+    }
     assert run_id  # a real id was returned
 
 
 @pytest.mark.asyncio
 async def test_advance_channel_plan_returns_none_while_running() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(gateway, positioning_body={})
+    _causation_id, run_id = await pipeline.start_channel_plan(
+        gateway, positioning_body={}, taxonomy=[]
+    )
 
-    result = await pipeline.advance_channel_plan(gateway, run_id=run_id)
+    result = await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
 
     assert result is None
 
@@ -314,7 +320,9 @@ async def test_advance_channel_plan_returns_none_while_running() -> None:
 @pytest.mark.asyncio
 async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(gateway, positioning_body={})
+    _causation_id, run_id = await pipeline.start_channel_plan(
+        gateway, positioning_body={}, taxonomy=[]
+    )
     gateway.complete(
         run_id,
         messages=[
@@ -327,8 +335,7 @@ async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
                             "arguments": {
                                 "channels": [
                                     {
-                                        "channel": "Instagram Reels",
-                                        "motion": "organic",
+                                        "channel_key": "instagram_organic",
                                         "rank": 1,
                                         "rationale": "r",
                                         "sources": [{"url": "https://example.com/y", "note": "n"}],
@@ -342,20 +349,25 @@ async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
         ],
     )
 
-    result = await pipeline.advance_channel_plan(gateway, run_id=run_id)
+    result = await pipeline.advance_channel_plan(
+        gateway, run_id=run_id, taxonomy={"instagram_organic": "organic"}
+    )
 
     assert isinstance(result, pipeline.ChannelPlan)
-    assert result.channels[0].channel == "Instagram Reels"
+    assert result.channels[0].channel_key == "instagram_organic"
+    assert result.channels[0].motion == "organic"  # derived from taxonomy, not the agent
 
 
 @pytest.mark.asyncio
 async def test_advance_channel_plan_raises_when_the_run_failed() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(gateway, positioning_body={})
+    _causation_id, run_id = await pipeline.start_channel_plan(
+        gateway, positioning_body={}, taxonomy=[]
+    )
     gateway.complete(run_id, status="failed")
 
     with pytest.raises(pipeline.RunNotSucceededError):
-        await pipeline.advance_channel_plan(gateway, run_id=run_id)
+        await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
 
 
 # ── start_copy / advance_copy (M5, issue #4) ─────────────────────────────────
@@ -389,7 +401,7 @@ async def test_advance_copy_returns_none_while_running() -> None:
         gateway, positioning_body={}, channel_plan_body={}
     )
 
-    result = await pipeline.advance_copy(gateway, run_id=run_id)
+    result = await pipeline.advance_copy(gateway, run_id=run_id, channel_plan_channels={})
 
     assert result is None
 
@@ -412,8 +424,7 @@ async def test_advance_copy_returns_the_copy_once_succeeded() -> None:
                             "arguments": {
                                 "channels": [
                                     {
-                                        "channel": "Instagram Reels",
-                                        "motion": "organic",
+                                        "channel_key": "instagram_organic",
                                         "headline": "h",
                                         "body": "b",
                                         "cta": "c",
@@ -428,10 +439,13 @@ async def test_advance_copy_returns_the_copy_once_succeeded() -> None:
         ],
     )
 
-    result = await pipeline.advance_copy(gateway, run_id=run_id)
+    result = await pipeline.advance_copy(
+        gateway, run_id=run_id, channel_plan_channels={"instagram_organic": "organic"}
+    )
 
     assert isinstance(result, pipeline.CopySet)
-    assert result.channels[0].channel == "Instagram Reels"
+    assert result.channels[0].channel_key == "instagram_organic"
+    assert result.channels[0].motion == "organic"  # derived from the plan, not the agent
 
 
 @pytest.mark.asyncio
@@ -443,7 +457,7 @@ async def test_advance_copy_raises_when_the_run_failed() -> None:
     gateway.complete(run_id, status="failed")
 
     with pytest.raises(pipeline.RunNotSucceededError):
-        await pipeline.advance_copy(gateway, run_id=run_id)
+        await pipeline.advance_copy(gateway, run_id=run_id, channel_plan_channels={})
 
 
 # ── require_approved ──────────────────────────────────────────────────────────
