@@ -66,13 +66,24 @@ class _FakeCoreClient:
     """Stands in for the SigV4-signed internal client: storage presign/
     confirm/url and the media-generations ledger."""
 
-    def __init__(self, *, max_bytes: int = 10_000_000, presign_status: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_bytes: int = 10_000_000,
+        presign_status: int | None = None,
+        ledger_status: int | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str, Any]] = []
         self._max_bytes = max_bytes
         self._presign_status = presign_status
+        self._ledger_status = ledger_status
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         self.calls.append(("POST", path, json))
+        if path == image_routes._LEDGER_PATH:
+            if self._ledger_status is not None:
+                raise BiffoAPIError(self._ledger_status, "ledger unavailable")
+            return {"id": _LEDGER_ID, "created_at": "2026-08-10T00:00:00Z"}
         if path == f"{image_routes._STORAGE_PATH}/presign":
             if self._presign_status is not None:
                 raise BiffoAPIError(self._presign_status, "storage unavailable")
@@ -92,8 +103,6 @@ class _FakeCoreClient:
                 "mime_type": "image/png",
                 "size_bytes": len(b"fake-bytes"),
             }
-        if path == image_routes._LEDGER_PATH:
-            return {"id": _LEDGER_ID, "created_at": "2026-08-10T00:00:00Z"}
         raise AssertionError(f"unexpected POST {path}")
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -108,8 +117,9 @@ class _FakeCampaignClient:
     the plugin's own generated-CRUD tables (`marketing_campaign`,
     `marketing_asset`) — Core's internal, per-plugin mount, per issue #27."""
 
-    def __init__(self, *, exists: bool = True) -> None:
+    def __init__(self, *, exists: bool = True, fail_asset_creation: bool = False) -> None:
         self.exists = exists
+        self.fail_asset_creation = fail_asset_creation
         self.created_assets: list[dict[str, Any]] = []
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -121,6 +131,8 @@ class _FakeCampaignClient:
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         if path == f"{image_routes._INTERNAL_PREFIX}/assets":
+            if self.fail_asset_creation:
+                raise BiffoAPIError(502, "asset service unavailable")
             row = {**(json or {}), "id": f"asset-{len(self.created_assets) + 1}"}
             self.created_assets.append(row)
             return row
@@ -374,6 +386,102 @@ def test_storage_unavailable_passes_through_as_503() -> None:
     resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
 
     assert resp.status_code == 503
+
+
+# ── issue #24: a partial failure must not orphan a billed generation ────────
+
+
+def test_the_charge_is_ledgered_before_upload_is_even_attempted(_s3_upload_ok) -> None:
+    """The core of the fix: the ledger POST is the very next Core call after
+    the provider is paid, ahead of storage — not last, as it was before.
+
+    Fails before the fix: the old handler called `_upload` first, so the
+    ledger path would not appear before the presign path in `core.calls`.
+    """
+    core = _FakeCoreClient()
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 201
+    post_paths = [path for method, path, _ in core.calls if method == "POST"]
+    ledger_index = post_paths.index(image_routes._LEDGER_PATH)
+    presign_index = post_paths.index(f"{image_routes._STORAGE_PATH}/presign")
+    assert ledger_index < presign_index, f"ledger must precede presign, got {post_paths}"
+
+
+def test_the_charge_survives_an_upload_failure_and_the_error_names_the_ledger(
+    _s3_upload_failing,
+) -> None:
+    """Issue #24's central claim: a failure between the provider call and the
+    asset row must not orphan the charge, and the resulting error must let a
+    caller tell this apart from a first attempt.
+
+    Fails before the fix: the old handler ledgered *after* upload, so an
+    upload failure meant no ledger row was ever written — `core.calls` would
+    contain no POST to `_LEDGER_PATH` at all, and the 502 would say nothing
+    about a charge having already happened.
+    """
+    core = _FakeCoreClient()
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    ledger_calls = [c for c in core.calls if c[1] == image_routes._LEDGER_PATH]
+    assert len(ledger_calls) == 1, "the charge must be ledgered even though upload failed"
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail, (
+        f"the error must name the ledger entry so a retry is not blind: {detail!r}"
+    )
+
+
+def test_the_charge_and_media_survive_an_asset_failure_and_the_error_names_both(
+    _s3_upload_ok,
+) -> None:
+    """A failure creating the `marketing_asset` row must not discard the
+    evidence that the charge AND the upload already happened."""
+    core = _FakeCoreClient()
+    campaign = _FakeCampaignClient(fail_asset_creation=True)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    ledger_calls = [c for c in core.calls if c[1] == image_routes._LEDGER_PATH]
+    confirm_calls = [c for c in core.calls if c[1] == f"{image_routes._STORAGE_PATH}/confirm"]
+    assert len(ledger_calls) == 1
+    assert len(confirm_calls) == 1
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail
+    assert _MEDIA_ID in detail
+
+
+def test_a_ledger_failure_is_loud_even_though_it_cannot_be_prevented(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one gap the fix does not close (see the route's own docstring): if
+    the ledger write itself fails, there is nothing to name in the error
+    response, because nothing durable was written. That case must at least
+    be loud in the logs, with everything a human needs to reconcile it by
+    hand — not silently swallowed the way it would be by a bare `_core_error`
+    mapping."""
+    core = _FakeCoreClient(ledger_status=502)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    with caplog.at_level("ERROR"):
+        resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    assert any("double-bill" in record.message for record in caplog.records)
 
 
 def test_rejects_an_empty_prompt() -> None:

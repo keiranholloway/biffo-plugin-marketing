@@ -25,6 +25,8 @@ from typing import Protocol
 import httpx
 from aws_lambda_powertools import Logger
 
+from . import ssm
+
 logger = Logger(child=True)
 
 
@@ -158,7 +160,16 @@ _cached_api_key: str | None = None
 
 
 def _api_key() -> str:
-    """This deployment's image-provider API key, or ``""`` if unconfigured."""
+    """This deployment's image-provider API key, or ``""`` if unconfigured.
+
+    A call that could not even reach SSM (issue #25) also returns ``""`` for
+    THIS call only — `ssm.read_parameter` distinguishes that from a
+    confirmed-absent parameter, and only the latter gets cached. Without that
+    distinction, a single `ThrottlingException` on a cold start would be
+    remembered as "not configured" for the rest of that container's warm
+    life, and `generate_still` would keep telling an operator to fix a
+    deployment that was never broken.
+    """
     global _cached_api_key
 
     if _cached_api_key is not None:
@@ -174,17 +185,12 @@ def _api_key() -> str:
         _cached_api_key = ""
         return _cached_api_key
 
-    try:
-        import boto3
-
-        client = boto3.client("ssm")
-        value = client.get_parameter(Name=parameter, WithDecryption=True)["Parameter"]["Value"]
-        _cached_api_key = str(value).strip()
-    except Exception:
-        logger.warning(
-            "Could not read the image provider API key from %s", parameter, exc_info=True
-        )
-        _cached_api_key = ""
+    value = ssm.read_parameter(parameter)
+    if value is None:
+        # Could not ask — fail only this call. `_cached_api_key` stays `None`
+        # so the next call retries rather than repeating a non-answer.
+        return ""
+    _cached_api_key = value.strip()
     return _cached_api_key
 
 

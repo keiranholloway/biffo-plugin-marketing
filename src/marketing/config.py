@@ -19,6 +19,8 @@ from urllib.parse import urlsplit
 
 from aws_lambda_powertools import Logger
 
+from . import ssm
+
 logger = Logger(child=True)
 
 #: Set directly in local development and in tests. Takes precedence over SSM so
@@ -45,6 +47,11 @@ def public_base_url() -> str:
     a 503 that says what is missing. A link minted against a missing base URL
     would be published as a bare `/c/<token>`, which fails silently in whatever
     feed it was pasted into rather than at the moment it was created.
+
+    A call that could not even reach SSM (issue #25) also returns `""` **for
+    this call only** — see `_from_ssm` — without caching that as the answer,
+    so a transient blip on one cold start does not read as "not configured"
+    for the rest of that container's warm life.
     """
     global _cached
 
@@ -66,31 +73,31 @@ def public_base_url() -> str:
         _cached = ""
         return _cached
 
-    _cached = _from_ssm(parameter)
+    result = _from_ssm(parameter)
+    if result is None:
+        # Could not ask (issue #25) — fail only this call. `_cached` stays
+        # `None` so the next call retries rather than repeating a non-answer.
+        return ""
+    _cached = result
     return _cached
 
 
-def _from_ssm(parameter: str) -> str:
-    """Fetch `parameter`, or `""` if it is absent or unreadable.
+def _from_ssm(parameter: str) -> str | None:
+    """Fetch `parameter`, normalised for a base URL.
 
-    Imported inside the function so neither boto3 nor a region need to exist for
-    this module to import — the tests and any local run never reach here.
+    Delegates the "genuinely absent vs merely unreachable" classification to
+    `ssm.read_parameter` (issue #25) — see that module's docstring for why the
+    two cannot be collapsed into one `""`. Returns:
 
-    Every failure returns empty rather than propagating. A missing parameter is
-    the expected state of a deployment nobody has configured yet, and it is not
-    distinguishable from a transient SSM error in a way that would change what
-    the caller does: both mean "cannot mint a link right now", and both are
-    logged for whoever has to fix it.
+    - the value, trailing-slash stripped, when SSM answers.
+    - `""` when SSM confirms the parameter does not exist — safe to cache.
+    - `None` when the call itself failed — must NOT be cached; see
+      `public_base_url` for what the caller does with that.
     """
-    try:
-        import boto3
-
-        client = boto3.client("ssm")
-        value = client.get_parameter(Name=parameter, WithDecryption=True)["Parameter"]["Value"]
-        return str(value).strip().rstrip("/")
-    except Exception:
-        logger.warning("Could not read the public base URL from %s", parameter, exc_info=True)
-        return ""
+    value = ssm.read_parameter(parameter)
+    if value is None:
+        return None
+    return value.strip().rstrip("/")
 
 
 def reset_cache() -> None:

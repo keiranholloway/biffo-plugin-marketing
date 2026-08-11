@@ -104,3 +104,39 @@ async def test_generate_still_raises_without_a_configured_key(
 
     with pytest.raises(ImageProviderError, match="No image provider API key"):
         await _provider(handler).generate_still(prompt="anything")
+
+
+def test_a_transient_ssm_failure_does_not_poison_the_api_key_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #25. A `ThrottlingException` on a cold start's key lookup must
+    not be remembered as "not configured" for the rest of that warm
+    container's life — the fake `_provider(handler)` fixture above proves the
+    request-time symptom; this proves the caching contract that causes it.
+
+    Fails before the fix: the old `_api_key` caught every SSM failure the
+    same way and always cached `""`, so the second call below never
+    re-consulted SSM and stayed wrong for a key that was there all along.
+    """
+    monkeypatch.delenv("MARKETING_IMAGE_PROVIDER_API_KEY", raising=False)
+    monkeypatch.setenv("MARKETING_IMAGE_PROVIDER_API_KEY_PARAMETER", "/marketing/image-key")
+    image_provider.reset_api_key_cache()
+
+    responses: list[str | None] = [None, "sk-live-real-key"]
+    calls: list[str] = []
+
+    def _flaky_then_fine(parameter: str) -> str | None:
+        calls.append(parameter)
+        return responses.pop(0)
+
+    monkeypatch.setattr(image_provider.ssm, "read_parameter", _flaky_then_fine)
+
+    # First call: SSM could not be reached. Reports unconfigured for THIS
+    # call only...
+    assert image_provider._api_key() == ""
+    # ...but that must not have been cached as the answer.
+    assert image_provider._cached_api_key is None
+
+    # A later call — same warm container — retries and gets the real key.
+    assert image_provider._api_key() == "sk-live-real-key"
+    assert len(calls) == 2
