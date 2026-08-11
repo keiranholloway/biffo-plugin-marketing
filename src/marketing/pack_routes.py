@@ -146,19 +146,24 @@ async def _existing_assets(
     see the module docstring for why generation time, not pack time, is
     where that belongs.
 
-    Raises 404 if this campaign has no source creative (``is_source=True``)
-    yet — there is nothing to build a pack from.
+    Returns ``([], PLACEMENTS)`` when nothing exists yet — a campaign whose
+    still was never generated (image generation not yet run, or #63's
+    missing provider key) is a valid, assemblable pack: the gap belongs in
+    ``missing_placements``, exactly as the module docstring already promises
+    ("missing_placements... says so explicitly rather than silently
+    pretending they exist"), not behind a 404 raised here.
+
+    **This used to require an ``is_source=True`` row and 404 when none
+    existed** ("No approved source creative for this campaign yet."). That
+    was issue #64: a campaign with copy fully approved still 404d on
+    ``/pack`` and ``/paid-pack``, because this check runs *after* the copy
+    gate in ``get_pack_route``/``get_paid_pack_route`` — a third 404 site in
+    those functions that #64's own two-site reading of the source missed.
     """
     assets = await campaign_client.get(
         f"{_INTERNAL_PREFIX}/assets", params={"campaign_id": campaign_id}
     )
     assets = assets or []
-    source = next((a for a in assets if a.get("is_source")), None)
-    if source is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No approved source creative for this campaign yet.",
-        )
 
     have_placements = {a["placement"] for a in assets if a.get("placement")}
     missing_placements = [p for p in PLACEMENTS if p not in have_placements]

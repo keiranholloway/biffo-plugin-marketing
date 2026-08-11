@@ -232,7 +232,18 @@ def test_409s_when_copy_is_not_approved(monkeypatch: pytest.MonkeyPatch) -> None
     assert resp.status_code == 409
 
 
-def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_assembles_with_no_assets_reporting_every_placement_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #64: a campaign with copy approved but no `marketing_asset` rows
+    at all — image generation never run, e.g. #63's missing provider key —
+    must still assemble a pack. `_existing_assets` used to require an
+    `is_source=True` row and 404 ("No approved source creative for this
+    campaign yet.") when none existed, a THIRD 404 site in `get_pack_route`
+    the issue's own two-site read of the function missed: it fires after the
+    copy-approval gate has already passed, so a fully-approved campaign with
+    no image generated still 404s, contradicting the module docstring's own
+    "missing_placements... rather than silently pretending they exist"."""
     core = _FakeCore(copy_artefact=_copy_artefact(_CHANNELS))
     monkeypatch.setattr(admin_app, "_core", core)
     client = TestClient(
@@ -241,8 +252,11 @@ def test_404s_when_no_source_creative_exists(monkeypatch: pytest.MonkeyPatch) ->
 
     resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
 
-    assert resp.status_code == 404
-    assert "source creative" in resp.json()["detail"].lower()
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["assets"] == []
+    assert set(body["missing_placements"]) == set(PLACEMENTS)
+    assert body["copy"] == _CHANNELS
 
 
 def test_422s_when_the_campaign_has_no_destination_for_a_channel_that_needs_minting(
