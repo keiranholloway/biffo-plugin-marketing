@@ -27,17 +27,47 @@ export class ApiError extends Error {
 export type GetIdToken = () => string | null | Promise<string | null>
 
 /**
+ * Maps a failed response into the error a plugin wants to surface, INSTEAD of
+ * the default `ApiError(status, body)`.
+ *
+ * It receives the `Response` with its body **unread**, so it can `.json()` the
+ * payload — Core returns `{"detail": "..."}` for a permission failure, and a
+ * plugin usually wants that sentence rather than a status code. It also
+ * receives the per-call `context` string, because the useful wording is
+ * endpoint-specific: "you need the admin role to **mint links**" is actionable
+ * where "403" is not.
+ *
+ * Added for biffo-template#1492. The marketing plugin could not adopt this core
+ * without it: `createRequest` read the body into a string and threw immediately,
+ * leaving no seam to inspect it first, so migrating would have collapsed a dozen
+ * hand-written, endpoint-specific messages into one generic status string. That
+ * is a behaviour regression, and the plugin correctly refused rather than
+ * dropping them — the gap was in this module, not in the plugin.
+ *
+ * MUST NOT RETURN NORMALLY: it either throws, or returns a rejected promise.
+ * The `never` return type says so; a mapper that falls through would make
+ * `request()` resolve `undefined` for a failed call, which is the silent-success
+ * shape this estate spends most of its time eliminating. `assertThrew` in
+ * `api-core.test.ts` holds that line.
+ */
+export type ErrorMapper = (
+  response: Response,
+  context: string | undefined,
+) => Promise<never> | never
+
+/**
  * Build a `request<T>(method, path, body?, base?)` function bound to a token
  * source and a default base. A plugin's own api.ts calls this once per
  * `createApi()` and defines its endpoints on top of the result — see the
  * starter `api.ts` in this same directory for the worked shape.
  */
-export function createRequest(getIdToken: GetIdToken, defaultBase: string) {
+export function createRequest(getIdToken: GetIdToken, defaultBase: string, onError?: ErrorMapper) {
   return async function request<T>(
     method: string,
     path: string,
     body?: unknown,
     base: string = defaultBase,
+    context?: string,
   ): Promise<T> {
     const token = await getIdToken()
     const res = await fetch(`${base}${path}`, {
@@ -49,6 +79,12 @@ export function createRequest(getIdToken: GetIdToken, defaultBase: string) {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     })
     if (!res.ok) {
+      // The mapper runs FIRST, and gets the response with its body still
+      // unread. Order is load-bearing: `res.text()` below consumes the stream,
+      // and a mapper handed an already-consumed Response cannot call `.json()`
+      // — it would silently see an empty body and fall back to a generic
+      // message, which is the exact failure this hook exists to prevent.
+      if (onError) await onError(res, context)
       // Read the body for the reason: Core returns a JSON detail for a
       // permission failure, and "403" alone tells an admin nothing about
       // which rule bit.
