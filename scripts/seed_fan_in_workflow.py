@@ -46,8 +46,13 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-# Importable without the package installed, so an operator can run this from a
-# checkout without a `uv sync` first.
+# Resolve `marketing.*` from the checkout rather than an installed package.
+#
+# This used to claim the script ran without a `uv sync` first. It does not, and
+# never did: `marketing.definitions` imports `marketing/__init__.py`, which
+# imports `plugin.py`, which imports `aws_lambda_powertools`. A bare `python3`
+# run dies on that import before reaching any of this file's own logic. Run it
+# with `uv run python scripts/seed_fan_in_workflow.py` from the checkout.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from marketing.definitions import (  # noqa: E402
@@ -61,7 +66,14 @@ from marketing.definitions import (  # noqa: E402
 
 WORKFLOW_NAME = "Marketing — synthesise research once both angles complete"
 
-_DEFINITIONS_PATH = "/api/v1/admin/orchestration/workflows"
+#: Core mounts the orchestration router at `/api/v1/orchestration`, NOT under
+#: `/api/v1/admin`. This carried a stray `admin/` segment until 2026-08-11,
+#: which meant the script 404'd on every run in every environment and had
+#: therefore never once seeded a definition. Verified against the deployed
+#: `openapi.json` rather than read from source — with a valid admin token,
+#: `/api/v1/orchestration/workflows` answers 200 and the `admin/` variant
+#: answers 404, indistinguishable from a route that does not exist.
+_DEFINITIONS_PATH = "/api/v1/orchestration/workflows"
 
 
 def definition(*, synthesis_model: str = DEFAULT_SYNTHESIS_MODEL) -> dict:

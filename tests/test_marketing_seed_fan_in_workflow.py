@@ -81,3 +81,27 @@ def test_it_is_enabled_and_named_stably() -> None:
 
     assert payload["enabled"] is True
     assert payload["name"] == WORKFLOW_NAME
+
+
+def test_it_posts_to_the_path_core_actually_mounts() -> None:
+    """Every other test here validates the *payload* and none validated the
+    *endpoint*, so the script shipped posting to a path that has never existed
+    and the suite stayed green.
+
+    Core mounts workflow-definition CRUD at `/api/v1/orchestration/workflows`.
+    `/api/v1/admin/orchestration` is a different router that exposes only
+    `/test` (the dry-run), so the `admin/` variant 404s exactly like a route
+    that was never defined — which is why nothing surfaced it: the seeder
+    reported `Could not list workflows: 404 Not Found` and that reads as a
+    permissions or environment problem, not a wrong URL.
+
+    Measured against deployed dev on 2026-08-11 with a valid admin token:
+    `/api/v1/orchestration/workflows` -> 200, `/api/v1/admin/...` -> 404,
+    identical to a known-bad control path.
+
+    This pins the string; it cannot prove Core still mounts it there. A
+    404 from this script means check the deployed `openapi.json` before
+    assuming the token or environment is at fault.
+    """
+    assert _seed._DEFINITIONS_PATH == "/api/v1/orchestration/workflows"
+    assert "/admin/" not in _seed._DEFINITIONS_PATH
