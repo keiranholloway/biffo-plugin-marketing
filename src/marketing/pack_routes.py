@@ -91,10 +91,10 @@ import json
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from . import admin_app, pipeline, principal_client
-from .config import public_base_url
+from .config import public_base_url_for
 from .definitions import PLACEMENTS
 from .links import destination_with_utms, mint_token, tracked_url
 
@@ -181,7 +181,12 @@ async def _asset_with_url(core_client: BiffoAPIClient, asset: dict[str, Any]) ->
 
 
 async def _ensure_links(
-    campaign_id: str, channels: list[dict[str, Any]], *, campaign: dict[str, Any], admin_token: str
+    campaign_id: str,
+    channels: list[dict[str, Any]],
+    *,
+    campaign: dict[str, Any],
+    admin_token: str,
+    base_url: str,
 ) -> list[dict[str, Any]]:
     """One tracked link per channel in the approved copy — minted once and
     reused on every later pack request, never re-minted, so opening the pack
@@ -201,7 +206,6 @@ async def _ensure_links(
     existing = links_resp.json() or []
     have_channels = {link["channel"] for link in existing}
 
-    base_url = public_base_url()
     out = [
         {
             "channel": link["channel"],
@@ -266,6 +270,7 @@ async def _ensure_links(
 @router.get("/campaigns/{campaign_id}/pack")
 async def get_pack_route(
     campaign_id: str,
+    request: Request,
     core_client: BiffoAPIClient = Depends(get_core_client),
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
     admin: Any = Depends(require_admin),
@@ -319,7 +324,13 @@ async def get_pack_route(
     )
     assets_with_urls = [await _asset_with_url(core_client, a) for a in assets]
 
-    links = await _ensure_links(campaign_id, channels, campaign=campaign, admin_token=admin.token)
+    links = await _ensure_links(
+        campaign_id,
+        channels,
+        campaign=campaign,
+        admin_token=admin.token,
+        base_url=public_base_url_for(request.headers.get("origin"), request.headers.get("referer")),
+    )
 
     return {
         "campaign_id": campaign_id,

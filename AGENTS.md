@@ -117,6 +117,42 @@ it deliberately and say so in a comment; never steal a fresh one.
 - **Squash-merge, delete the branch, remove the worktree:**
   `gh pr merge <N> --squash --delete-branch`.
 
+### If you were dispatched by another agent, you do NOT wait and you do NOT merge
+
+Everything above assumes the session doing the work is also the session that
+will merge it. **A delegated subagent is not that session.** If an orchestrator
+spawned you to do one unit of work, your finished state is:
+
+> branch pushed → PR opened → **report back immediately**, with the PR number
+> and what you changed.
+
+Do **not** run `wait-for-checks`. Do **not** merge. The orchestrator watches CI
+and merges, and sends you back if CI fails on your change.
+
+**Why this is a rule and not a preference.** A subagent has no way to sleep. Told
+to wait for CI, it stops, wakes, re-reads the same pending status, and stops
+again — and every wake is a full context reload that reports nothing new. Measured
+on 2026-08-11: one dispatch tranche produced **25+ wake-ups** returning only
+"still waiting"; a single agent burned ~145k tokens re-reading a queued deploy
+before it was killed. The orchestrator does the same wait for nothing extra: it
+is already awake, and one loop covers every PR in the tranche at once instead of
+N agents each paying a context reload for the same minutes.
+
+**The instruction is the cause, so the fix lives here.** Both of those incidents
+happened in sessions whose dispatch briefs ended "get CI green, then squash-merge"
+— written by an orchestrator that _had already recorded the lesson_ and then
+followed §5 above, which says exactly that. §5 is right for the session that owns
+the work and wrong for a delegate, and until now nothing said so.
+
+**Keep a delegate alive only when it still has a DECISION to make** — a real test
+failure to diagnose, a design question to answer. "Wait, then merge" is not a
+decision.
+
+Orchestrators: end every dispatch brief with the finished state above, and reach
+for `gh pr merge --auto` when the merge needs no judgement — then still verify,
+because `--auto` waits for ever on a check that cannot re-evaluate itself (a
+`Release Guards` closing-keyword failure needs a re-run, not a wait).
+
 ## 6. Push honestly, and verify the remote has your commit
 
 - **Push with the exit status visible:** `git push origin HEAD; echo $?`. A pipe

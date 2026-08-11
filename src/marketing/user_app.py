@@ -124,10 +124,10 @@ from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 
 from . import admin_app, principal_client
-from .config import public_base_url
+from .config import public_base_url_for
 from .links import tracked_url
 
 require_founder = require_group("founder")
@@ -252,6 +252,7 @@ async def _resolve_asset_url(core_client: BiffoAPIClient, asset: dict[str, Any])
 @router.get("/campaigns/{campaign_id}/pack")
 async def get_pack_route(
     campaign_id: str,
+    request: Request,
     core_client: BiffoAPIClient = Depends(get_core_client),
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
     founder: Any = Depends(require_founder),
@@ -307,7 +308,7 @@ async def get_pack_route(
     link_rows = await _list_all(
         campaign_client, f"{_INTERNAL_PREFIX}/links", {"campaign_id": campaign_id}
     )
-    base_url = public_base_url()
+    base_url = public_base_url_for(request.headers.get("origin"), request.headers.get("referer"))
     links = [
         {
             "channel": link.get("channel") or "",

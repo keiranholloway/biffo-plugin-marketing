@@ -164,7 +164,7 @@ def configured_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     patching `user_app`'s own reference to it is isolated from `config`'s
     process-lifetime cache — no other test's cached value can leak in, and
     this test cannot leak one out either."""
-    monkeypatch.setattr(user_app, "public_base_url", lambda: _BASE_URL)
+    monkeypatch.setattr(user_app, "public_base_url_for", lambda *_: _BASE_URL)
 
 
 # ── /campaigns ────────────────────────────────────────────────────────────
@@ -477,7 +477,7 @@ def test_pack_omits_link_urls_when_no_public_base_url_is_configured(
     """A link with no base URL configured still appears — with `url: null` —
     rather than the whole pack failing, since assets/copy may still be
     useful with no base URL wired up yet."""
-    monkeypatch.setattr(user_app, "public_base_url", lambda: "")
+    monkeypatch.setattr(user_app, "public_base_url_for", lambda *_: "")
     fake_signed_client(
         {
             f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
