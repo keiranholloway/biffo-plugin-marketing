@@ -25,6 +25,8 @@ from typing import Protocol
 import httpx
 from aws_lambda_powertools import Logger
 
+from . import ssm
+
 logger = Logger(child=True)
 
 
@@ -158,7 +160,16 @@ _cached_api_key: str | None = None
 
 
 def _api_key() -> str:
-    """This deployment's image-provider API key, or ``""`` if unconfigured."""
+    """This deployment's image-provider API key, or ``""`` if unconfigured.
+
+    A call that could not even reach SSM (issue #25) also returns ``""`` for
+    THIS call only — `ssm.read_parameter` distinguishes that from a
+    confirmed-absent parameter, and only the latter gets cached. Without that
+    distinction, a single `ThrottlingException` on a cold start would be
+    remembered as "not configured" for the rest of that container's warm
+    life, and `generate_still` would keep telling an operator to fix a
+    deployment that was never broken.
+    """
     global _cached_api_key
 
     if _cached_api_key is not None:
@@ -174,18 +185,37 @@ def _api_key() -> str:
         _cached_api_key = ""
         return _cached_api_key
 
-    try:
-        import boto3
-
-        client = boto3.client("ssm")
-        value = client.get_parameter(Name=parameter, WithDecryption=True)["Parameter"]["Value"]
-        _cached_api_key = str(value).strip()
-    except Exception:
-        logger.warning(
-            "Could not read the image provider API key from %s", parameter, exc_info=True
-        )
-        _cached_api_key = ""
+    value = ssm.read_parameter(parameter, purpose="image provider API key")
+    if value is None:
+        # Could not ask — fail only this call. `_cached_api_key` stays `None`
+        # so the next call retries rather than repeating a non-answer.
+        return ""
+    _cached_api_key = value.strip()
     return _cached_api_key
+
+
+def _no_api_key_message() -> str:
+    """Why `_api_key()` came back empty, stated as accurately as this module
+    can without re-deriving the SSM outcome (`ssm.read_parameter` already
+    logged the specific reason — genuinely absent, denied, or transient).
+
+    Distinguishes "nobody configured a source for this key at all" from "a
+    source IS configured and reading it did not work" — collapsing the two
+    into one fixed "are both unset" message (as this used to) is exactly the
+    class of misleading diagnosis issue #25 is about: telling an operator to
+    fix configuration that is not the problem.
+    """
+    parameter = os.environ.get(_PARAMETER_ENV, "").strip()
+    if not parameter:
+        return (
+            f"No image provider API key configured ({_DIRECT_ENV} / "
+            f"{_PARAMETER_ENV} are both unset)."
+        )
+    return (
+        f"No image provider API key configured: {_DIRECT_ENV} is unset, and the configured "
+        f"parameter ({_PARAMETER_ENV}={parameter!r}) had no readable value — see the logs "
+        "for why (absent, denied, or a transient SSM error)."
+    )
 
 
 def reset_api_key_cache() -> None:
@@ -221,10 +251,7 @@ class OpenAIImageProvider:
     async def generate_still(self, *, prompt: str) -> GeneratedImage:
         api_key = _api_key()
         if not api_key:
-            raise ImageProviderError(
-                f"No image provider API key configured ({_DIRECT_ENV} / "
-                f"{_PARAMETER_ENV} are both unset)."
-            )
+            raise ImageProviderError(_no_api_key_message())
 
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             try:
@@ -312,10 +339,7 @@ class OpenRouterImageProvider:
     async def generate_still(self, *, prompt: str) -> GeneratedImage:
         api_key = _api_key()
         if not api_key:
-            raise ImageProviderError(
-                f"No image provider API key configured ({_DIRECT_ENV} / "
-                f"{_PARAMETER_ENV} are both unset)."
-            )
+            raise ImageProviderError(_no_api_key_message())
 
         model = _openrouter_model()
 

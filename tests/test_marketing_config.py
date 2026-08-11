@@ -6,9 +6,32 @@ when nothing is configured, which is the state every deployment starts in.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from botocore.exceptions import ClientError
 
 from marketing import config
+
+
+class _FakeSSMClient:
+    """Stands in for `boto3.client("ssm")` at the lowest layer this module
+    reaches — used only by the two "real wiring" tests below, which exist so
+    `config._from_ssm` -> `ssm.read_parameter` is exercised through the
+    actual call, not just against a `config.ssm.read_parameter` monkeypatch
+    that would keep passing even if the two modules' contract drifted apart
+    (a renamed kwarg, a moved function)."""
+
+    def __init__(self, *, value: str | None = None, error_code: str | None = None) -> None:
+        self._value = value
+        self._error_code = error_code
+
+    def get_parameter(self, Name: str, WithDecryption: bool) -> dict[str, Any]:  # noqa: N803
+        if self._error_code is not None:
+            raise ClientError(
+                {"Error": {"Code": self._error_code, "Message": "synthetic"}}, "GetParameter"
+            )
+        return {"Parameter": {"Value": self._value}}
 
 
 @pytest.fixture(autouse=True)
@@ -62,18 +85,94 @@ def test_nothing_configured_is_empty_rather_than_an_exception(
     assert config.public_base_url() == ""
 
 
-def test_an_unreadable_parameter_is_empty_rather_than_an_exception(
+def test_a_genuinely_missing_parameter_is_empty_and_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing parameter, a denied grant and an SSM outage all mean the same
-    thing to the caller: no link can be minted right now. All are logged."""
+    """A confirmed-absent parameter (`ssm.read_parameter` returning `""`) is
+    the expected state of a deployment nobody has configured yet — `""`, and
+    safe to cache (see the transient-failure test below for the contrast)."""
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
+    monkeypatch.setattr(config.ssm, "read_parameter", lambda parameter, *, purpose: "")
+
+    assert config._from_ssm("/tabsii/dev/marketing/public-base-url") == ""
+    assert config.public_base_url() == ""
+    assert config._cached == ""
+
+
+def test_a_transient_ssm_failure_does_not_poison_the_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #25. `ssm.read_parameter` returning `None` means "could not ask"
+    — a `ThrottlingException`, a network blip, a missing region — and must
+    NOT be cached as "asked and got nothing", or one bad cold start disables
+    link minting for that container's entire warm life.
+
+    Fails before the fix: the old `_from_ssm` caught every exception the same
+    way and always cached `""`, so the second call below never re-consulted
+    SSM and stayed wrong for a value that was there all along.
+    """
     monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
     monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
 
-    # _from_ssm swallows every failure and returns "" — exercised here through
-    # the real function, with boto3 absent/unreachable in the test environment.
+    responses: list[str | None] = [None, "https://dev.tabsii.com"]
+    calls: list[str] = []
+
+    def _flaky_then_fine(parameter: str, *, purpose: str) -> str | None:
+        calls.append(parameter)
+        return responses.pop(0)
+
+    monkeypatch.setattr(config.ssm, "read_parameter", _flaky_then_fine)
+
+    # First call: SSM could not be reached. This call reports "not
+    # configured"...
+    assert config.public_base_url() == ""
+    # ...but that must not have been cached as the answer.
+    assert config._cached is None
+
+    # A later call — the same warm container, no redeploy — retries and
+    # gets the real value, because nothing poisoned the cache.
+    assert config.public_base_url() == "https://dev.tabsii.com"
+    assert len(calls) == 2
+
+
+def test_the_real_ssm_wiring_reports_a_confirmed_absence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Integration test, through the real call chain: `config._from_ssm` ->
+    `ssm.read_parameter` -> `boto3`, with only `boto3.client` stubbed —
+    everything above it is the actual production code, unlike every other
+    test in this file, which monkeypatches `config.ssm.read_parameter` or
+    `config._from_ssm` directly and would not notice if the two modules'
+    contract drifted apart."""
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
+    monkeypatch.setattr(
+        "boto3.client", lambda service: _FakeSSMClient(error_code="ParameterNotFound")
+    )
+
     assert config._from_ssm("/tabsii/dev/marketing/public-base-url") == ""
     assert config.public_base_url() == ""
+    assert config._cached == ""
+
+
+def test_the_real_ssm_wiring_does_not_cache_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As above, but through the real chain for the #25 contract itself: a
+    throttle must not be cached, and a later call must retry and succeed."""
+    monkeypatch.delenv("BIFFO_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL_PARAMETER", "/tabsii/dev/marketing/public-base-url")
+
+    clients = iter(
+        [
+            _FakeSSMClient(error_code="ThrottlingException"),
+            _FakeSSMClient(value="https://dev.tabsii.com"),
+        ]
+    )
+    monkeypatch.setattr("boto3.client", lambda service: next(clients))
+
+    assert config.public_base_url() == ""
+    assert config._cached is None
+    assert config.public_base_url() == "https://dev.tabsii.com"
 
 
 def test_an_unconfigured_deployment_does_not_re_query_on_every_request(
