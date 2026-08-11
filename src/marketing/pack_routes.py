@@ -180,6 +180,37 @@ async def _asset_with_url(core_client: BiffoAPIClient, asset: dict[str, Any]) ->
     return {**asset, "url": url_resp["url"]}
 
 
+async def _create_link_or_422(
+    channel_key: str, admin_token: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST one ``marketing_link`` row, translating any write Core rejects
+    into a 4xx that NAMES the offending channel, rather than letting Core's
+    raw failure reach the operator as an undiagnosable bare 500.
+
+    This is exactly #75's shape: a too-long value (then, a 121-character
+    agent-generated channel name against ``marketing_link.channel``'s
+    ``String(64)``) surfaced as ``Server error '500 Internal Server Error'
+    for url .../links`` with an ``asyncpg.StringDataRightTruncationError``
+    visible only in Core's own logs, not in anything this plugin returned.
+    Channel values are short by construction now (#76 increment 2 — a
+    ``channel_key`` from the taxonomy, not agent-authored free text), so this
+    exact overflow should not recur through this path — but the translation
+    is kept anyway: it is general over *any* field Core rejects the write
+    for, not specific to `channel`, and the next unbounded field (``variant``,
+    ``destination_url``) gets the same diagnosability for free.
+    """
+    response = await admin_app._core("POST", f"{_INTERNAL_PREFIX}/links", admin_token, json=payload)
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Could not create a tracked link for channel {channel_key!r}: "
+                "Core rejected the write."
+            ),
+        )
+    return response.json()
+
+
 async def _ensure_links(
     campaign_id: str,
     channels: list[dict[str, Any]],
@@ -191,6 +222,16 @@ async def _ensure_links(
     """One tracked link per channel in the approved copy — minted once and
     reused on every later pack request, never re-minted, so opening the pack
     repeatedly does not spawn a fresh token per channel per visit.
+
+    ``channels`` entries carry ``channel_key`` (#76 increment 2), not the
+    free-text ``channel`` this function used to key on — see
+    ``pipeline.require_channel_keyed_copy`` for the guard that rejects a
+    pre-migration copy artefact before it ever reaches here. The
+    ``marketing_link.channel`` DB column itself is unchanged (still
+    ``String(64)``, unrenamed — a live column already holding production
+    rows); what changes is that every value written into it now comes from a
+    validated ``channel_key`` rather than whatever the channel-plan agent
+    typed, which is what actually closes #75.
 
     Mints with the exact same three pure functions
     ``admin_app.mint_links`` uses (``mint_token`` / ``destination_with_utms``
@@ -206,6 +247,12 @@ async def _ensure_links(
     existing = links_resp.json() or []
     have_channels = {link["channel"] for link in existing}
 
+    # The response's own "channel" key is kept (not renamed to "channel_key")
+    # for admin-UI backward compatibility — `PackParts.tsx`/`PaidPack.tsx`
+    # already render `.channel` and this dict is one this plugin builds
+    # itself, not a verbatim artefact-body passthrough. The value is now a
+    # channel_key rather than a free-text label; a follow-up UI change to
+    # show the taxonomy's human `label` alongside it is not done here.
     out = [
         {
             "channel": link["channel"],
@@ -216,7 +263,7 @@ async def _ensure_links(
         for link in existing
     ]
 
-    missing = [c for c in channels if c.get("channel") not in have_channels]
+    missing = [c for c in channels if c.get("channel_key") not in have_channels]
     if not missing:
         return out
 
@@ -233,32 +280,31 @@ async def _ensure_links(
         )
 
     for c in missing:
-        channel = c["channel"]
+        channel_key = c["channel_key"]
         is_paid = c.get("motion") == "paid"
         token = mint_token()
-        created = await admin_app._core(
-            "POST",
-            f"{_INTERNAL_PREFIX}/links",
+        # The created row itself is not needed — the token minted it from is.
+        await _create_link_or_422(
+            channel_key,
             admin_token,
-            json={
+            {
                 "campaign_id": campaign_id,
                 "token": token,
-                "channel": channel,
+                "channel": channel_key,
                 "variant": None,
                 "is_paid": is_paid,
                 "destination_url": destination_with_utms(
                     destination,
                     campaign_id=campaign_id,
-                    channel=channel,
+                    channel=channel_key,
                     variant=None,
                     is_paid=is_paid,
                 ),
             },
         )
-        created.raise_for_status()
         out.append(
             {
-                "channel": channel,
+                "channel": channel_key,
                 "variant": None,
                 "is_paid": is_paid,
                 "url": tracked_url(base_url, token),
@@ -318,6 +364,10 @@ async def get_pack_route(
     raw_body = approved_copy.get("body")
     copy_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
     channels = copy_body.get("channels") or []
+    try:
+        pipeline.require_channel_keyed_copy(channels)
+    except pipeline.StaleChannelPlanError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     assets, missing_placements = await _existing_assets(
         campaign_id, campaign_client=campaign_client

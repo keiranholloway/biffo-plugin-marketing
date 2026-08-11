@@ -2,6 +2,8 @@ import { useState } from 'react'
 
 import { getPack, type Pack } from '../lib/api'
 import { useClipboard } from '../lib/useClipboard'
+import type { ChannelLookup } from '../lib/useChannelTaxonomy'
+import { ChannelName } from './ChannelName'
 import { MissingPlacementsWarning, PackAssets, PackGuidance, PackLinks } from './PackParts'
 
 /** The distribution pack (M5): assets, approved copy, tracked links and
@@ -12,8 +14,19 @@ import { MissingPlacementsWarning, PackAssets, PackGuidance, PackLinks } from '.
  * `missing_placements` is shown, not hidden: this plugin only renders a
  * campaign's source creative today, not per-placement crops (issue #36), and
  * a pack that quietly omitted that gap would look complete when it is not.
+ *
+ * `pack.copy` is the approved `CopySetBody.channels` shape verbatim (#76
+ * increment 2: `channel_key`, not a label) — `channelLookup` (fetched once
+ * by `CampaignDetail` via `useChannelTaxonomy`, not by this component) is
+ * what turns that key into the label an operator can actually read.
  */
-export function DistributionPack({ campaignId }: { campaignId: string }) {
+export function DistributionPack({
+  campaignId,
+  channelLookup,
+}: {
+  campaignId: string
+  channelLookup: ChannelLookup
+}) {
   const [pack, setPack] = useState<Pack | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -50,8 +63,11 @@ export function DistributionPack({ campaignId }: { campaignId: string }) {
           {pack.copy.length === 0 && <p className="empty">No approved copy channels.</p>}
           <ul className="copy-list">
             {pack.copy.map((c, i) => (
-              <li key={`${c.channel}-${i}`}>
-                <strong>{c.channel}</strong> <span className={`motion motion-${c.motion}`}>{c.motion}</span>
+              <li key={`${c.channel_key}-${i}`}>
+                <strong>
+                  <ChannelName channelKey={c.channel_key} suggestedLabel={null} lookup={channelLookup} />
+                </strong>{' '}
+                <span className={`motion motion-${c.motion}`}>{c.motion}</span>
                 <p className="headline">{c.headline}</p>
                 <p>{c.body}</p>
                 <p className="cta">{c.cta}</p>

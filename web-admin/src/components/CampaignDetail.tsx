@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { updateCampaign, type Campaign } from '../lib/api'
+import { useChannelTaxonomy } from '../lib/useChannelTaxonomy'
 import { DistributionPack } from './DistributionPack'
 import { ImageGenerator } from './ImageGenerator'
 import { PaidPack } from './PaidPack'
@@ -23,6 +24,12 @@ export function CampaignDetail({
   const [brief, setBrief] = useState(campaign.brief ?? '')
   const [savingBrief, setSavingBrief] = useState(false)
   const [briefError, setBriefError] = useState<string | null>(null)
+
+  // Fetched once here, not by `Pipeline`/`DistributionPack` themselves —
+  // `marketing_channel` is shared tenant-wide vocabulary, so one request
+  // per campaign view is correct; one per section that renders a channel
+  // would not be.
+  const channelLookup = useChannelTaxonomy()
 
   async function saveBrief(event: React.FormEvent) {
     event.preventDefault()
@@ -71,13 +78,13 @@ export function CampaignDetail({
       </section>
 
       <h3>Pipeline</h3>
-      <Pipeline campaignId={campaign.id} hasBrief={hasBrief} />
+      <Pipeline campaignId={campaign.id} hasBrief={hasBrief} channelLookup={channelLookup} />
 
       <h3>Images</h3>
       <ImageGenerator campaignId={campaign.id} />
 
       <h3>Distribution pack</h3>
-      <DistributionPack campaignId={campaign.id} />
+      <DistributionPack campaignId={campaign.id} channelLookup={channelLookup} />
 
       <h3>Paid brief pack</h3>
       <PaidPack campaignId={campaign.id} />

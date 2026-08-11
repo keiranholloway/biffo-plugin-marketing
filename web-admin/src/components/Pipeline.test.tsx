@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as auth from '../lib/auth'
+import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import { Pipeline } from './Pipeline'
 
 afterEach(() => {
@@ -17,6 +18,12 @@ function stubSession(jwt = 'test-jwt') {
 }
 
 const CAMPAIGN = 'c1'
+
+// None of these tests exercise a rendered channel — `useChannelTaxonomy`
+// itself is `CampaignDetail`'s concern, not `Pipeline`'s (see
+// `CampaignDetail.test.tsx` and `ArtefactBody.test.tsx` for that). An
+// already-resolved empty lookup is enough to satisfy the required prop.
+const EMPTY_LOOKUP: ChannelLookup = { get: () => undefined, loading: false }
 
 /** A `fetch` stub that answers every stage's GET as "not started yet" (404)
  * unless `artefacts` supplies a row for that kind. */
@@ -52,7 +59,7 @@ describe('Pipeline', () => {
     stubSession()
     vi.stubGlobal('fetch', fetchStub())
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
 
     expect(await screen.findByRole('button', { name: /start research/i })).toBeEnabled()
 
@@ -67,7 +74,7 @@ describe('Pipeline', () => {
     stubSession()
     vi.stubGlobal('fetch', fetchStub())
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={false} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={false} channelLookup={EMPTY_LOOKUP} />)
 
     const research = await screen.findByTestId('stage-research')
     expect(within(research).getByRole('button', { name: /start research/i })).toBeDisabled()
@@ -95,7 +102,7 @@ describe('Pipeline', () => {
       }),
     )
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
 
     expect(await screen.findByText('The market wants faster onboarding.')).toBeInTheDocument()
 
@@ -141,7 +148,7 @@ describe('Pipeline', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
 
     const research = await screen.findByTestId('stage-research')
     await user.click(within(research).getByRole('button', { name: /^approve$/i }))
@@ -165,7 +172,7 @@ describe('Pipeline', () => {
       }),
     )
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
 
     const copy = await screen.findByTestId('stage-copy')
     expect(await within(copy).findByText(/approve the channel plan stage first/i)).toBeInTheDocument()
