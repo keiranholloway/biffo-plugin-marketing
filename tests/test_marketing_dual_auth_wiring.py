@@ -99,7 +99,7 @@ def test_mint_links_forwards_the_real_admins_token_through_core(
     """`_core`'s own body — not a mock of it — signs both of `mint_links`'
     Core calls with the SAME token the request arrived with."""
     monkeypatch.setattr(admin_app, "CORE_API_URL", _CORE_API_URL)
-    monkeypatch.setattr(admin_app, "public_base_url", lambda: _BASE_URL)
+    monkeypatch.setattr(admin_app, "public_base_url_for", lambda origin, referer: _BASE_URL)
     app = admin_app.build_app()
     app.dependency_overrides[admin_app.require_admin] = lambda: type(
         "U", (), {"sub": "admin", "groups": ["admin"], "token": _REAL_ADMIN_TOKEN}
@@ -125,7 +125,7 @@ def test_mint_links_calls_the_real_internal_paths_not_the_token(
     were ever transposed, the token (a JWT-shaped string, never starting
     with `/`) would arrive here as the `path`."""
     monkeypatch.setattr(admin_app, "CORE_API_URL", _CORE_API_URL)
-    monkeypatch.setattr(admin_app, "public_base_url", lambda: _BASE_URL)
+    monkeypatch.setattr(admin_app, "public_base_url_for", lambda origin, referer: _BASE_URL)
     app = admin_app.build_app()
     app.dependency_overrides[admin_app.require_admin] = lambda: type(
         "U", (), {"sub": "admin", "groups": ["admin"], "token": _REAL_ADMIN_TOKEN}

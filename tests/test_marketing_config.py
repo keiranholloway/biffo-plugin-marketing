@@ -117,3 +117,36 @@ def test_a_resolved_value_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
         assert config.public_base_url() == "https://dev.tabsii.com"
 
     assert len(calls) == 1
+
+
+def test_the_request_origin_is_preferred_over_configuration() -> None:
+    """The origin an operator is looking at IS the public base URL.
+
+    A plugin's Terraform configures the plugin's OWN Lambda, but an
+    `admin_ingress` app runs on the shared plugin host — a different function
+    with a different environment. So the configured value is absent exactly
+    where this code runs (biffo-template#1456), and the request is the only
+    reliable source.
+    """
+    assert config.public_base_url_for("https://dev.tabsii.com", None) == "https://dev.tabsii.com"
+
+
+def test_the_referer_is_the_fallback_when_there_is_no_origin() -> None:
+    """A same-origin GET may carry Referer but no Origin."""
+    assert (
+        config.public_base_url_for(None, "https://dev.tabsii.com/api/v1/plugins/marketing/admin")
+        == "https://dev.tabsii.com"
+    )
+
+
+def test_a_non_http_scheme_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only http(s) origins are usable; anything else falls through."""
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL", "https://configured.example")
+    assert config.public_base_url_for("file:///etc/passwd", None) == "https://configured.example"
+
+
+def test_it_falls_back_to_configuration_when_neither_header_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BIFFO_PUBLIC_BASE_URL", "https://configured.example")
+    assert config.public_base_url_for(None, None) == "https://configured.example"
