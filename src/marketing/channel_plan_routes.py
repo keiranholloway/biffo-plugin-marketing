@@ -77,6 +77,12 @@ async def start_channel_plan_route(
 
     raw_body = approved_positioning.get("body")
     positioning_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+    # The closed set of URLs this run is being shown (issue #22): exactly the
+    # approved positioning's own citations. Read at start time and stashed on
+    # the pending artefact below for the same reason `taxonomy_motions` is —
+    # it must be what THIS run saw, not what positioning has been re-run to by
+    # the time the run completes. See `pipeline.extract_channel_plan`.
+    allowed_source_urls = pipeline.citation_source_urls(approved_positioning.get("citations"))
 
     channels_resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin.token)
     channels_resp.raise_for_status()
@@ -115,7 +121,12 @@ async def start_channel_plan_route(
             # Pending-state payload, overwritten with the real result once
             # proposed — same shape `start_research_route` already uses for
             # `research_run_ids`.
-            "body": json.dumps({"channel_taxonomy": taxonomy_motions}),
+            "body": json.dumps(
+                {
+                    "channel_taxonomy": taxonomy_motions,
+                    "allowed_source_urls": allowed_source_urls,
+                }
+            ),
         },
     )
     created.raise_for_status()

@@ -27,15 +27,31 @@ applied one stage further down the chain, for the same reason stated there: a
 channel recommendation with no evidence is the most confident-sounding
 fabrication in the pipeline, because channel advice reads as generic wisdom
 whether or not anyone researched it.
+
+**Counting citations is only half of it (issue #22).** "Cites something" and
+"cites something it was actually given" are different questions, and only the
+first was ever asked. An agent that invents one plausible URL per claim — a
+well-known marketing-statistics domain, say — satisfies ``total > 0`` exactly
+as well as one that read the research, and the artefact is then proposed to an
+operator as evidenced when it is not. For ``positioning``, ``channel_plan`` and
+``copy`` the legitimate source set is closed and already known: it is exactly
+the approved parent artefact's ``citations`` column. Those three therefore also
+check **provenance** — every cited URL must appear in the set the run was
+started against (:class:`UncitedSourceError` otherwise), stashed on the pending
+artefact at start time for the same reason ``channel_taxonomy`` is: it must be
+what THIS run was shown, not whatever the parent has been re-run to since.
+``research`` deliberately has no such check — the web is its source, so there
+is no closed prior set to check a citation against.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ValidationError
 
@@ -103,6 +119,30 @@ class NoCitationsError(PipelineError):
     - ``sources`` empty, ``annotations is None`` — this run predates the
       annotations column or was never ``:online``, so whether retrieval
       happened at all is simply not known. Said plainly rather than guessed.
+    """
+
+
+class UncitedSourceError(PipelineError):
+    """A downstream run cited a URL its own approved input never contained
+    (issue #22) — a *different* failure from :class:`NoCitationsError`, and
+    the more dangerous one, because it looks like success: the artefact has
+    citations, they are well-formed, and every count-based check passes.
+
+    This is only askable of a stage whose legitimate source set is closed.
+    ``positioning``, ``channel_plan`` and ``copy`` are each started against an
+    approved parent artefact whose ``citations`` column is exactly the set of
+    URLs the run was shown, so a source outside it cannot have been read — it
+    was invented, or copied from the model's own training data, and either way
+    nothing in this run establishes it.
+
+    **The whole artefact fails, and nothing is silently dropped.** Discarding
+    the offending :class:`Source` and keeping the claim would leave a
+    fabricated statement standing with someone else's evidence beside it,
+    which is worse than failing — and would break ``Field(min_length=1)`` the
+    moment a claim's only source was the invented one. Same reasoning as the
+    refusal to salvage ``annotations`` into ``sources`` in
+    :func:`_no_citations_message`: the honest response to "this attribution is
+    not real" is to say so, not to tidy it away.
     """
 
 
@@ -182,6 +222,80 @@ def _total_citations(*source_lists: list[Source]) -> int:
     return sum(len(sources) for sources in source_lists)
 
 
+def citation_source_urls(citations: Any) -> list[str]:
+    """Every URL in an artefact's ``citations`` column, first-seen order,
+    deduplicated — the closed source set the stage below it may cite from
+    (issue #22).
+
+    Accepts all three shapes a caller can be holding, because the caller is a
+    route that has just read a row and should not have to care which:
+    ``citations`` is *written* as a JSON string
+    (:func:`~marketing.admin_app._advance_artefact` does
+    ``json.dumps(flatten_citations(...))``), Core may hand it back already
+    parsed, and a legacy row may hold ``None``.
+
+    Anything unreadable degrades to ``[]`` rather than raising. ``[]`` means
+    "the approved set is not known", which the guard treats as *cannot check* —
+    never as *nothing is allowed*. That distinction is the difference between
+    shipping this check and stranding every campaign whose artefacts predate
+    it; see :func:`_extract_cited_artefact` for the other end of it.
+    """
+    if isinstance(citations, str):
+        try:
+            citations = json.loads(citations)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(citations, list):
+        return []
+    urls: list[str] = []
+    for entry in citations:
+        url = entry.get("url") if isinstance(entry, dict) else None
+        if isinstance(url, str) and url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _url_key(url: str) -> str:
+    """A comparison key for a citation URL: same document, same key.
+
+    Provenance is a question about the document, not about the byte string.
+    A model that re-types a source with a trailing slash, a ``#section``
+    fragment, or a differently-cased host has cited the parent's source, and
+    failing those would make the guard fire on honest runs — which is how a
+    guard ends up switched off. So the host is lower-cased (DNS is
+    case-insensitive), a trailing ``/`` is dropped, and the fragment is
+    discarded (it addresses part of a document, not another one).
+
+    Nothing looser than that. The **path is kept case-sensitively and in
+    full**, and the query string is kept, so a real publisher's home page
+    cited for a statistic that lives nowhere in the parent is still a
+    fabrication — "same domain" is not provenance.
+    """
+    parts = urlsplit(url.strip())
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, "")
+    )
+
+
+#: How many offending URLs an :class:`UncitedSourceError` message names before
+#: it summarises the rest. An operator needs to see the shape of the problem,
+#: not a wall of URLs — and a wholly-fabricated artefact can carry dozens.
+_MAX_REPORTED_UNCITED = 5
+
+
+def _uncited_message(*, urls: list[str], parent_description: str, retry_hint: str) -> str:
+    shown = ", ".join(urls[:_MAX_REPORTED_UNCITED])
+    if len(urls) > _MAX_REPORTED_UNCITED:
+        shown += f" (and {len(urls) - _MAX_REPORTED_UNCITED} more)"
+    n = len(urls)
+    return (
+        f"The {retry_hint} run cited {n} source{'s' if n != 1 else ''} that {parent_description} "
+        f"does not contain: {shown}. A source this run was never given cannot have been read, "
+        f"so the claims resting on it are unevidenced and nothing was produced — try running "
+        f"{retry_hint} again."
+    )
+
+
 def _no_citations_message(
     *, base_message: str, retry_hint: str, annotations: list[dict[str, Any]] | None
 ) -> str:
@@ -229,14 +343,32 @@ def _extract_cited_artefact[T: BaseModel](
     malformed_message: str,
     no_citations_message: str,
     retry_hint: str,
+    allowed_source_urls: Collection[str] | None = None,
+    parent_description: str = "this run's approved input",
 ) -> T:
     """The shared skeleton behind :func:`extract_research_synthesis`,
     :func:`extract_positioning`, :func:`extract_channel_plan` and
     :func:`extract_copy`: fetch the last call to ``tool_name``, validate it
-    against ``model_cls``, and enforce the zero-citation guard over
-    ``citation_groups(result)`` — grounded in ``annotations``, the run's own
-    record of what retrieval returned (issue #82), not just what the model's
-    tool call repeated of it.
+    against ``model_cls``, and enforce **both** citation guards over
+    ``citation_groups(result)``.
+
+    1. *Quantity* — a run whose entire output cites nothing raises
+       :class:`NoCitationsError`, grounded in ``annotations``, the run's own
+       record of what retrieval returned (issue #82), not just what the
+       model's tool call repeated of it.
+    2. *Provenance* — every cited URL must appear in ``allowed_source_urls``,
+       or :class:`UncitedSourceError` (issue #22). Only stages with a closed
+       source set pass one: ``research`` does not, since the web is its
+       source.
+
+    ``allowed_source_urls`` is tri-state, exactly like ``annotations``, and
+    the states must not be collapsed: ``None`` is "not known" (an artefact
+    started before this check existed carries no stashed set, and must still
+    advance), an empty collection is treated the same way (an approved parent
+    with zero citations cannot exist — it would have failed guard 1 before it
+    could be proposed — so an empty set means legacy or hand-edited data), and
+    a non-empty one is enforced. Failing closed on the first two would strand
+    every in-flight run at deploy time on evidence nobody recorded.
 
     Kept as one implementation rather than four near-identical copies
     precisely because the guard is "the milestone, not a detail" (this
@@ -251,13 +383,30 @@ def _extract_cited_artefact[T: BaseModel](
     except ValidationError as exc:
         raise MalformedOutputError(str(exc)) from exc
 
-    total = _total_citations(*citation_groups(result))
+    groups = citation_groups(result)
+    total = _total_citations(*groups)
     if total == 0:
         raise NoCitationsError(
             _no_citations_message(
                 base_message=no_citations_message, retry_hint=retry_hint, annotations=annotations
             )
         )
+
+    if allowed_source_urls:
+        allowed = {_url_key(url) for url in allowed_source_urls}
+        uncited: list[str] = []
+        for sources in groups:
+            for source in sources:
+                if _url_key(source.url) not in allowed and source.url not in uncited:
+                    uncited.append(source.url)
+        if uncited:
+            raise UncitedSourceError(
+                _uncited_message(
+                    urls=uncited,
+                    parent_description=parent_description,
+                    retry_hint=retry_hint,
+                )
+            )
     return result
 
 
@@ -295,16 +444,29 @@ def extract_research_synthesis(
 
 
 def extract_positioning(
-    messages: list[dict[str, Any]], *, annotations: list[dict[str, Any]] | None = None
+    messages: list[dict[str, Any]],
+    *,
+    allowed_source_urls: Collection[str] | None = None,
+    annotations: list[dict[str, Any]] | None = None,
 ) -> Positioning:
-    """The positioning agent's output, or a hard failure — the same two
-    failure modes as :func:`extract_research_synthesis`, for the same reason:
-    a positioning claim is exactly as fabricable as a research finding, and an
+    """The positioning agent's output, or a hard failure — the same failure
+    modes as :func:`extract_research_synthesis`, for the same reason: a
+    positioning claim is exactly as fabricable as a research finding, and an
     operator reviewing it needs the same guarantee. ``annotations`` — see
-    :func:`extract_research_synthesis`."""
+    :func:`extract_research_synthesis`.
+
+    ``allowed_source_urls`` is the approved **research** artefact's citation
+    URLs — the closed set this run was actually shown (issue #22), stashed on
+    the pending artefact by ``start_positioning_route`` at start time so it is
+    what this run saw rather than whatever research has since been re-run to.
+    A segment/pillar/CTA citing anything outside it raises
+    :class:`UncitedSourceError`; ``None`` means the set is not known and the
+    check is skipped (see :func:`_extract_cited_artefact`)."""
     return _extract_cited_artefact(
         messages,
         annotations=annotations,
+        allowed_source_urls=allowed_source_urls,
+        parent_description="the approved research it was given",
         tool_name=POSITIONING_TOOL_NAME,
         model_cls=Positioning,
         citation_groups=lambda r: [
@@ -325,15 +487,21 @@ def extract_channel_plan(
     messages: list[dict[str, Any]],
     *,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    allowed_source_urls: Collection[str] | None = None,
     annotations: list[dict[str, Any]] | None = None,
 ) -> ChannelPlan:
-    """The channel-plan agent's output, or a hard failure — the same two
-    failure modes as :func:`extract_positioning`, for the same reason (M4,
+    """The channel-plan agent's output, or a hard failure — the same failure
+    modes as :func:`extract_positioning`, for the same reason (M4,
     issue #3): a channel recommendation is exactly as fabricable as a
     positioning claim, and arguably the most confident-sounding one in the
     whole pipeline, because channel advice reads as generic wisdom whether or
     not anyone researched it. ``annotations`` — see
     :func:`extract_research_synthesis`.
+
+    ``allowed_source_urls`` is the approved **positioning** artefact's
+    citation URLs (issue #22) — see :func:`extract_positioning` for the full
+    reasoning; this is that same check one stage further down, which is where
+    the issue was filed from.
 
     ``taxonomy`` is ``{channel_key: motion}`` for exactly the taxonomy this
     run was shown (#76 increment 2) — stored on the artefact at start time,
@@ -348,6 +516,8 @@ def extract_channel_plan(
     plan = _extract_cited_artefact(
         messages,
         annotations=annotations,
+        allowed_source_urls=allowed_source_urls,
+        parent_description="the approved positioning it was given",
         tool_name=CHANNEL_PLAN_TOOL_NAME,
         model_cls=ChannelPlan,
         citation_groups=lambda r: [c.sources for c in r.channels],
@@ -374,14 +544,21 @@ def extract_copy(
     messages: list[dict[str, Any]],
     *,
     channel_plan_channels: dict[str, Literal["organic", "paid"]],
+    allowed_source_urls: Collection[str] | None = None,
     annotations: list[dict[str, Any]] | None = None,
 ) -> CopySet:
-    """The copy agent's output, or a hard failure — the same two failure
-    modes as :func:`extract_channel_plan` (M5, issue #4): copy is exactly as
-    fabricable as a channel recommendation, and arguably the most
-    publishable-looking one in the whole pipeline, since prose reads as
-    correct whether or not any pillar or CTA actually backs it. ``annotations``
-    — see :func:`extract_research_synthesis`.
+    """The copy agent's output, or a hard failure — the same failure modes as
+    :func:`extract_channel_plan` (M5, issue #4): copy is exactly as fabricable
+    as a channel recommendation, and arguably the most publishable-looking one
+    in the whole pipeline, since prose reads as correct whether or not any
+    pillar or CTA actually backs it. ``annotations`` — see
+    :func:`extract_research_synthesis`.
+
+    ``allowed_source_urls`` is the **union** of the approved positioning's and
+    approved channel plan's citation URLs (issue #22). Issue #22 named only
+    positioning and channel plan because M5 did not exist when it was filed;
+    copy has the identical closed source set, so it gets the identical check
+    rather than inheriting the gap one stage further down.
 
     ``channel_plan_channels`` is ``{channel_key: motion}`` for exactly the
     approved channel plan entries that themselves carried a ``channel_key``
@@ -396,6 +573,8 @@ def extract_copy(
     result = _extract_cited_artefact(
         messages,
         annotations=annotations,
+        allowed_source_urls=allowed_source_urls,
+        parent_description="the approved positioning and channel plan it was given",
         tool_name=COPY_TOOL_NAME,
         model_cls=CopySet,
         citation_groups=lambda r: [c.sources for c in r.channels],
@@ -712,20 +891,29 @@ async def start_positioning(
     return causation_id, run_id
 
 
-async def advance_positioning(gateway: AgentGateway, *, run_id: str) -> Positioning | None:
+async def advance_positioning(
+    gateway: AgentGateway,
+    *,
+    run_id: str,
+    allowed_source_urls: Collection[str] | None = None,
+) -> Positioning | None:
     """Read the positioning run, advancing nothing else — it is a single run,
     not a chain, so there is no fan-in to discover.
 
     Returns ``None`` while still running or vanished-but-plausibly-not-yet-
     visible; raises the same failure family as :func:`advance_research` on a
-    run that finished without succeeding or without citing anything.
+    run that finished without succeeding, without citing anything, or citing
+    something it was never given (``allowed_source_urls`` — see
+    :func:`extract_positioning`).
     """
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The positioning run did not complete successfully.")
-    return extract_positioning(view.messages, annotations=view.annotations)
+    return extract_positioning(
+        view.messages, allowed_source_urls=allowed_source_urls, annotations=view.annotations
+    )
 
 
 async def start_channel_plan(
@@ -767,19 +955,29 @@ async def start_channel_plan(
 
 
 async def advance_channel_plan(
-    gateway: AgentGateway, *, run_id: str, taxonomy: dict[str, Literal["organic", "paid"]]
+    gateway: AgentGateway,
+    *,
+    run_id: str,
+    taxonomy: dict[str, Literal["organic", "paid"]],
+    allowed_source_urls: Collection[str] | None = None,
 ) -> ChannelPlan | None:
     """Read the channel-plan run, advancing nothing else — mirrors
     :func:`advance_positioning`: a single run, not a chain, so there is no
     fan-in to discover. ``taxonomy`` is ``{channel_key: motion}`` for exactly
     what :func:`start_channel_plan` gave this run — see
-    :func:`extract_channel_plan` for how it is used."""
+    :func:`extract_channel_plan` for how it and ``allowed_source_urls`` are
+    used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
-    return extract_channel_plan(view.messages, taxonomy=taxonomy, annotations=view.annotations)
+    return extract_channel_plan(
+        view.messages,
+        taxonomy=taxonomy,
+        allowed_source_urls=allowed_source_urls,
+        annotations=view.annotations,
+    )
 
 
 async def start_copy(
@@ -813,19 +1011,23 @@ async def advance_copy(
     *,
     run_id: str,
     channel_plan_channels: dict[str, Literal["organic", "paid"]],
+    allowed_source_urls: Collection[str] | None = None,
 ) -> CopySet | None:
     """Read the copy run, advancing nothing else — mirrors
     :func:`advance_channel_plan`: a single run, not a chain, so there is no
     fan-in to discover. ``channel_plan_channels`` is ``{channel_key: motion}``
     for exactly the approved channel plan's real (non-proposal) entries — see
-    :func:`extract_copy` for how it is used."""
+    :func:`extract_copy` for how it and ``allowed_source_urls`` are used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The copy run did not complete successfully.")
     return extract_copy(
-        view.messages, channel_plan_channels=channel_plan_channels, annotations=view.annotations
+        view.messages,
+        channel_plan_channels=channel_plan_channels,
+        allowed_source_urls=allowed_source_urls,
+        annotations=view.annotations,
     )
 
 

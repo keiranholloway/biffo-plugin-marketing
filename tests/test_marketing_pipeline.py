@@ -25,6 +25,8 @@ import pytest
 from marketing.pipeline import (
     MalformedOutputError,
     NoCitationsError,
+    UncitedSourceError,
+    citation_source_urls,
     extract_channel_plan,
     extract_copy,
     extract_positioning,
@@ -342,6 +344,248 @@ def test_copy_with_a_grounded_channel_succeeds() -> None:
     assert copy.channels[0].channel_key == "instagram_organic"
     assert copy.channels[0].motion == "organic"
     assert copy.channels[0].sources[0].url == "https://example.com/thread"
+
+
+# ── Provenance: a cited URL must have come from this stage's own input
+# (issue #22) ─────────────────────────────────────────────────────────────────
+#
+# The guard above counts citations; it never asked where they came from. For
+# `positioning`, `channel_plan` and `copy` the legitimate source set is closed
+# and already known — it is exactly the approved parent artefact's `citations`
+# column — so an agent that invents one plausible-looking URL per claim
+# (a well-known marketing-statistics domain, say) sails past `total == 0` and
+# is proposed to an operator as evidenced when it is not.
+#
+# `research` is deliberately NOT given this check: the web is its source, so
+# there is no closed prior set to check against.
+
+#: What the approved parent artefact actually cited — the whole legitimate
+#: source set for the stage below it.
+_APPROVED = ["https://example.com/thread", "https://example.com/report"]
+
+#: Plausible, well-formed, and never in `_APPROVED` — the fabrication shape
+#: this issue exists for.
+_FABRICATED = "https://marketing-statistics.example/2026-benchmarks"
+
+
+def _positioning_args(*urls: str) -> dict[str, Any]:
+    return {
+        "segments": [
+            {
+                "name": "Multi-location operators",
+                "description": "Run 2+ sites and feel the coordination pain first.",
+                "sources": [{"url": url, "note": ""} for url in urls],
+            }
+        ],
+        "pillars": [],
+        "ctas": [],
+    }
+
+
+def _channel_plan_args(*urls: str) -> dict[str, Any]:
+    return {
+        "channels": [
+            {
+                "channel_key": "instagram_organic",
+                "rank": 1,
+                "rationale": "Multi-location operators already discuss this there.",
+                "sources": [{"url": url, "note": ""} for url in urls],
+            }
+        ]
+    }
+
+
+def _copy_args(*urls: str) -> dict[str, Any]:
+    return {
+        "channels": [
+            {
+                "channel_key": "instagram_organic",
+                "headline": "Run every site the same way, finally.",
+                "body": "One dashboard, every location, no more group chats.",
+                "cta": "See how it works",
+                "sources": [{"url": url, "note": ""} for url in urls],
+            }
+        ]
+    }
+
+
+def test_positioning_citing_a_url_the_approved_research_never_contained_is_refused() -> None:
+    """The defect: one fabricated URL per claim passes the count-only guard.
+    It must not — a positioning segment can only cite what the approved
+    research it was given actually contained."""
+    messages = _tool_call("submit_positioning", _positioning_args(_FABRICATED))
+
+    with pytest.raises(UncitedSourceError) as excinfo:
+        extract_positioning(messages, allowed_source_urls=_APPROVED)
+
+    detail = str(excinfo.value)
+    assert _FABRICATED in detail, "the operator must be told WHICH url was not in the input"
+    assert "approved research" in detail
+
+
+def test_positioning_citing_only_approved_research_urls_succeeds() -> None:
+    """The guard must not fire on the normal case: every source is one the
+    approved research actually carried."""
+    messages = _tool_call("submit_positioning", _positioning_args(*_APPROVED))
+
+    positioning = extract_positioning(messages, allowed_source_urls=_APPROVED)
+
+    assert {s.url for s in positioning.segments[0].sources} == set(_APPROVED)
+
+
+def test_positioning_is_refused_even_when_it_also_cites_a_real_url() -> None:
+    """The realistic shape, and the reason a per-source check is needed rather
+    than "does it cite anything from the parent": an agent that copies one
+    genuine URL and invents a second still produces a claim backed by nothing.
+    A single fabricated source fails the whole artefact."""
+    messages = _tool_call("submit_positioning", _positioning_args(_APPROVED[0], _FABRICATED))
+
+    with pytest.raises(UncitedSourceError):
+        extract_positioning(messages, allowed_source_urls=_APPROVED)
+
+
+def test_channel_plan_citing_a_url_the_approved_positioning_never_contained_is_refused() -> None:
+    """The same check one stage down, which is why this issue was filed during
+    M4: channel advice reads as generic wisdom whether or not anyone
+    researched it, so an invented citation is least visible here."""
+    messages = _tool_call("submit_channel_plan", _channel_plan_args(_FABRICATED))
+
+    with pytest.raises(UncitedSourceError) as excinfo:
+        extract_channel_plan(
+            messages,
+            taxonomy={"instagram_organic": "organic"},
+            allowed_source_urls=_APPROVED,
+        )
+
+    assert "approved positioning" in str(excinfo.value)
+
+
+def test_channel_plan_citing_only_approved_positioning_urls_succeeds() -> None:
+    messages = _tool_call("submit_channel_plan", _channel_plan_args(*_APPROVED))
+
+    plan = extract_channel_plan(
+        messages, taxonomy={"instagram_organic": "organic"}, allowed_source_urls=_APPROVED
+    )
+
+    assert plan.channels[0].motion == "organic"
+
+
+def test_copy_citing_a_url_its_approved_inputs_never_contained_is_refused() -> None:
+    """M5's stage has the same closed source set (the approved positioning and
+    channel plan it was started against), so it gets the same check rather
+    than inheriting the gap one stage further down."""
+    messages = _tool_call("submit_copy", _copy_args(_FABRICATED))
+
+    with pytest.raises(UncitedSourceError):
+        extract_copy(
+            messages,
+            channel_plan_channels={"instagram_organic": "organic"},
+            allowed_source_urls=_APPROVED,
+        )
+
+
+def test_copy_citing_only_approved_urls_succeeds() -> None:
+    messages = _tool_call("submit_copy", _copy_args(_APPROVED[1]))
+
+    result = extract_copy(
+        messages,
+        channel_plan_channels={"instagram_organic": "organic"},
+        allowed_source_urls=_APPROVED,
+    )
+
+    assert result.channels[0].sources[0].url == _APPROVED[1]
+
+
+def test_an_unknown_approved_set_skips_the_check_rather_than_failing_everything() -> None:
+    """`None` is "the approved set is not known", never "nothing is allowed" —
+    the same tri-state discipline `annotations` already follows. An artefact
+    started before this check existed carries no stashed set, and must still
+    be able to advance; failing it closed would strand every in-flight run at
+    deploy time on evidence nobody has."""
+    messages = _tool_call("submit_positioning", _positioning_args(_FABRICATED))
+
+    positioning = extract_positioning(messages, allowed_source_urls=None)
+
+    assert positioning.segments[0].sources[0].url == _FABRICATED
+
+
+def test_an_empty_approved_set_also_skips_the_check() -> None:
+    """An approved parent with zero citations cannot exist — it would have
+    failed the zero-citation guard before it could be proposed — so an empty
+    set means a legacy or hand-edited row, i.e. unknown, not "cite nothing"."""
+    messages = _tool_call("submit_positioning", _positioning_args(_FABRICATED))
+
+    assert extract_positioning(messages, allowed_source_urls=[]) is not None
+
+
+def test_a_trailing_slash_or_fragment_is_not_treated_as_a_fabrication() -> None:
+    """Provenance is about the document, not the byte string. A model that
+    re-types the same URL with a trailing slash, a fragment, or a
+    differently-cased host has cited the parent's source, and failing it would
+    make the guard fire on honest runs — which is how a guard gets turned off.
+    """
+    messages = _tool_call(
+        "submit_positioning", _positioning_args("https://EXAMPLE.com/thread/#section-2")
+    )
+
+    assert extract_positioning(messages, allowed_source_urls=_APPROVED) is not None
+
+
+def test_a_different_path_on_an_allowed_host_is_still_a_fabrication() -> None:
+    """The normalisation above must not soften into "same domain is good
+    enough": citing a real publisher's home page for a statistic that lives
+    nowhere in the parent is exactly the fabrication being caught."""
+    messages = _tool_call("submit_positioning", _positioning_args("https://example.com/invented"))
+
+    with pytest.raises(UncitedSourceError):
+        extract_positioning(messages, allowed_source_urls=_APPROVED)
+
+
+def test_research_synthesis_has_no_provenance_check_because_the_web_is_its_source() -> None:
+    """Deliberate asymmetry, stated as a test so a future "make it uniform"
+    refactor has to argue with it: research has no closed prior set — it is
+    the stage that goes and finds the URLs — so there is nothing to check a
+    citation against."""
+    import inspect
+
+    assert "allowed_source_urls" not in inspect.signature(extract_research_synthesis).parameters
+
+
+# ── citation_source_urls — reading the parent's `citations` column ───────────
+
+
+def test_citation_source_urls_reads_the_json_string_core_stores() -> None:
+    """`marketing_artefact.citations` is written as a JSON string
+    (`_advance_artefact`'s `json.dumps(flatten_citations(...))`), so the
+    routes' natural read is a string."""
+    citations = '[{"url": "https://example.com/a", "note": "n"}, {"url": "https://example.com/b"}]'
+
+    assert citation_source_urls(citations) == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_citation_source_urls_reads_an_already_parsed_list_too() -> None:
+    parsed = [{"url": "https://example.com/a", "note": "n"}]
+
+    assert citation_source_urls(parsed) == ["https://example.com/a"]
+
+
+def test_citation_source_urls_of_an_absent_or_unreadable_column_is_empty() -> None:
+    """Not known, rather than an exception: a legacy row with no citations
+    column must not 502 the stage that reads it — it degrades to the
+    check-skipped case above."""
+    assert citation_source_urls(None) == []
+    assert citation_source_urls("not json at all") == []
+    assert citation_source_urls([{"note": "no url key"}]) == []
+
+
+def test_citation_source_urls_dedupes_and_keeps_first_seen_order() -> None:
+    citations = [
+        {"url": "https://example.com/b"},
+        {"url": "https://example.com/a"},
+        {"url": "https://example.com/b"},
+    ]
+
+    assert citation_source_urls(citations) == ["https://example.com/b", "https://example.com/a"]
 
 
 # ── Missing or malformed tool calls are a different failure ─────────────────
