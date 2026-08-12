@@ -212,36 +212,49 @@ async def test_advance_research_raises_when_every_research_agent_failed() -> Non
         await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
 
 
+def _empty_synthesis_call() -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_research_synthesis",
+                        "arguments": {"summary": "Nothing usable.", "findings": []},
+                    }
+                }
+            ],
+        }
+    ]
+
+
 @pytest.mark.asyncio
-async def test_advance_research_propagates_the_synthesis_runs_annotations_into_the_error() -> None:
-    """Issue #82: `advance_research` must read `annotations` off the
-    engine-fired synthesis run itself (`AgentRunView.annotations`), not just
-    its `messages`, and pass it all the way into the citation guard. A
-    synthesis run that cited nothing in its tool call but WAS given retrieval
-    evidence must fail with the "transcription failure" message, not the
-    "fetched zero URLs" one — proven here through the real orchestration
-    function, not just the extractor directly."""
+async def test_advance_research_reads_annotations_from_research_runs_not_synthesis_run() -> None:
+    """Issue #90: the synthesis run is never `:online`
+    (`DEFAULT_SYNTHESIS_MODEL` has no `:online` suffix) — only the two
+    research runs actually retrieve. The guard must be grounded in THEIR
+    annotations, not the synthesis run's own.
+
+    Proven adversarially: the synthesis run here is given `annotations=[]`
+    (the value the old, buggy code read) while the research runs are given
+    real, non-empty annotations. If `advance_research` were still reading the
+    synthesis run's own annotations — the pre-#90-fix code, and exactly the
+    shape issue #90 was filed against — this would see `[]` and raise the
+    unconditional "fetched zero URLs" message. It must not: the research
+    runs retrieved, so the failure must read as a transcription failure."""
     gateway = _FakeGateway()
     chain_id, run_ids = await pipeline.start_research(gateway, brief={})
     for run_id in run_ids:
-        gateway.complete(run_id, status="completed")
+        gateway.complete(
+            run_id,
+            status="completed",
+            annotations=[{"type": "url_citation", "url": "https://example.com/z", "title": "Z"}],
+        )
     gateway.fire_chain_run(
         chain_id=chain_id,
         agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
-        messages=[
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "submit_research_synthesis",
-                            "arguments": {"summary": "Nothing usable.", "findings": []},
-                        }
-                    }
-                ],
-            }
-        ],
-        annotations=[{"type": "url_citation", "url": "https://example.com/z", "title": "Z"}],
+        messages=_empty_synthesis_call(),
+        annotations=[],  # what the synthesis run itself reports — must be ignored
     )
 
     with pytest.raises(pipeline.NoCitationsError) as excinfo:
@@ -250,6 +263,99 @@ async def test_advance_research_propagates_the_synthesis_runs_annotations_into_t
     detail = str(excinfo.value)
     assert "fetched zero URLs" not in detail
     assert "transcription failure" in detail
+
+
+@pytest.mark.asyncio
+async def test_advance_research_unions_annotations_when_only_one_research_angle_retrieved() -> None:
+    """Decision (issue #90): a chain where one research angle retrieved and
+    the other found nothing is not distinguished from "both retrieved" — the
+    aggregate is a union, and any non-empty result reads as "retrieval
+    succeeded somewhere in the chain", which is what the message already
+    says (a total count, not a per-angle claim)."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed", annotations=[])
+    gateway.complete(
+        run_ids[1],
+        status="completed",
+        annotations=[{"type": "url_citation", "url": "https://example.com/only-one", "title": "Z"}],
+    )
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_empty_synthesis_call(),
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    detail = str(excinfo.value)
+    assert "transcription failure" in detail
+    assert "1 source" in detail
+
+
+@pytest.mark.asyncio
+async def test_advance_research_reports_genuine_zero_only_when_every_research_run_is_empty() -> (
+    None
+):
+    """The base "fetched zero URLs" message is only honest when EVERY
+    research run resolved and reported `[]` — the one case in the aggregate
+    that actually matches what the message asserts."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    for run_id in run_ids:
+        gateway.complete(run_id, status="completed", annotations=[])
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_empty_synthesis_call(),
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    detail = str(excinfo.value)
+    assert detail == (
+        "The research run fetched zero URLs. Nothing was found to cite, so no "
+        "artefact was produced — try running research again."
+    )
+
+
+@pytest.mark.asyncio
+async def test_advance_research_treats_mixed_none_and_empty_chain_as_unknown_not_proven_zero() -> (
+    None
+):
+    """Decision (issue #90): if one research run predates the annotations
+    column (or was otherwise never graded) and reports `None`, while the
+    other reports a genuine `[]`, the aggregate must not claim a proven
+    zero-URL retrieval — part of the chain's status is simply not known."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed", annotations=None)
+    gateway.complete(run_ids[1], status="completed", annotations=[])
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_empty_synthesis_call(),
+        # Deliberately the opposite of the correct aggregate (`None`): if
+        # `advance_research` were still reading the synthesis run's own
+        # annotations instead of the research runs', this `[]` would produce
+        # the bare "fetched zero URLs" message with no disclaimer — the wrong
+        # answer, and a different string from the one asserted below.
+        annotations=[],
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    detail = str(excinfo.value)
+    assert detail == (
+        "The research run fetched zero URLs. Nothing was found to cite, so no "
+        "artefact was produced — try running research again. (This run predates "
+        "citation tracking, or was not a grounded run, so whether retrieval itself "
+        "found anything is not known — do not read this as a proven zero-URL "
+        "retrieval.)"
+    )
 
 
 # ── start_positioning / advance_positioning ──────────────────────────────────
