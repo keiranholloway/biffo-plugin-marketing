@@ -58,8 +58,20 @@ timeout, a non-200, or a malformed body degrades every campaign's
 leads/conversions/cost to unmeasurable-with-a-reason; clicks, computed
 locally, keep rendering regardless (`_fetch_leads_source` never raises).
 
-**A campaign the source doesn't know about is unmeasurable, not an error** —
-see the "unknown campaign id" handling in `_metrics_for_campaign`.
+**The source MUST return an entry for every requested `campaign_id`.**
+Issue #99 corrected #31's original contract, which required the opposite
+("unknown ids are omitted, not errored") and collided with the "real zero
+must be distinguishable" property below: with no campaign registry of its
+own, the instance could not tell "exists, zero leads" apart from "never
+heard of it" — both are zero rows — so omission made `leads: 0, measurable:
+true` unreachable for the single most common campaign state (published,
+clicked, no leads yet). A requested id with no matching rows is now a real
+zero, because the caller — this plugin — already vouches the campaign exists
+by asking about it. An id genuinely absent from the source's response is
+therefore evidence the source does not conform to the contract, not a
+legitimate "unknown campaign" outcome; kept as a defensive fallback in
+`_metrics_for_campaign` rather than removed, so a non-conforming source still
+degrades honestly instead of this plugin fabricating a zero it cannot verify.
 
 **`measurable: false` is never rendered as a zero, and an upstream `reason`
 is always preserved verbatim** when the source gives one — see
@@ -131,10 +143,19 @@ _SOURCE_UNREACHABLE_REASON = "the configured leads source could not be reached"
 #: "nothing answered" from "something answered wrong".
 _SOURCE_MALFORMED_REASON = "the configured leads source returned data this plugin could not parse"
 
-#: The call succeeded and the source is working — this specific campaign id
-#: simply wasn't in its response. Per the contract: "a campaign the source
-#: does not know about is simply unmeasurable, not a 500."
-_UNKNOWN_TO_SOURCE_REASON = "the configured leads source has no data for this campaign"
+#: The call succeeded, but this specific campaign id was absent from the
+#: response. Per the corrected contract (issue #99), the source MUST return
+#: an entry for every requested campaign_id — the caller already vouches the
+#: campaign exists by asking about it, so an omission here means the source
+#: does not conform, not that the campaign is genuinely unmeasurable. Kept as
+#: a defensive fallback rather than removed: this plugin cannot tell a
+#: non-conforming source apart from a real absence, and inventing a zero
+#: here would reintroduce exactly the dishonesty the contract exists to
+#: prevent, so it still degrades to unmeasurable-with-a-reason.
+_SOURCE_OMITTED_CAMPAIGN_REASON = (
+    "the configured leads source did not return an entry for this campaign, "
+    "though the contract requires one for every requested campaign_id"
+)
 
 #: `measurable: false` with no `reason` at all is itself a malformed
 #: response — the contract requires one — but still degrades to unmeasurable
@@ -283,9 +304,11 @@ class _LeadsSourceResult:
       usable response (timeout, non-200, malformed body). Degrades to
       unmeasurable with `failure` as the reason for every campaign — never a
       500 on the results dashboard.
-    - `by_campaign_id` populated (possibly empty): the call succeeded.
-      A campaign id simply absent from it is unknown to the source, not an
-      error — handled by `_metrics_for_campaign`, not here.
+    - `by_campaign_id` populated (possibly empty): the call succeeded. Per
+      the corrected contract (issue #99) the source is required to return an
+      entry for every requested campaign_id; an id absent from it means the
+      source did not conform, not that it has no data — handled defensively
+      by `_metrics_for_campaign`, not here.
     """
 
     def __init__(
@@ -316,10 +339,10 @@ async def _fetch_leads_source(campaign_ids: list[str], token: str) -> _LeadsSour
         return _LeadsSourceResult(not_configured=True)
 
     if not campaign_ids:
-        # Nothing to ask about — same as a successful call that named no
-        # campaigns; every campaign below will fall into the "unknown to
-        # source" branch, which is the honest answer to "the source knows
-        # nothing about a campaign we never asked it about".
+        # Nothing to ask about. This only happens when this plugin has no
+        # campaigns at all, so the per-campaign loop in `results()` never
+        # iterates — returned for symmetry with a real response, not because
+        # anything downstream needs it.
         return _LeadsSourceResult(by_campaign_id={})
 
     query = urlencode([("campaign_id", campaign_id) for campaign_id in campaign_ids])
@@ -405,7 +428,14 @@ def _metrics_for_campaign(
     else:
         entry = source.by_campaign_id.get(campaign_id)
         if entry is None:
-            reason = _UNKNOWN_TO_SOURCE_REASON
+            # Defensive fallback only: the contract (issue #99) requires the
+            # source to return an entry for every requested campaign_id, so
+            # reaching this means the source did not conform — not that this
+            # is a legitimate "unknown campaign" outcome. Never fabricate a
+            # zero here; this plugin cannot tell "source is broken" from
+            # "source omitted a real zero" and guessing zero would be
+            # exactly the dishonesty the contract exists to prevent.
+            reason = _SOURCE_OMITTED_CAMPAIGN_REASON
         else:
             return (
                 _metric_from_raw(entry.get("leads"), denominator=denominator),
