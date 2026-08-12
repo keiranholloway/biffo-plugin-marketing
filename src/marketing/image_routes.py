@@ -33,10 +33,34 @@ The flow:
    promises.
 
 Then a `marketing_asset` row is created with `is_source=True`: the ONE
-approved creative placements are later rendered from (`render.py`, M5) —
-never a placement render itself. This route is the only path in this plugin
-that calls a provider to *create* image bytes, so every asset it writes is,
-by construction, a source.
+approved creative placements are later rendered from (`render.py`, M5). This
+route is the only path in this plugin that calls a provider to *create* image
+bytes, so every asset it writes with `is_source=True` is, by construction, a
+source.
+
+4. **Render every `PLACEMENTS` entry from the SAME in-memory bytes** the
+   provider returned in step 1, and write one more `marketing_asset` row per
+   placement (`is_source=False`) — issue #36. An earlier design rendered
+   placements later, in `pack_routes.py`, by fetching the stored source
+   creative back from object storage; CodeQL correctly flagged that fetch as
+   `py/full-ssrf` (see `pack_routes.py`'s module docstring for the full
+   story). Rendering here instead needs no fetch, no presigned URL, no
+   outbound request — `image.content` is already sitting in this function's
+   own memory, exactly once, and `render.render` (M5) is pure, local,
+   Pillow-only cropping with no network surface at all. This is also what
+   "rendered once, never regenerated" (`definitions.py`, `render.py`) was
+   already asking for.
+
+   **This step is best-effort, per placement, and never billable.** By the
+   time it runs, the provider has been paid and ledgered, and the source row
+   is durably written — placement rendering and its uploads are local
+   bookkeeping on top of that, never a reason to fail the request. If
+   rendering or storing one placement fails, that placement is simply absent
+   from `marketing_asset`, which `pack_routes.py`'s `missing_placements`
+   already reports honestly to an operator — the alternative, failing the
+   whole request after the provider has already been charged, would tell an
+   operator to regenerate and charge them again for a source that in fact
+   saved successfully. See `_store_placement_renders` below.
 
 Both internal Core routes (storage, ledger) are SigV4-signed as
 `system:marketing` (ADR-0009) via the SDK's `create_core_client()` — the same
@@ -61,7 +85,8 @@ from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from . import principal_client
+from . import principal_client, render
+from .definitions import PLACEMENTS
 from .image_provider import (
     GeneratedImage,
     ImageProvider,
@@ -343,6 +368,102 @@ async def _upload(core_client: BiffoAPIClient, image: GeneratedImage) -> dict[st
         raise _core_error(exc) from exc
 
 
+def _placement_variant(image: GeneratedImage, placement: str, rendered: bytes) -> GeneratedImage:
+    """`rendered` packaged the way `_upload` needs, for one placement.
+
+    `render.render` returns the original bytes UNCHANGED (never re-encoded)
+    when the source already matches the placement's ratio (see that
+    function's docstring) — detected here by identity comparison, not by
+    asking `render` to say so, since that is already the exact contract it
+    guarantees. In that case the variant keeps the source's own content type
+    and extension, so a pre-cropped asset round-trips as the same file it
+    always was. Otherwise `render` always re-encodes as PNG, so the variant
+    is `image/png`.
+
+    Other `GeneratedImage` fields (`provider`, `model`, `unit_kind`) are
+    carried over for context only — `_upload` reads none of them — and
+    `units`/`cost_usd` are zero/`None` because this render is not billable:
+    no provider was called to produce it.
+    """
+    is_noop = rendered == image.content
+    content_type = image.content_type if is_noop else "image/png"
+    if is_noop and "." in image.filename:
+        extension = image.filename.rsplit(".", 1)[-1]
+    else:
+        extension = "png"
+    return GeneratedImage(
+        content=rendered,
+        content_type=content_type,
+        filename=f"{placement}-{uuid.uuid4()}.{extension}",
+        provider=image.provider,
+        model=image.model,
+        units=0.0,
+        unit_kind=image.unit_kind,
+        cost_usd=None,
+    )
+
+
+async def _store_placement_renders(
+    *,
+    core_client: BiffoAPIClient,
+    campaign_client: principal_client.PrincipalCoreClient,
+    campaign_id: str,
+    image: GeneratedImage,
+) -> None:
+    """Render every `PLACEMENTS` entry from `image.content` — the provider's
+    own in-memory bytes, never fetched back from storage — and write one
+    `marketing_asset` row per placement. Issue #36's fix; see the module
+    docstring's step 4 for why this belongs here rather than in
+    `pack_routes.py`.
+
+    Called only after `generate_still_route` has ledgered the charge and
+    written the source row, so every placement here is local bookkeeping on
+    top of an already-durable generation. Each placement is independently
+    best-effort: a render failure (`render.render` raises on bytes it cannot
+    decode, or — in principle, since `PLACEMENTS` and `render`'s own table
+    are guarded to stay in step — an unknown placement) or a storage failure
+    for ONE placement is logged and skipped, never raised. Raising here would
+    turn a partial, recoverable gap into a 502 on an otherwise fully
+    successful, already-charged generation — exactly the blind-retry-doubles-
+    the-charge risk issue #24 exists to prevent, for a step that never had a
+    charge to lose in the first place. A placement that fails here is simply
+    absent from `marketing_asset`, which `pack_routes.py`'s
+    `missing_placements` already reports honestly.
+    """
+    for placement in PLACEMENTS:
+        try:
+            rendered = render.render(image.content, placement)
+        except Exception as exc:  # noqa: BLE001 - best-effort per placement, see docstring
+            logger.warning(
+                "Could not render placement %r for campaign %s: %s", placement, campaign_id, exc
+            )
+            continue
+
+        variant = _placement_variant(image, placement, rendered)
+        try:
+            media = await _upload(core_client, variant)
+            media_id = _required_field(media, "id", context="Storage confirm")
+            await campaign_client.post(
+                f"{_INTERNAL_PREFIX}/assets",
+                json={
+                    "campaign_id": campaign_id,
+                    "media_kind": "image",
+                    "placement": placement,
+                    "media_id": media_id,
+                    "is_source": False,
+                },
+            )
+        except (HTTPException, BiffoAPIError) as exc:
+            detail = exc.detail
+            logger.warning(
+                "Could not store rendered placement %r for campaign %s: %s",
+                placement,
+                campaign_id,
+                detail,
+            )
+            continue
+
+
 @router.post("/campaigns/{campaign_id}/stills", status_code=status.HTTP_201_CREATED)
 async def generate_still_route(
     campaign_id: str,
@@ -378,6 +499,17 @@ async def generate_still_route(
     an idempotency key Core's `/internal/media-generations` route does not
     yet accept, which is a Core-side change, not something this route can
     build around on its own. Tracked as biffo-template#1515.
+
+    **After the source row, every `PLACEMENTS` entry is rendered from the
+    same in-memory bytes and stored too (issue #36)** — see
+    `_store_placement_renders`. That step runs last, strictly after the
+    charge is ledgered and the source row committed, and never moves the
+    ledger write later to accommodate it (the ordering above is unchanged).
+    It is best-effort and cannot fail this request: a placement that could
+    not be rendered or stored is simply missing from `marketing_asset`,
+    which the pack (`pack_routes.py`) already reports honestly via
+    `missing_placements` rather than this route inventing a second failure
+    mode for a step that was never billable.
     """
     campaign_id = _validated_campaign_id(campaign_id)
 
@@ -474,6 +606,19 @@ async def generate_still_route(
             asset,
         )
         asset_id = None
+
+    # The charge, the source's storage and its asset row have all committed
+    # above — everything from here on is local bookkeeping. Placement
+    # rendering (issue #36) runs here, from `image.content` still in memory,
+    # rather than being reconstructed later from storage: see
+    # `_store_placement_renders`'s docstring for why it cannot fail this
+    # request.
+    await _store_placement_renders(
+        core_client=core_client,
+        campaign_client=campaign_client,
+        campaign_id=campaign_id,
+        image=image,
+    )
 
     try:
         url_resp = await core_client.get(f"{_STORAGE_PATH}/{media_id}/url")
