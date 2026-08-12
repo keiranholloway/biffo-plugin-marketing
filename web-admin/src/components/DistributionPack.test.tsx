@@ -101,7 +101,14 @@ describe('DistributionPack', () => {
     expect(await screen.findByText(/no public base url configured/i)).toBeInTheDocument()
   })
 
-  it('reports a load failure with the server reason, not a raw body', async () => {
+  // The three distinct 4xx branches `pack_routes.get_pack_route` actually
+  // raises (issue #85) — each asserts the operator-facing wording the server
+  // sent, not the status code, and not the response's raw JSON. The fixture
+  // `detail` strings are copied verbatim from `pack_routes.py` rather than
+  // invented, per the issue's own warning that a fixture built from what the
+  // author expects, rather than what the server produces, is the recurring
+  // defect here.
+  it('says there is no copy yet, not just "(404)"', async () => {
     stubSession()
     const user = userEvent.setup()
     vi.stubGlobal(
@@ -109,14 +116,57 @@ describe('DistributionPack', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 404,
-        json: async () => ({ detail: 'No approved source creative for this campaign yet.' }),
+        json: async () => ({ detail: 'No copy artefact for this campaign yet.' }),
       }),
     )
 
     render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
-    expect(await screen.findByText(/no approved source creative/i)).toBeInTheDocument()
+    expect(await screen.findByText(/no copy artefact for this campaign yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the distribution pack \(404\)$/i)).not.toBeInTheDocument()
+  })
+
+  it('says the campaign was not found, not just "(404)"', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: 'Campaign not found.' }),
+      }),
+    )
+
+    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    await user.click(screen.getByRole('button', { name: /load pack/i }))
+
+    expect(await screen.findByText(/^campaign not found\./i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the distribution pack \(404\)$/i)).not.toBeInTheDocument()
+  })
+
+  it('says the copy needs approving on a 409 — one click from resolved, not a bare status', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: 'The copy artefact must be approved before this can proceed (status: proposed).',
+        }),
+      }),
+    )
+
+    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    await user.click(screen.getByRole('button', { name: /load pack/i }))
+
+    expect(await screen.findByText(/copy artefact must be approved before this can proceed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the distribution pack \(409\)$/i)).not.toBeInTheDocument()
+    // No raw JSON — only the string `detail` field, never the object itself.
+    expect(screen.queryByText(/"detail"/)).not.toBeInTheDocument()
   })
 
   it('marks a channel_key with no taxonomy row as unrecognised rather than blank', async () => {
