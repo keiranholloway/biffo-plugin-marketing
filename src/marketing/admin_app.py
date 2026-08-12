@@ -513,6 +513,22 @@ async def _latest_approved_artefact(
     return approved[0]
 
 
+def _parse_artefact_body(raw: Any) -> dict[str, Any]:
+    """An artefact's ``body`` normalised to a dict, whether it arrived as
+    Core's persisted JSON *text* or as a dict some caller already parsed (or
+    never serialised at all, e.g. a pending-state placeholder body built and
+    read back in the same request).
+
+    This exact ternary (``json.loads(raw) if isinstance(raw, str) else (raw
+    or {})``) was duplicated near-verbatim at every artefact-reading call
+    site across the plugin — ``pack_routes.py``, ``paid_pack_routes.py``
+    (twice), ``copy_routes.py``, ``channel_plan_routes.py``, this module's
+    own ``start_positioning_route``, and ``user_app.py`` (issue #49). One
+    implementation here; every call site below imports it rather than
+    re-deriving it."""
+    return json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+
 def _require_known_kind(kind: str) -> None:
     if kind not in _PIPELINE_ARTEFACT_KINDS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown artefact kind.")
@@ -811,8 +827,7 @@ async def start_positioning_route(
             detail="The research artefact must be approved before this can proceed.",
         )
 
-    raw_body = approved_research.get("body")
-    research_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+    research_body = _parse_artefact_body(approved_research.get("body"))
 
     # The closed set of URLs this run is actually being shown: the approved
     # research's own citations (issue #22). Read HERE, at start time, and

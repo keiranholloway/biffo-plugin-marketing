@@ -94,7 +94,6 @@ someone checks on a real phone.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
@@ -262,6 +261,44 @@ async def _create_link_or_422(
     return response.json()
 
 
+def _link_sort_key(link: dict[str, Any]) -> tuple[bool, str, str]:
+    """A total order over a pack's ``links`` that does not depend on which
+    of them were already in Core and which were just minted (issue #94).
+
+    Before this, ``_ensure_links`` returned ``existing`` links (Core's own
+    list-route order, which carries no ``ORDER BY`` and is not guaranteed
+    stable) followed by whatever was minted just now (``channels`` iteration
+    order) appended after them. The two orderings agree by coincidence at
+    most once: the very first call that mints every link. Every later call
+    is all "existing" and reflects Core's order instead, which can — and in
+    the field, did — differ from the mint call's order. An operator refreshing
+    the same pack then sees the same links reshuffle for no reason, and
+    anything indexing ``links[n]`` positionally (this plugin does not, but a
+    caller reasonably could) gets a different answer each time.
+
+    Sorting the same key on every return path, regardless of whether a given
+    entry came from ``existing`` or was just minted, means the two paths
+    cannot diverge again — there is only one code path that decides order,
+    not two that happen to agree.
+
+    Organic before paid (`is_paid` ascending: `False`/`None` before `True`)
+    is the "reading order the pack otherwise implies" the issue itself names
+    — copy and creative are organic-first throughout this pack, so the links
+    list matching that is what an operator actually expects on top. Within a
+    motion, ``channel`` (a taxonomy ``channel_key``, short and stable — see
+    ``_ensure_links``'s own docstring) breaks ties alphabetically; ``variant``
+    (currently always ``None`` from this function, but not from generic CRUD
+    ``create``, which any admin can call directly) breaks any further tie so
+    the order stays fully deterministic even for two rows that otherwise
+    look identical.
+    """
+    return (
+        link.get("is_paid") is True,
+        str(link.get("channel") or ""),
+        str(link.get("variant") or ""),
+    )
+
+
 async def _ensure_links(
     campaign_id: str,
     channels: list[dict[str, Any]],
@@ -367,53 +404,57 @@ async def _ensure_links(
         for c in channels
         if _requested_key(c)[1] not in channel_motions.get(_requested_key(c)[0], set())
     ]
-    if not missing:
-        return out
+    if missing:
+        if not base_url:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No public base URL is configured for this deployment.",
+            )
+        destination = campaign.get("destination_url")
+        if not destination:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="This campaign has no destination_url, so its links would lead nowhere.",
+            )
 
-    if not base_url:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No public base URL is configured for this deployment.",
-        )
-    destination = campaign.get("destination_url")
-    if not destination:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="This campaign has no destination_url, so its links would lead nowhere.",
-        )
+        for c in missing:
+            channel_key = c["channel_key"]
+            is_paid = c.get("motion") == "paid"
+            token = mint_token()
+            # The created row itself is not needed — the token minted it from is.
+            await _create_link_or_422(
+                channel_key,
+                admin_token,
+                {
+                    "campaign_id": campaign_id,
+                    "token": token,
+                    "channel": channel_key,
+                    "variant": None,
+                    "is_paid": is_paid,
+                    "destination_url": destination_with_utms(
+                        destination,
+                        campaign_id=campaign_id,
+                        channel=channel_key,
+                        variant=None,
+                        is_paid=is_paid,
+                    ),
+                },
+            )
+            out.append(
+                {
+                    "channel": channel_key,
+                    "variant": None,
+                    "is_paid": is_paid,
+                    "url": tracked_url(base_url, token),
+                }
+            )
 
-    for c in missing:
-        channel_key = c["channel_key"]
-        is_paid = c.get("motion") == "paid"
-        token = mint_token()
-        # The created row itself is not needed — the token minted it from is.
-        await _create_link_or_422(
-            channel_key,
-            admin_token,
-            {
-                "campaign_id": campaign_id,
-                "token": token,
-                "channel": channel_key,
-                "variant": None,
-                "is_paid": is_paid,
-                "destination_url": destination_with_utms(
-                    destination,
-                    campaign_id=campaign_id,
-                    channel=channel_key,
-                    variant=None,
-                    is_paid=is_paid,
-                ),
-            },
-        )
-        out.append(
-            {
-                "channel": channel_key,
-                "variant": None,
-                "is_paid": is_paid,
-                "url": tracked_url(base_url, token),
-            }
-        )
-    return out
+    # Sorted once, on the way out, regardless of which entries came from
+    # `existing` (Core's own unordered list) and which were just minted
+    # (`channels` iteration order) — see `_link_sort_key`'s own docstring
+    # for why a single shared key is what keeps the mint call and every
+    # later fetch call in agreement (issue #94).
+    return sorted(out, key=_link_sort_key)
 
 
 @router.get("/campaigns/{campaign_id}/assets")
@@ -525,8 +566,7 @@ async def get_pack_route(
             detail="The copy artefact must be approved before this can proceed.",
         )
 
-    raw_body = approved_copy.get("body")
-    copy_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+    copy_body = admin_app._parse_artefact_body(approved_copy.get("body"))
     channels = copy_body.get("channels") or []
     try:
         pipeline.require_channel_keyed_copy(channels)

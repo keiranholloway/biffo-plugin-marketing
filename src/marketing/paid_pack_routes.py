@@ -54,7 +54,6 @@ calling the same two functions, not by re-deriving the reasoning.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, create_core_client
@@ -330,10 +329,7 @@ async def get_paid_pack_route(
             detail="The copy artefact must be approved before this can proceed.",
         )
 
-    raw_copy_body = approved_copy.get("body")
-    copy_body = (
-        json.loads(raw_copy_body) if isinstance(raw_copy_body, str) else (raw_copy_body or {})
-    )
+    copy_body = admin_app._parse_artefact_body(approved_copy.get("body"))
     channels = copy_body.get("channels") or []
     try:
         pipeline.require_channel_keyed_copy(channels)
@@ -368,12 +364,7 @@ async def get_paid_pack_route(
             detail="The positioning artefact must be approved before this can proceed.",
         )
 
-    raw_positioning_body = approved_positioning.get("body")
-    positioning_body = (
-        json.loads(raw_positioning_body)
-        if isinstance(raw_positioning_body, str)
-        else (raw_positioning_body or {})
-    )
+    positioning_body = admin_app._parse_artefact_body(approved_positioning.get("body"))
     raw_segments = positioning_body.get("segments") or []
     if not raw_segments:
         raise HTTPException(
