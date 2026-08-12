@@ -453,8 +453,23 @@ async def _store_placement_renders(
                     "is_source": False,
                 },
             )
-        except (HTTPException, BiffoAPIError) as exc:
-            detail = exc.detail
+        # Deliberately as broad as the render handler above, and for the same
+        # reason. This used to catch only `(HTTPException, BiffoAPIError)`,
+        # which does NOT cover a network-level failure: `principal_client._raw`
+        # calls `client.raw_request(...)` with no exception handling of its
+        # own, so a timeout or connection reset on the asset-row POST surfaces
+        # as `httpx.HTTPError` and escaped this handler entirely.
+        #
+        # Escaping here is far worse than the failure it reports. By this point
+        # the provider has been charged and the source row is durably stored,
+        # so a raised exception turns a fully successful, already-paid-for
+        # generation into a 5xx — and an operator reading that reasonably
+        # regenerates, charging the provider a second time. That is precisely
+        # the blind-retry-doubles-the-charge failure issue #24 exists to
+        # prevent, reintroduced through the one path the docstring above
+        # promises can never raise.
+        except Exception as exc:  # noqa: BLE001 - best-effort per placement, see docstring
+            detail = getattr(exc, "detail", exc)
             logger.warning(
                 "Could not store rendered placement %r for campaign %s: %s",
                 placement,
