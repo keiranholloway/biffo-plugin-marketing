@@ -10,6 +10,13 @@ import { listChannels, type ChannelTaxonomyEntry } from './api'
  * fallback. */
 export interface ChannelLookup {
   get(key: string): ChannelTaxonomyEntry | undefined
+  /** Every seeded/instance-added row, for a component that needs to OFFER
+   * the taxonomy rather than just resolve one key already in hand — `Mint
+   * Links`' channel picker (#84) is the first such caller. Same array
+   * identity across renders that don't change `entries` (both come from the
+   * one `useMemo` below), so a picker can depend on it without re-rendering
+   * every time its parent does. */
+  entries: ChannelTaxonomyEntry[]
   loading: boolean
 }
 
@@ -43,13 +50,18 @@ export function useChannelTaxonomy(): ChannelLookup {
     }
   }, [])
 
-  const byKey = useMemo(() => new Map((entries ?? []).map((e) => [e.key, e])), [entries])
+  // One shared `[]` for the "not loaded yet" case, not a fresh literal per
+  // render — a picker keying off `entries` (e.g. in its own `useMemo`)
+  // would otherwise see a "changed" array every render while still loading.
+  const resolved = useMemo(() => entries ?? [], [entries])
+  const byKey = useMemo(() => new Map(resolved.map((e) => [e.key, e])), [resolved])
 
   return useMemo(
     () => ({
       get: (key: string) => byKey.get(key),
+      entries: resolved,
       loading: entries === null,
     }),
-    [byKey, entries],
+    [byKey, resolved, entries],
   )
 }

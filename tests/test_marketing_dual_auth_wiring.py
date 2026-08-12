@@ -70,9 +70,18 @@ class _FakeSignedCoreClient:
                 "extra_signed_headers": extra_signed_headers,
             }
         )
-        # A generically-shaped 2xx JSON body: every route this file drives
-        # only needs SOME campaign/artefact/asset-looking dict back, not a
-        # specific one — the assertions below are about what was SENT.
+        # `mint_links` (#84) now also fetches the channel taxonomy to
+        # validate against and derive `is_paid` from — a LIST, unlike every
+        # other call this file drives, which all want a campaign/artefact/
+        # asset-looking dict. Branching on path is the minimum needed to keep
+        # that call from being handed a dict and blowing up on `for row in
+        # rows: row["key"]`; the assertions below remain about what was SENT.
+        if path.endswith("/channels"):
+            return (
+                200,
+                b'[{"key": "linkedin_organic", "motion": "organic"}]',
+                ("application/json"),
+            )
         return (
             200,
             b'{"id": "x", "destination_url": "https://tabsii.com/intake/demo"}',
@@ -106,11 +115,11 @@ def test_mint_links_forwards_the_real_admins_token_through_core(
     )()
 
     resp = TestClient(app).post(
-        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin"}]}
+        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_organic"}]}
     )
 
     assert resp.status_code == 201
-    assert len(fake_signed_client.calls) == 2  # GET campaign, POST links
+    assert len(fake_signed_client.calls) == 3  # GET campaign, GET channels, POST links
     for call in fake_signed_client.calls:
         assert call["extra_signed_headers"] == {
             principal_client.FORWARDED_USER_HEADER: _REAL_ADMIN_TOKEN
@@ -131,11 +140,14 @@ def test_mint_links_calls_the_real_internal_paths_not_the_token(
         "U", (), {"sub": "admin", "groups": ["admin"], "token": _REAL_ADMIN_TOKEN}
     )()
 
-    TestClient(app).post(f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin"}]})
+    TestClient(app).post(
+        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_organic"}]}
+    )
 
     paths = {call["path"] for call in fake_signed_client.calls}
     assert paths == {
         f"{admin_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}",
+        f"{admin_app._INTERNAL_PREFIX}/channels",
         f"{admin_app._INTERNAL_PREFIX}/links",
     }
     assert _REAL_ADMIN_TOKEN not in paths

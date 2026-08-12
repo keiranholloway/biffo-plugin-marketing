@@ -23,7 +23,7 @@ const CAMPAIGN = 'c1'
 // itself is `CampaignDetail`'s concern, not `Pipeline`'s (see
 // `CampaignDetail.test.tsx` and `ArtefactBody.test.tsx` for that). An
 // already-resolved empty lookup is enough to satisfy the required prop.
-const EMPTY_LOOKUP: ChannelLookup = { get: () => undefined, loading: false }
+const EMPTY_LOOKUP: ChannelLookup = { get: () => undefined, entries: [], loading: false }
 
 /** A `fetch` stub that answers every stage's GET as "not started yet" (404)
  * unless `artefacts` supplies a row for that kind. */

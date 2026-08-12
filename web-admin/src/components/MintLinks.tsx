@@ -1,23 +1,52 @@
 import { useState } from 'react'
 
 import { mintLinks, type MintedLink } from '../lib/api'
+import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 
 /** Mint tracked links for one campaign, and show the URLs to publish.
  *
- * The operator supplies a channel and, optionally, a variant and whether the
- * link is paid. Everything that makes the link *trackable* — the token, and the
- * destination carrying `utm_campaign` — is derived server-side and deliberately
- * not offered here: a hand-typed `utm_campaign` is precisely what this feature
- * exists to remove.
+ * The operator picks a channel from the seeded taxonomy and, optionally,
+ * types a variant. Everything that makes the link *trackable* — the token,
+ * and the destination carrying `utm_campaign` — is derived server-side and
+ * deliberately not offered here: a hand-typed `utm_campaign` is precisely
+ * what this feature exists to remove.
+ *
+ * #84: this used to be a free-text channel input, so `"totally made up
+ * channel"` minted successfully into the same `marketing_link.channel`
+ * column `pack_routes._ensure_links` fills with taxonomy keys — splitting
+ * one column into two vocabularies written by two paths. A picker makes a
+ * non-key value structurally impossible to submit here, rather than
+ * rejecting one after the fact with nothing telling the operator what the
+ * valid values are (rejecting free text alone would still be a worse form
+ * than today's, per the issue: it would turn a working form into a failing
+ * one without saying what to type instead). `channelLookup` is fetched once
+ * by the caller (`App.tsx`) via `useChannelTaxonomy` and threaded down here
+ * — the same sharing `CampaignDetail` already does for `Pipeline`/
+ * `DistributionPack` — rather than this component fetching its own copy.
+ *
+ * No "Paid placement" checkbox any more, for the same reason: motion now
+ * lives on the channel (#76 increment 2), so picking `linkedin_paid` already
+ * says the link is paid. A second, independently-set checkbox was a second
+ * answer to the same question — `admin_app.mint_links` now derives `is_paid`
+ * from the selected channel's own taxonomy row and does not accept one from
+ * the request at all, so offering the checkbox here would just be a control
+ * the server silently ignores.
  */
-export function MintLinks({ campaignId }: { campaignId: string }) {
-  const [channel, setChannel] = useState('')
+export function MintLinks({
+  campaignId,
+  channelLookup,
+}: {
+  campaignId: string
+  channelLookup: ChannelLookup
+}) {
+  const [channelKey, setChannelKey] = useState('')
   const [variant, setVariant] = useState('')
-  const [isPaid, setIsPaid] = useState(false)
   const [minting, setMinting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [minted, setMinted] = useState<MintedLink[]>([])
   const [copied, setCopied] = useState<string | null>(null)
+
+  const selected = channelLookup.get(channelKey)
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -26,13 +55,12 @@ export function MintLinks({ campaignId }: { campaignId: string }) {
     try {
       const links = await mintLinks(campaignId, [
         {
-          channel: channel.trim(),
+          channel: channelKey,
           ...(variant.trim() !== '' ? { variant: variant.trim() } : {}),
-          is_paid: isPaid,
         },
       ])
       setMinted((prev) => [...prev, ...links])
-      setChannel('')
+      setChannelKey('')
       setVariant('')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
@@ -58,12 +86,19 @@ export function MintLinks({ campaignId }: { campaignId: string }) {
     <div className="mint">
       <form onSubmit={submit} aria-label={`Mint a tracked link for ${campaignId}`}>
         <label htmlFor={`channel-${campaignId}`}>Channel</label>
-        <input
+        <select
           id={`channel-${campaignId}`}
-          value={channel}
-          onChange={(e) => setChannel(e.target.value)}
-          placeholder="linkedin"
-        />
+          value={channelKey}
+          onChange={(e) => setChannelKey(e.target.value)}
+          disabled={channelLookup.loading}
+        >
+          <option value="">{channelLookup.loading ? 'Loading channels…' : 'Select a channel'}</option>
+          {channelLookup.entries.map((entry) => (
+            <option key={entry.key} value={entry.key}>
+              {entry.label} ({entry.motion})
+            </option>
+          ))}
+        </select>
 
         <label htmlFor={`variant-${campaignId}`}>Variant (optional)</label>
         <input
@@ -73,12 +108,14 @@ export function MintLinks({ campaignId }: { campaignId: string }) {
           placeholder="a"
         />
 
-        <label className="checkbox">
-          <input type="checkbox" checked={isPaid} onChange={(e) => setIsPaid(e.target.checked)} />
-          Paid placement
-        </label>
+        {selected !== undefined && (
+          <p className="hint">
+            {selected.motion === 'paid' ? 'Paid' : 'Organic'} — set by the channel, not chosen
+            separately.
+          </p>
+        )}
 
-        <button type="submit" disabled={channel.trim() === '' || minting}>
+        <button type="submit" disabled={channelKey === '' || minting}>
           {minting ? 'Minting…' : 'Mint link'}
         </button>
       </form>
