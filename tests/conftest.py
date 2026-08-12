@@ -20,6 +20,7 @@ by `cli/src/lib/plugin-skeleton-second-occupant.test.ts`.
 """
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -60,3 +61,29 @@ def _reenable_disabled_loggers() -> None:
         obj = logging.getLogger(name)
         if isinstance(obj, logging.Logger):
             obj.disabled = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_principal_client_cache() -> Iterator[None]:
+    """Empty `principal_client`'s shared signed-client cache around every test.
+
+    That cache lives for the life of the process (issue #29 — one
+    `SignedCoreClient` per `(base_url, timeout)`, so a Core call no longer
+    re-resolves AWS credentials and rebuilds a connection pool each time),
+    while several test files monkeypatch `principal_client.SignedCoreClient`
+    with a per-test fake. Without this, the first such test's fake is cached
+    and every later test in the run keeps calling it long after `monkeypatch`
+    has restored the real name — a cross-test leak that would show up as an
+    unrelated file's test failing depending on run order.
+
+    Autouse and here rather than in one test file, because the tests that
+    populate the cache and the tests that would be poisoned by it are not the
+    same tests, and this plugin's suite also runs vendored inside an
+    instance's (see `_reenable_disabled_loggers` above for what that context
+    does to global state).
+    """
+    from marketing import principal_client
+
+    principal_client.reset_signed_clients_for_tests()
+    yield
+    principal_client.reset_signed_clients_for_tests()

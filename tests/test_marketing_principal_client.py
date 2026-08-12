@@ -14,6 +14,14 @@ encoded the way Core expects, and both wrapper shapes (`request`'s
 `SignedCoreClient.raw_request` response correctly in both directions (2xx
 and non-2xx).
 
+Since issue #29 the module also owns a *lifecycle* contract, tested in its
+own section below: one shared, principal-free `SignedCoreClient` per
+`(base_url, timeout)` rather than one per call, with the caller's identity
+moved onto each call. That is a performance change with a security failure
+mode — a client that remembered a principal would serve one admin's identity
+to the next — so the tests there assert both halves: that the client is built
+once, and that two principals still never share a forwarded token.
+
 A fake `SignedCoreClient`, not a mock — matching this repo's convention
 (`test_marketing_mint_route.py`'s `_FakeCore`, `test_marketing_image_routes.py`'s
 `_FakeCoreClient`) — standing in for the one real thing this module cannot
@@ -22,6 +30,7 @@ exercise in CI: an actual SigV4 signature over live AWS credentials.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -40,18 +49,15 @@ class _FakeSignedCoreClient:
     content_type)` — that method's own return shape, so this exercises
     exactly the contract `principal_client` is written against.
 
-    Also implements `aclose()` — `principal_client._raw` closes the
-    connection pool `SignedCoreClient` opens per instance via a plain
-    try/finally (not `async with`; see that function's own docstring for
-    why) — and records whether it was reached, so a test can catch a future
-    regression back to "build one and never close it" the same way this
-    fake caught it once.
+    Counts its own constructions (`init_kwargs`, appended by the fixture's
+    factory) as well as its calls, because since issue #29 the number of
+    clients built is itself part of this module's contract: one per
+    `(base_url, timeout)` for the life of the process, not one per call.
     """
 
     def __init__(self) -> None:
         self.init_kwargs: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
-        self.closed = False
         self._status = 200
         self._body: bytes = b"{}"
         self._content_type = "application/json"
@@ -78,19 +84,23 @@ class _FakeSignedCoreClient:
         return self._status, self._body, self._content_type
 
     async def aclose(self) -> None:
-        self.closed = True
+        return None
 
 
 @pytest.fixture
 def fake_client(monkeypatch: pytest.MonkeyPatch) -> _FakeSignedCoreClient:
     """Patches `principal_client.SignedCoreClient` (the name this module
-    imports and calls) so every `SignedCoreClient(**kwargs)` this module
-    constructs returns the SAME fake instance — `_raw` builds a fresh client
-    per call, matching `admin_app._core`'s pre-fix per-call
-    `httpx.AsyncClient`, and every test below makes exactly one call."""
+    imports and calls) so every client this module builds is the SAME fake
+    instance, and each construction is recorded on it.
+
+    The module caches one real client per `(base_url, timeout)` for the life
+    of the process, so this fixture would otherwise leak its fake into later
+    tests; `conftest.py`'s autouse `_reset_principal_client_cache` empties
+    that cache around every test, which is also what lets each test below
+    assert on `init_kwargs` from a known-empty starting point."""
     client = _FakeSignedCoreClient()
 
-    def _build(token: str, **kwargs: Any) -> _FakeSignedCoreClient:
+    def _build(**kwargs: Any) -> _FakeSignedCoreClient:
         client.init_kwargs.append(kwargs)
         return client
 
@@ -215,22 +225,176 @@ async def test_request_omits_timeout_when_not_given(fake_client) -> None:
     assert "timeout" not in fake_client.init_kwargs[0]
 
 
-async def test_request_closes_the_signed_client_after_the_call(fake_client) -> None:
-    """A `SignedCoreClient` owns its own `httpx.AsyncClient`/connection pool
-    (`BiffoAPIClient.__init__` builds one whenever `client=` isn't passed);
-    building a fresh one per Core call without closing it leaks one pool per
-    call. Regression guard for exactly that: a version of `_raw` without the
-    `async with` passes every other test in this file and still leaks."""
-    assert fake_client.closed is False
+# ── The shared client: built once, never principal-specific (issue #29) ────
 
-    await principal_client.request(
-        "GET",
-        "/api/v1/internal/plugins/marketing/artefacts",
-        _TOKEN,
-        base_url="https://core.invalid",
+
+async def test_repeated_calls_reuse_one_signed_client(fake_client) -> None:
+    """Each `SignedCoreClient` resolves AWS credentials once and owns one
+    `httpx.AsyncClient` pool, so a per-call build threw both away every call —
+    `mint_links` with a 50-link batch paid 51 credential resolutions for one
+    HTTP request (issue #29)."""
+    for _ in range(5):
+        await principal_client.request(
+            "GET",
+            "/api/v1/internal/plugins/marketing/artefacts",
+            _TOKEN,
+            base_url="https://core.invalid",
+        )
+
+    assert len(fake_client.calls) == 5
+    assert len(fake_client.init_kwargs) == 1
+
+
+async def test_concurrent_calls_build_one_client(fake_client) -> None:
+    """The fan-out case, which is the one that actually happens: `_raw`'s
+    cache lookup and its cache write must not be separated by an `await`, or
+    N tasks each find an empty cache and each build a client — the exact
+    shape of bug a serial-only test passes over. Ten concurrent calls, one
+    client."""
+    await asyncio.gather(
+        *(
+            principal_client.request(
+                "POST",
+                f"/api/v1/internal/plugins/marketing/links/{i}",
+                _TOKEN,
+                base_url="https://core.invalid",
+                json={"i": i},
+            )
+            for i in range(10)
+        )
     )
 
-    assert fake_client.closed is True
+    assert len(fake_client.calls) == 10
+    assert len(fake_client.init_kwargs) == 1
+
+
+async def test_two_principals_never_share_a_forwarded_token(fake_client) -> None:
+    """The reason the shared client is a plain `SignedCoreClient` and not the
+    SDK's `PrincipalCoreClient` (module docstring): that class binds the user
+    token to the CLIENT and its `_sign` overrides the per-call header with
+    it, so caching one would sign the second admin's call with the first
+    admin's token — one tenant acting as another. Here the identity rides
+    each call, so a reused client cannot carry it across."""
+    first, second = "admins-own-jwt", "a-different-admins-jwt"  # noqa: S105
+
+    await principal_client.request(
+        "GET", "/api/v1/internal/plugins/marketing/campaigns/a", first, base_url="https://c.invalid"
+    )
+    await principal_client.request(
+        "GET",
+        "/api/v1/internal/plugins/marketing/campaigns/b",
+        second,
+        base_url="https://c.invalid",
+    )
+
+    # Same client (the point of the cache), different forwarded identity.
+    assert len(fake_client.init_kwargs) == 1
+    assert fake_client.calls[0]["extra_signed_headers"] == {
+        principal_client.FORWARDED_USER_HEADER: first
+    }
+    assert fake_client.calls[1]["extra_signed_headers"] == {
+        principal_client.FORWARDED_USER_HEADER: second
+    }
+
+
+async def test_a_different_base_url_or_timeout_gets_its_own_client(fake_client) -> None:
+    """`(base_url, timeout)` is the whole key, and both halves count: a client
+    is bound to where it points and how long it waits, so a call with
+    different values must not be answered by the cached one."""
+    await principal_client.request(
+        "GET", "/api/v1/internal/plugins/marketing/x", _TOKEN, base_url="https://one.invalid"
+    )
+    await principal_client.request(
+        "GET", "/api/v1/internal/plugins/marketing/x", _TOKEN, base_url="https://two.invalid"
+    )
+    await principal_client.request(
+        "GET",
+        "/api/v1/internal/plugins/marketing/x",
+        _TOKEN,
+        base_url="https://two.invalid",
+        timeout=5.0,
+    )
+
+    assert [kw.get("base_url") for kw in fake_client.init_kwargs] == [
+        "https://one.invalid",
+        "https://two.invalid",
+        "https://two.invalid",
+    ]
+    assert fake_client.init_kwargs[2]["timeout"] == 5.0
+
+
+def test_a_cached_client_is_not_reused_on_a_new_event_loop(fake_client) -> None:
+    """`httpx` pools connections on the loop that opened them, so reusing a
+    cached client on a different loop fails with "Event loop is closed" —
+    what `main.py`'s module-level `_loop` exists to avoid, and what its
+    `if _loop.is_closed()` path would otherwise walk into. The cache entry
+    records its loop and is rebuilt when the running loop differs."""
+
+    async def _call() -> None:
+        await principal_client.request(
+            "GET", "/api/v1/internal/plugins/marketing/x", _TOKEN, base_url="https://core.invalid"
+        )
+
+    asyncio.run(_call())
+    # A second, independent loop — as a warm Lambda invocation gets after
+    # `main.py` replaces a closed one.
+    asyncio.run(_call())
+
+    assert len(fake_client.init_kwargs) == 2
+
+
+def test_the_sdks_principal_client_would_override_a_per_call_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the SDK behaviour this module's design rests on — the reason the
+    cached client is a plain `SignedCoreClient` and not the SDK's
+    `PrincipalCoreClient` (module docstring).
+
+    `PrincipalCoreClient._sign` merges the per-call `extra` first and then
+    assigns its own bound `_user_token` over the top, so a *cached* instance
+    of it would sign every later admin's call with the first admin's token no
+    matter what the call site passed. Asserted against the real SDK class (the
+    base `_sign` is stubbed only to keep botocore and AWS credentials out of
+    it), so an SDK release that changed this precedence fails here rather than
+    quietly making the docstring above wrong."""
+    from biffo_plugin_sdk import PrincipalCoreClient as SdkPrincipalCoreClient
+    from biffo_plugin_sdk import SignedCoreClient as SdkSignedCoreClient
+
+    monkeypatch.setattr(
+        SdkSignedCoreClient,
+        "_sign",
+        lambda self, method, url, body, extra=None: dict(extra or {}),
+    )
+    # `client=` supplied so the SDK does not open a real `httpx.AsyncClient`
+    # pool for a test that never sends anything; nothing here touches it.
+    client = SdkPrincipalCoreClient(
+        "first-admins-jwt", base_url="https://core.invalid", client=object()
+    )
+
+    headers = client._sign(  # noqa: SLF001 — the precedence IS the thing under test.
+        "GET", "https://core.invalid/x", None, {principal_client.FORWARDED_USER_HEADER: _TOKEN}
+    )
+
+    assert headers[principal_client.FORWARDED_USER_HEADER] == "first-admins-jwt"
+
+
+def test_reset_signed_clients_for_tests_empties_the_cache(fake_client) -> None:
+    """The seam `conftest.py` uses so a per-test fake cannot outlive its test
+    (the module's own docstring for `reset_signed_clients_for_tests`).
+    Synchronous, so a `TestClient`-driven test can call it too."""
+
+    async def _call() -> None:
+        await principal_client.request(
+            "GET", "/api/v1/internal/plugins/marketing/x", _TOKEN, base_url="https://core.invalid"
+        )
+
+    asyncio.run(_call())
+    assert len(fake_client.init_kwargs) == 1
+
+    principal_client.reset_signed_clients_for_tests()
+    asyncio.run(_call())
+
+    assert len(fake_client.init_kwargs) == 2
 
 
 async def test_request_returns_a_real_httpx_response_on_success(fake_client) -> None:
