@@ -906,8 +906,48 @@ def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | Non
     failing on it would strand a campaign on a condition re-running cannot
     fix — see this module's docstring on why the citation guards fail closed
     and this one does not.
+
+    "Without failing the run over it" is load-bearing on the failure paths
+    this is also called from (issue #101 follow-up): a report that raises
+    while reporting on a failure replaces a diagnosable error with a spurious
+    one, so every step here is wrapped. Nothing this function can do is worth
+    more than the exception the caller is already carrying.
     """
-    profile = evidence_profile(views)
+    try:
+        profile = evidence_profile(views)
+    except Exception:  # pragma: no cover - defensive; a report must not raise
+        logger.warning(
+            "research retrieval breadth: not measured — the profile could not be computed",
+            exc_info=True,
+            extra={"causation_id": chain_id},
+        )
+        return
+
+    if profile.runs_measured == 0:
+        # No view carried `annotations` at all. That is "we do not know what
+        # was retrieved", not "nothing was retrieved" — the same tri-state
+        # `evidence_profile` keeps, and worth keeping here because this is the
+        # branch the all-runs-failed path usually lands on. Emitting
+        # `0 distinct URLs across 0 grounded run(s)` would read as a measured,
+        # catastrophic zero and send an operator hunting a retrieval outage
+        # that never happened. The counts are `None`, not `0`, for the same
+        # reason: a filter on this field must not be able to average unknowns
+        # in as zeroes.
+        logger.info(
+            "research retrieval breadth: not measured — no research run reported "
+            "annotations (%d run view(s) seen)",
+            len(views),
+            extra={
+                "causation_id": chain_id,
+                "research_runs_measured": 0,
+                "research_distinct_urls": None,
+                "research_shared_urls": None,
+                "research_deep_pages": None,
+                "research_site_roots": None,
+            },
+        )
+        return
+
     logger.info(
         "research retrieval breadth: %d distinct URLs across %d grounded run(s) "
         "(%d shared by more than one, %d deep pages, %d site roots)",
@@ -925,6 +965,31 @@ def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | Non
             "research_site_roots": profile.site_roots,
         },
     )
+
+
+async def _log_evidence_profile_for(
+    gateway: AgentGateway, *, chain_id: str, research_run_ids: Collection[str]
+) -> None:
+    """Fetch the research run views purely to report breadth, and swallow
+    anything that goes wrong fetching them.
+
+    Only for the paths that are already raising. On the success path the views
+    are fetched anyway (the citation guard needs them) and a gateway error
+    there is a real error worth propagating; here the caller is about to raise
+    a `RunNotSucceededError` that describes the actual problem, and losing it
+    to a gateway hiccup while gathering a *log line* would be a strictly worse
+    outcome than having no log line.
+    """
+    try:
+        views = [await gateway.get_agent_run(run_id=rid) for rid in research_run_ids]
+    except Exception:  # pragma: no cover - defensive; a report must not raise
+        logger.warning(
+            "research retrieval breadth: not measured — the research run views could not be read",
+            exc_info=True,
+            extra={"causation_id": chain_id},
+        )
+        return
+    _log_evidence_profile(chain_id=chain_id, views=views)
 
 
 async def advance_research(
@@ -959,6 +1024,15 @@ async def advance_research(
     chain retrieved, how many both angles were handed, and how many were bare
     home pages. That is a report, not a gate: it never changes what this
     function returns or raises.
+
+    It is emitted on **every terminal path**, not just the successful one: the
+    synthesis run having failed, and every research run having failed, are the
+    two states in which an operator most needs it. "The research was thin" and
+    "the synthesis failed" produce the same dead artefact, and this line is the
+    only thing that separates them — so logging it only on success withheld it
+    exactly when it was being asked for. It is *not* emitted while the chain is
+    still in flight, because this function is polled and the line would then be
+    a stream of partial snapshots rather than one measurement per chain.
     """
     del synthesis_model  # the engine chooses the synthesis run's model, not us
 
@@ -969,6 +1043,9 @@ async def advance_research(
         if not synthesis_run.is_terminal:
             return None  # synthesis is running; nothing to do yet
         if not synthesis_run.succeeded:
+            await _log_evidence_profile_for(
+                gateway, chain_id=chain_id, research_run_ids=research_run_ids
+            )
             raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
         research_views = [await gateway.get_agent_run(run_id=rid) for rid in research_run_ids]
         _log_evidence_profile(chain_id=chain_id, views=research_views)
@@ -988,6 +1065,11 @@ async def advance_research(
         # react to the completion event rather than racing it to a false
         # failure.
         return None
+    # Terminal, and none succeeded. The views are already in hand, so report
+    # breadth off them directly rather than re-fetching: a failed run can still
+    # have retrieved before it died, and "what did retrieval return?" is the
+    # whole question on this path.
+    _log_evidence_profile(chain_id=chain_id, views=views)
     raise RunNotSucceededError(
         "Every research agent failed to return usable findings. Nothing was found "
         "to synthesise — try running research again."
