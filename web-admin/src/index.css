@@ -17,7 +17,12 @@
 
   --text: #1a1a1a;
   --text-secondary: #55555f;
-  --text-muted: #767680;
+  /* #767680 measured at 4.31:1 on --bg / 4.49:1 on --surface — under WCAG
+     AA's 4.5:1 for normal text (every consumer here is 0.7–0.85rem, never
+     "large text"), regressing `.empty`/`.hint`/`.platform`/`.channel-loading`
+     etc. below what their pre-token colours (#666, 5.50:1) passed at.
+     #64646e clears 5.6:1/5.85:1 in the same two contexts. */
+  --text-muted: #64646e;
 
   --accent: #2451c4;
   --accent-hover: #1c3f9e;
@@ -39,6 +44,13 @@
   --slate-text: #454b57;
   --neutral-bg: #ececec;
   --neutral-text: #52525a;
+  /* `.badge-unknown` only — a distinct amber from `.badge-proposed`'s
+     `--warning-*`, so an unrecognised channel and an awaiting-review stage
+     never read as the same colour. Kept as its own token pair rather than
+     inlined hex so it follows the same light/dark pattern as every other
+     colour in this file (see `.badge-unknown` below). */
+  --warning-alt-bg: #fbe0c2;
+  --warning-alt-text: #8a4b00;
 
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -85,6 +97,8 @@
     --slate-text: #c2c5cc;
     --neutral-bg: #2a2c31;
     --neutral-text: #c2c5cc;
+    --warning-alt-bg: #3d2a0c;
+    --warning-alt-text: #f0b46b;
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -595,7 +609,13 @@ details.mint-toggle[open] > .mint {
   color: var(--neutral-text);
 }
 
-/* Pipeline-stage artefact status (`PipelineStage.tsx`'s `STATUS_LABEL`). */
+/* Pipeline-stage artefact status (`PipelineStage.tsx`'s `STATUS_LABEL`).
+ * Deliberately `pending` → info/blue, `proposed` → warning/amber — this is
+ * not a mismatched pairing. `proposed` is "Awaiting review": the state that
+ * needs a human decision, which is exactly the meaning `--warning-*` (also
+ * `.badge-unknown`'s family) carries everywhere else on this page. `pending`
+ * is "Running…": an agent job in flight, nobody's action needed yet, which
+ * is what `--info-*` signals — the same blue `.badge-pending` alone uses. */
 .badge-pending {
   background: var(--info-bg);
   color: var(--info-text);
@@ -624,15 +644,8 @@ details.mint-toggle[open] > .mint {
    `.badge-proposed`'s, not red: the pack still assembles, so it is a warning
    rather than a rejection. */
 .badge-unknown {
-  background: #fbe0c2;
-  color: #8a4b00;
-}
-
-@media (prefers-color-scheme: dark) {
-  .badge-unknown {
-    background: #3d2a0c;
-    color: #f0b46b;
-  }
+  background: var(--warning-alt-bg);
+  color: var(--warning-alt-text);
 }
 
 .channel-name {

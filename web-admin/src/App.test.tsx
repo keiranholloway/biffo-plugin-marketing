@@ -109,3 +109,36 @@ describe('opening a campaign studio', () => {
     expect(screen.getByRole('heading', { name: 'Campaign studio' })).toBeInTheDocument()
   })
 })
+
+describe('minting a tracked link from the campaign list', () => {
+  it('keeps the mint form collapsed behind a disclosure, and reveals it on click', async () => {
+    // A row used to embed the full channel picker inline, which is a per-row
+    // ACTION masquerading as table content. It is now a `<details>`
+    // disclosure — closed by default so the row stays one line, opened on
+    // demand. Reverting to always-inline would still pass every other test
+    // in this file, since none of them assert on collapsed/expanded state.
+    const fetchMock = vi.fn((url: string) => {
+      if (typeof url === 'string' && url.endsWith('/channels')) {
+        return Promise.resolve({ ok: true, json: async () => [] })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [
+          { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Spring demo push')
+
+    expect(screen.getByLabelText('Channel')).not.toBeVisible()
+
+    // Selector-scoped: "Mint link" is also the (currently hidden) submit
+    // button's own text, so an unscoped `getByText` matches both.
+    await user.click(screen.getByText('Mint link', { selector: 'summary' }))
+    expect(screen.getByLabelText('Channel')).toBeVisible()
+  })
+})

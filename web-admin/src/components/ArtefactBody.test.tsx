@@ -68,6 +68,43 @@ describe('ResearchArtefact', () => {
     expect(screen.getByText('[1]')).toBeInTheDocument()
   })
 
+  it('splits the summary into paragraphs on its own blank-line breaks, bolding only the first (claim) paragraph', () => {
+    // `ResearchSynthesis.summary` is already "reconciled into a few
+    // paragraphs" (its own field description) — this is the actual new
+    // behaviour the paragraph split adds. The other summary in this file is
+    // a single sentence with no blank line, which only exercises the
+    // length-1 fallback and would pass identically if this split were
+    // deleted and `body.summary` rendered as one `<p>` again.
+    const { container } = render(
+      <ResearchArtefact
+        body={{
+          summary:
+            'Owners want faster onboarding than competitors offer.\n\nThree of five findings independently cite onboarding time as the primary friction point.',
+          findings: [],
+        }}
+      />,
+    )
+    const claim = screen.getByText('Owners want faster onboarding than competitors offer.')
+    const elaboration = screen.getByText(
+      'Three of five findings independently cite onboarding time as the primary friction point.',
+    )
+    // Two distinct paragraph elements, not one merged block — a single-<p>
+    // render would fail here because both sentences would be one text node
+    // and neither `getByText` call above would match on its own.
+    expect(claim.tagName).toBe('P')
+    expect(elaboration.tagName).toBe('P')
+    // Scoped to the summary's own classes, not `.artefact-body > p`
+    // generally — with no findings, `SourceList`'s own zero-citation `<p
+    // className="no-sources">` is also a direct child and would inflate a
+    // broader count.
+    expect(container.querySelectorAll('.summary, .summary-elaboration')).toHaveLength(2)
+    // Only the claim (first paragraph) keeps `.summary`'s bold weight; the
+    // elaboration is regular weight via `.summary-elaboration`.
+    expect(claim).toHaveClass('summary')
+    expect(elaboration).toHaveClass('summary-elaboration')
+    expect(elaboration).not.toHaveClass('summary')
+  })
+
   it('prints a source shared by several findings exactly once, not once per finding (#93 follow-up)', () => {
     // Live evidence this regresses against: a real research run had
     // https://gorilladash.com/ cited by 4 of 5 findings, each printing the
