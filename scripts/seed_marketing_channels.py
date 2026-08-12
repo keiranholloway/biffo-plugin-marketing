@@ -394,6 +394,56 @@ def _request(method: str, url: str, token: str, body: dict | None = None) -> Any
         return json.loads(resp.read() or b"null")
 
 
+#: Fields a later release may add to a default channel, which an already-seeded
+#: instance would otherwise never receive. `publish_url` (#103b) is the first:
+#: it was added to `CHANNELS` after every existing instance had already seeded
+#: its taxonomy, so on those instances the column existed, held NULL on all 32
+#: rows, and the feature that reads it shipped dead.
+_BACKFILLABLE_FIELDS = ("publish_url",)
+
+
+def _backfill_null_fields(url: str, token: str, by_key: dict[str, dict]) -> int:
+    """Fill a default channel's field that is NULL here but set in `CHANNELS`.
+
+    **Strictly fill-if-null, never overwrite.** The module docstring's rule —
+    this script never clobbers an instance's own value — is the reason the
+    seed is insert-only, and it still holds: a row whose `publish_url` an
+    operator has set, or deliberately cleared to something non-NULL, is left
+    exactly as it is. Only a field that has never held a value is written.
+
+    Without this, adding a field to `CHANNELS` reaches new installs only. Every
+    instance that had already seeded its taxonomy — which is every instance
+    that has ever run a channel plan — keeps NULL for ever, and the feature
+    reading that field is silently dead there while its code, its tests and its
+    UI all ship and pass.
+
+    A key absent from `CHANNELS` (an instance-added channel) is never touched:
+    this only ever iterates the defaults.
+    """
+    filled = 0
+    for channel in CHANNELS:
+        row = by_key.get(channel["key"])
+        if row is None:
+            continue
+        patch = {
+            field: channel[field]
+            for field in _BACKFILLABLE_FIELDS
+            if channel.get(field) is not None and row.get(field) is None
+        }
+        if not patch:
+            continue
+        try:
+            _request("PATCH", f"{url}/{row['id']}", token, patch)
+        except urllib.error.HTTPError as exc:
+            print(
+                f"Could not backfill {channel['key']}: {exc.code} {exc.reason}",
+                file=sys.stderr,
+            )
+            continue
+        filled += len(patch)
+    return filled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="print, change nothing")
@@ -418,10 +468,10 @@ def main() -> int:
 
     # Idempotent by key, and never touches a row it did not just create — see
     # the module docstring's "never clobbers an instance's own additions".
-    have = {row.get("key") for row in existing}
+    by_key = {row.get("key"): row for row in existing}
     created = 0
     for channel in CHANNELS:
-        if channel["key"] in have:
+        if channel["key"] in by_key:
             continue
         try:
             _request("POST", url, token, channel)
@@ -430,8 +480,10 @@ def main() -> int:
             return 1
         created += 1
 
+    filled = _backfill_null_fields(url, token, by_key)
+
     skipped = len(CHANNELS) - created
-    print(f"Created {created} channel(s); {skipped} already present.")
+    print(f"Created {created} channel(s); {skipped} already present; {filled} field(s) backfilled.")
     return 0
 
 
