@@ -481,7 +481,11 @@ Turn the research into:
 
 Every segment, pillar and CTA must carry `sources`: copy the `url` of each
 relevant `Source` from the research findings you were given, exactly as
-written — never invent one, alter one, or cite one you were not shown. For
+written — never invent one, alter one, or cite one you were not shown. This
+is checked mechanically against the research you were given: a `url` that
+does not appear in it is rejected and the whole artefact fails with it, so a
+plausible-looking source you did not read is worse than a claim you leave
+out. For
 `note`, do NOT paste the research finding's note verbatim: your segment,
 pillar or CTA already has its own `description`/`rationale` explaining why it
 follows from the research, so a `note` that repeats that finding's note word
@@ -538,7 +542,10 @@ anyone researched it, so generic channel wisdom is not an acceptable
 rationale.
 
 Every recommendation must carry `sources`: copy the `url` of each relevant
-`Source` from the positioning you were given, exactly as written. For `note`,
+`Source` from the positioning you were given, exactly as written. This is
+checked mechanically against that positioning, exactly as `channel_key` is
+checked against the taxonomy: a `url` that does not appear in it is rejected
+and the whole plan fails with it. For `note`,
 do not paste the positioning item's note verbatim — your `rationale` already
 says why this channel follows from the evidence, so repeat only what a
 `note` genuinely adds beyond that, or leave it empty. Never invent a source,
@@ -586,7 +593,9 @@ only what is specific to this piece of copy beyond that, or leave it empty.
 Never invent a source, and never produce copy for a channel that cites
 nothing: if the positioning does not support what you would write, do not
 write it — omit that channel's copy rather than filling it with something
-ungrounded.
+ungrounded. This is checked mechanically against the positioning and channel
+plan you were given: a `url` that appears in neither is rejected and the
+whole copy set fails with it.
 
 {_UNTRUSTED_INPUT_RULE}
 Return your answer by calling the `{COPY_TOOL_NAME}` tool exactly once. Do

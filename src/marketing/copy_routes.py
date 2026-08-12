@@ -115,6 +115,21 @@ async def start_copy_route(
     except pipeline.StaleChannelPlanError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
+    # The closed set of URLs this run is being shown (issue #22). Copy is
+    # started against TWO approved artefacts, so its legitimate source set is
+    # the union of both their citations — the plan's are a subset of the
+    # positioning's in practice, but only because this same check holds one
+    # stage up, which is not something this stage should assume. Read at start
+    # time and stashed below for the same reason `channel_plan_channels` is.
+    allowed_source_urls = list(
+        dict.fromkeys(
+            [
+                *pipeline.citation_source_urls(approved_positioning.get("citations")),
+                *pipeline.citation_source_urls(approved_channel_plan.get("citations")),
+            ]
+        )
+    )
+
     causation_id, run_id = await pipeline.start_copy(
         gateway,
         positioning_body=_body(approved_positioning),
@@ -133,7 +148,12 @@ async def start_copy_route(
             "agent_run_id": run_id,
             # Pending-state payload, overwritten with the real result once
             # proposed — same pattern as `channel_plan_routes.py`'s own.
-            "body": json.dumps({"channel_plan_channels": channel_plan_channels}),
+            "body": json.dumps(
+                {
+                    "channel_plan_channels": channel_plan_channels,
+                    "allowed_source_urls": allowed_source_urls,
+                }
+            ),
         },
     )
     created.raise_for_status()
