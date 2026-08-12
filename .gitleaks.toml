@@ -1,0 +1,38 @@
+title = "Biffo Plugin Gitleaks Configuration"
+
+# Mirrors biffo-template's .gitleaks.toml `biffo-aws-account-id` rule
+# verbatim (see /home/keiran/code/biffo-template/.gitleaks.toml). Without it,
+# a bare 12-digit fixture value passes this repo's own Secret Scan and only
+# fails one repo and one CI cycle downstream, once vendored into an instance
+# whose gitleaks config does have this rule (#19). A plugin repo's gates
+# should be a superset of what its vendored copy will face downstream.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "biffo-aws-account-id"
+description = "AWS Account ID — should only appear in .tfvars.example or biffo.config.json placeholders"
+regex = '''\b\d{12}\b'''
+entropy = 0
+[rules.allowlist]
+regexes = [
+  "\\{\\{AWS_ACCOUNT_ID\\}\\}",  # placeholder in template files
+  "123456789012",                  # canonical example account ID used in tests
+  "999999999999",                  # canonical wrong-account ID used in error-path tests
+]
+# security-secrets' history scan runs `--full-history HEAD` (see ci.yml), so
+# this rule reaches every commit reachable from dev, not only this branch's
+# diff. #14 already fixed the *current* fixture values (the all-digit UUID
+# suffixes this rule exists to catch, e.g. b3f1c0de-...-000000000001), but the
+# pre-fix values are permanently part of dev's merged history and this rule
+# would otherwise flag them retroactively on every PR from now on — dev is
+# protected and its history is not ours to rewrite. Allowlisted by commit,
+# not by value or path, so the rule stays fully live against any NEW bare
+# 12-digit number introduced anywhere in the repo going forward — only these
+# three already-merged, already-superseded commits are exempted.
+commits = [
+  "bfb5dc5e075cc740dfaed146aa53aa1fca4dab45", # feat(marketing): mint tracked links for a campaign (#13)
+  "86f57b34c7ada4b7f84276148722602b29e8e57b", # feat(marketing): research + positioning agents, citation-enforced (#18)
+  "d2ddeef824268a5ec6464f5019b71735fd6d249c", # feat(marketing): still-image generation behind a provider port (#20)
+]

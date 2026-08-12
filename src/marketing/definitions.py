@@ -609,22 +609,33 @@ RESEARCH_INSTRUCTIONS: dict[str, str] = {
     RESEARCH_COMPETITIVE_AGENT_NAME: COMPETITIVE_RESEARCH_INSTRUCTIONS,
 }
 
-#: Research requires OpenRouter's ``:online`` suffix (live web results attached
-#: to the turn) for the same reason idea-scout's does — the search capability
-#: travels with the model id, so it cannot be silently half-configured by a
-#: missing Brave key. **Use the canonical dotted slug**, not a hyphenated
-#: alias — see idea-scout's ``DEFAULT_RESEARCH_MODEL``/``DEFAULT_SYNTHESIS_MODEL``
-#: docstring for why (an unlisted alias is accepted today but is undocumented
-#: behaviour, not a documented guarantee).
-DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
+#: Every stage runs on the Claude 5 family (issue #62). The tier is chosen per
+#: stage rather than uniformly: research is the fan-out, reading-heavy leg and
+#: runs on the Sonnet tier; the four stages that turn evidence into artefacts an
+#: operator publishes run on Opus, because their failure mode is a
+#: confident-sounding fabrication rather than a visible error.
+#:
+#: **Use the canonical slug**, not an unlisted alias — see idea-scout's
+#: ``DEFAULT_RESEARCH_MODEL``/``DEFAULT_SYNTHESIS_MODEL`` docstring for why (an
+#: unlisted alias is accepted today but is undocumented behaviour, not a
+#: documented guarantee). The Claude 5 ids carry no minor version, so there is
+#: no dotted/hyphenated choice to get wrong the way ``claude-opus-4.8`` had.
+#:
+#: Research also requires OpenRouter's ``:online`` suffix (live web results
+#: attached to the turn) for the same reason idea-scout's does — the search
+#: capability travels with the model id, so it cannot be silently
+#: half-configured by a missing Brave key. Sonnet 5 keeps `:online`; the suffix
+#: is a routing directive OpenRouter applies to any supported chat model, not a
+#: per-model capability that a tier change can drop.
+DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-5:online"
 #: Neither synthesis, positioning nor channel planning searches — all three
 #: reason over what they are given — so none of them needs `:online`.
-DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-4.8"
-DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-4.8"
-DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-4.8"
+DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-5"
+DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-5"
+DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-5"
 #: Copy reasons over what it is given, same as positioning and channel
 #: planning — no `:online` needed.
-DEFAULT_COPY_MODEL = "anthropic/claude-opus-4.8"
+DEFAULT_COPY_MODEL = "anthropic/claude-opus-5"
 
 # Matches idea-scout's research budget: enough turns to search several times
 # and still answer. Every turn has an invoice attached and this plugin fans out
