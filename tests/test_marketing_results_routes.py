@@ -11,6 +11,13 @@ Also covers issue #31's leads-source contract: the instance configures
 into `leads`/`conversions`/`cost`. `_FakeCore` answers that call too, at a
 fixed fake URL, so these tests exercise the real query-building and
 response-parsing code rather than mocking `_fetch_leads_source` itself.
+
+Issue #99 corrected #31's contract: "unknown campaign ids are omitted" is
+withdrawn, replaced by "the source MUST return an entry for every requested
+campaign_id". A requested id absent from the source's response is now
+evidence the source did not conform, handled as a defensive fallback only —
+see `test_leads_source_omitting_a_requested_campaign_degrades_without_fabricating_a_zero`
+and `test_leads_source_reports_a_real_zero_for_a_campaign_with_no_leads_yet`.
 """
 
 from __future__ import annotations
@@ -247,23 +254,63 @@ def test_leads_source_unmeasurable_metric_preserves_the_upstream_reason(ctx, mon
     assert campaign["cost"]["reason"] == "no spend recorded for this campaign"
 
 
-def test_leads_source_unknown_campaign_id_is_unmeasurable_not_an_error(ctx, monkeypatch) -> None:
-    """A campaign the leads source has never heard of (never ran anywhere it
-    tracks) must render as unmeasurable, not fail the whole request."""
+def test_leads_source_omitting_a_requested_campaign_degrades_without_fabricating_a_zero(
+    ctx, monkeypatch
+) -> None:
+    """Issue #99's corrected contract: the source MUST return an entry for
+    every requested campaign_id, so an id genuinely absent from its response
+    means the source did not conform — not "unknown campaign" (that rule was
+    withdrawn; see the module docstring). This is now purely a defensive
+    fallback: the plugin cannot tell a broken source from a real zero it
+    dropped, so it must degrade to unmeasurable rather than guess `0`."""
     monkeypatch.setenv(results_routes._LEADS_SOURCE_URL_ENV, _LEADS_URL)
     client, core = ctx
-    core.campaigns = [_campaign(_CAMPAIGN_A, "Never ran anywhere tracked")]
-    core.leads_response = {"campaigns": []}  # source answered; just doesn't know this campaign
+    core.campaigns = [_campaign(_CAMPAIGN_A, "Omitted by a non-conforming source")]
+    core.leads_response = {"campaigns": []}  # source answered but omitted a requested id
 
     resp = client.get("/results")
     assert resp.status_code == 200
     campaign = resp.json()["campaigns"][0]
     assert campaign["leads"]["measurable"] is False
-    assert (
-        campaign["leads"]["reason"] == "the configured leads source has no data for this campaign"
+    assert campaign["leads"]["value"] is None, "never fabricate a zero for an omitted campaign"
+    assert campaign["leads"]["reason"] == (
+        "the configured leads source did not return an entry for this campaign, "
+        "though the contract requires one for every requested campaign_id"
     )
     assert campaign["conversions"]["measurable"] is False
     assert campaign["cost"]["measurable"] is False
+
+
+def test_leads_source_reports_a_real_zero_for_a_campaign_with_no_leads_yet(
+    ctx, monkeypatch
+) -> None:
+    """The case issue #99 exists to make reachable: a campaign that has been
+    clicked but has produced no leads yet — the single most common campaign
+    state — must render as a real, verified zero, not unmeasurable. Distinct
+    from `test_leads_source_reports_a_real_zero_distinguishable_from_unmeasurable`,
+    which proves the shape survives parsing; this proves the specific
+    scenario #99 reported (an entry present with a zero value) is reachable
+    at all now that the source is required to include every requested id."""
+    monkeypatch.setenv(results_routes._LEADS_SOURCE_URL_ENV, _LEADS_URL)
+    client, core = ctx
+    core.campaigns = [_campaign(_CAMPAIGN_A, "Published and clicked, zero leads so far")]
+    core.links = [_link("link-1", _CAMPAIGN_A, is_paid=True)]
+    core.clicks = [_click("c1", _CAMPAIGN_A, "link-1"), _click("c2", _CAMPAIGN_A, "link-1")]
+    core.leads_response = {
+        "campaigns": [
+            {
+                "campaign_id": _CAMPAIGN_A,
+                "leads": {"value": 0, "measurable": True},
+                "conversions": {"value": 0, "measurable": True},
+                "cost": {"value": 0, "measurable": True},
+            }
+        ]
+    }
+
+    campaign = client.get("/results").json()["campaigns"][0]
+    assert campaign["leads"]["value"] == 0
+    assert campaign["leads"]["measurable"] is True
+    assert campaign["leads"]["denominator"] == 2
 
 
 @pytest.mark.parametrize(
