@@ -428,7 +428,16 @@ class _CoreAgentGateway:
                 return None
             raise
         return pipeline.AgentRunView(
-            id=run["id"], status=run["status"], messages=run.get("messages") or []
+            id=run["id"],
+            status=run["status"],
+            messages=run.get("messages") or [],
+            # Core's `AgentRunResponse.annotations` (biffo-template#1528/#1530):
+            # `run.get(...)` alone would collapse a genuinely absent key to the
+            # same `None` as an explicit JSON `null`, which is exactly right
+            # here — both mean "not known", never "confirmed zero". Do NOT
+            # coerce to `[]`: that would make an unknown run read as a proven
+            # empty retrieval, which is the exact ambiguity #82 exists to remove.
+            annotations=run.get("annotations"),
         )
 
 

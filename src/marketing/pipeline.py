@@ -81,13 +81,28 @@ class PipelineError(Exception):
 
 
 class NoCitationsError(PipelineError):
-    """A research or positioning run produced content with zero citations.
+    """A research or positioning run produced content with zero citations —
+    zero *in the model's structured output*, i.e. ``sources`` across the
+    artefact. That is a fact about what the model transcribed, not about what
+    retrieval actually returned, and issue #82 is precisely the gap between
+    the two: a model can be shown real search results and simply not retype
+    them into its tool call.
 
-    The milestone's guard. A research or positioning agent whose live web
-    results (or whose grounding research) is unavailable does not error — it
-    fabricates a plausible, confident, well-structured document with nothing
-    behind it. A run that names zero URLs across its **entire** output fails
-    outright rather than being proposed to a human as if it were evidenced.
+    The milestone's guard is still right to fail in that case — an artefact
+    with no per-claim attribution is not something a human should be shown as
+    evidenced, whatever retrieval found — but the message now grounds itself
+    in ``AgentRunView.annotations`` (the runtime's own record of what
+    retrieval returned, biffo-template#1528/#1530) so the three distinguishable
+    causes read as different problems needing different responses:
+
+    - ``sources`` empty, ``annotations`` non-empty — retrieval worked, the
+      model didn't transcribe it. Transient; retrying the stage is likely to
+      produce a citable result without anything else changing.
+    - ``sources`` empty, ``annotations == []`` — retrieval genuinely found
+      nothing. Retrying will not help; the brief needs to change.
+    - ``sources`` empty, ``annotations is None`` — this run predates the
+      annotations column or was never ``:online``, so whether retrieval
+      happened at all is simply not known. Said plainly rather than guessed.
     """
 
 
@@ -167,23 +182,65 @@ def _total_citations(*source_lists: list[Source]) -> int:
     return sum(len(sources) for sources in source_lists)
 
 
+def _no_citations_message(
+    *, base_message: str, retry_hint: str, annotations: list[dict[str, Any]] | None
+) -> str:
+    """Ground :class:`NoCitationsError`'s message in what the run's
+    ``annotations`` (issue #82) say about retrieval, so the three cases in
+    that class's docstring read as distinguishable problems rather than the
+    identical, and for one of them false, "fetched zero URLs" sentence.
+
+    ``base_message`` is the case-specific "cited nothing" sentence each
+    caller already had — unchanged wording, and still the correct message
+    for the ``annotations == []`` case, since that IS a genuine zero-URL
+    retrieval. The other two cases replace it entirely rather than append to
+    it: appending "but retrieval actually succeeded" after a sentence that
+    opens by asserting the opposite reads as contradictory, not corrective.
+    """
+    if annotations:
+        # Deliberately NOT salvaged into `sources` here or anywhere upstream
+        # (see this module's own docstring / the PR that added this check):
+        # an annotation carries no claim mapping, so attaching one to a
+        # finding/segment/channel would fabricate the very attribution this
+        # guard exists to guarantee. The only honest response to "retrieval
+        # worked, the model didn't transcribe it" is to fail and say so.
+        n = len(annotations)
+        return (
+            f"Retrieval succeeded — {n} source{'s' if n != 1 else ''} were found — but "
+            f"the model did not cite any of them in its output. This is a transcription "
+            f"failure, not a failed search: try running {retry_hint} again."
+        )
+    if annotations is None:
+        return (
+            f"{base_message} (This run predates citation tracking, or was not a "
+            "grounded run, so whether retrieval itself found anything is not known — "
+            "do not read this as a proven zero-URL retrieval.)"
+        )
+    return base_message  # annotations == []: retrieval genuinely found nothing
+
+
 def _extract_cited_artefact[T: BaseModel](
     messages: list[dict[str, Any]],
     *,
+    annotations: list[dict[str, Any]] | None,
     tool_name: str,
     model_cls: type[T],
     citation_groups: Callable[[T], list[list[Source]]],
     malformed_message: str,
     no_citations_message: str,
+    retry_hint: str,
 ) -> T:
     """The shared skeleton behind :func:`extract_research_synthesis`,
-    :func:`extract_positioning` and :func:`extract_channel_plan`: fetch the
-    last call to ``tool_name``, validate it against ``model_cls``, and
-    enforce the zero-citation guard over ``citation_groups(result)``.
+    :func:`extract_positioning`, :func:`extract_channel_plan` and
+    :func:`extract_copy`: fetch the last call to ``tool_name``, validate it
+    against ``model_cls``, and enforce the zero-citation guard over
+    ``citation_groups(result)`` — grounded in ``annotations``, the run's own
+    record of what retrieval returned (issue #82), not just what the model's
+    tool call repeated of it.
 
-    Kept as one implementation rather than three near-identical copies
+    Kept as one implementation rather than four near-identical copies
     precisely because the guard is "the milestone, not a detail" (this
-    module's docstring) — three copies is three places a change to the guard
+    module's docstring) — four copies is four places a change to the guard
     itself (or a fix to it) can drift out of step.
     """
     data = _tool_call_arguments(messages, tool_name)
@@ -196,11 +253,17 @@ def _extract_cited_artefact[T: BaseModel](
 
     total = _total_citations(*citation_groups(result))
     if total == 0:
-        raise NoCitationsError(no_citations_message)
+        raise NoCitationsError(
+            _no_citations_message(
+                base_message=no_citations_message, retry_hint=retry_hint, annotations=annotations
+            )
+        )
     return result
 
 
-def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthesis:
+def extract_research_synthesis(
+    messages: list[dict[str, Any]], *, annotations: list[dict[str, Any]] | None = None
+) -> ResearchSynthesis:
     """The research-synthesis agent's output, or a hard failure.
 
     Raises :class:`MalformedOutputError` when the tool call is missing or
@@ -208,9 +271,15 @@ def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthe
     is well-formed but cites nothing at all. Unlike a single research angle
     finding little, there is no redundancy at the synthesis step: nothing else
     produces the ``research`` artefact, so there is nothing to degrade to.
+
+    ``annotations`` is the run's own record of what retrieval returned
+    (:attr:`AgentRunView.annotations`, issue #82) — defaulted to ``None`` so
+    a direct call (as every existing test makes) still works, reading as "not
+    known" rather than "definitely nothing", which is the correct default.
     """
     return _extract_cited_artefact(
         messages,
+        annotations=annotations,
         tool_name=RESEARCH_SYNTHESIS_TOOL_NAME,
         model_cls=ResearchSynthesis,
         citation_groups=lambda r: [f.sources for f in r.findings],
@@ -221,16 +290,21 @@ def extract_research_synthesis(messages: list[dict[str, Any]]) -> ResearchSynthe
             "The research run fetched zero URLs. Nothing was found to cite, so no "
             "artefact was produced — try running research again."
         ),
+        retry_hint="research",
     )
 
 
-def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
+def extract_positioning(
+    messages: list[dict[str, Any]], *, annotations: list[dict[str, Any]] | None = None
+) -> Positioning:
     """The positioning agent's output, or a hard failure — the same two
     failure modes as :func:`extract_research_synthesis`, for the same reason:
     a positioning claim is exactly as fabricable as a research finding, and an
-    operator reviewing it needs the same guarantee."""
+    operator reviewing it needs the same guarantee. ``annotations`` — see
+    :func:`extract_research_synthesis`."""
     return _extract_cited_artefact(
         messages,
+        annotations=annotations,
         tool_name=POSITIONING_TOOL_NAME,
         model_cls=Positioning,
         citation_groups=lambda r: [
@@ -243,18 +317,23 @@ def extract_positioning(messages: list[dict[str, Any]]) -> Positioning:
             "The positioning run cited nothing from the approved research. Nothing "
             "was produced — try running positioning again."
         ),
+        retry_hint="positioning",
     )
 
 
 def extract_channel_plan(
-    messages: list[dict[str, Any]], *, taxonomy: dict[str, Literal["organic", "paid"]]
+    messages: list[dict[str, Any]],
+    *,
+    taxonomy: dict[str, Literal["organic", "paid"]],
+    annotations: list[dict[str, Any]] | None = None,
 ) -> ChannelPlan:
     """The channel-plan agent's output, or a hard failure — the same two
     failure modes as :func:`extract_positioning`, for the same reason (M4,
     issue #3): a channel recommendation is exactly as fabricable as a
     positioning claim, and arguably the most confident-sounding one in the
     whole pipeline, because channel advice reads as generic wisdom whether or
-    not anyone researched it.
+    not anyone researched it. ``annotations`` — see
+    :func:`extract_research_synthesis`.
 
     ``taxonomy`` is ``{channel_key: motion}`` for exactly the taxonomy this
     run was shown (#76 increment 2) — stored on the artefact at start time,
@@ -268,6 +347,7 @@ def extract_channel_plan(
     """
     plan = _extract_cited_artefact(
         messages,
+        annotations=annotations,
         tool_name=CHANNEL_PLAN_TOOL_NAME,
         model_cls=ChannelPlan,
         citation_groups=lambda r: [c.sources for c in r.channels],
@@ -276,6 +356,7 @@ def extract_channel_plan(
             "The channel-plan run cited nothing from the approved positioning. Nothing "
             "was produced — try running channel planning again."
         ),
+        retry_hint="channel planning",
     )
     for recommendation in plan.channels:
         if recommendation.channel_key is None:
@@ -290,13 +371,17 @@ def extract_channel_plan(
 
 
 def extract_copy(
-    messages: list[dict[str, Any]], *, channel_plan_channels: dict[str, Literal["organic", "paid"]]
+    messages: list[dict[str, Any]],
+    *,
+    channel_plan_channels: dict[str, Literal["organic", "paid"]],
+    annotations: list[dict[str, Any]] | None = None,
 ) -> CopySet:
     """The copy agent's output, or a hard failure — the same two failure
     modes as :func:`extract_channel_plan` (M5, issue #4): copy is exactly as
     fabricable as a channel recommendation, and arguably the most
     publishable-looking one in the whole pipeline, since prose reads as
-    correct whether or not any pillar or CTA actually backs it.
+    correct whether or not any pillar or CTA actually backs it. ``annotations``
+    — see :func:`extract_research_synthesis`.
 
     ``channel_plan_channels`` is ``{channel_key: motion}`` for exactly the
     approved channel plan entries that themselves carried a ``channel_key``
@@ -310,6 +395,7 @@ def extract_copy(
     """
     result = _extract_cited_artefact(
         messages,
+        annotations=annotations,
         tool_name=COPY_TOOL_NAME,
         model_cls=CopySet,
         citation_groups=lambda r: [c.sources for c in r.channels],
@@ -318,6 +404,7 @@ def extract_copy(
             "The copy run cited nothing from the approved positioning. Nothing "
             "was produced — try running copy generation again."
         ),
+        retry_hint="copy generation",
     )
     for channel_copy in result.channels:
         if channel_copy.channel_key not in channel_plan_channels:
@@ -384,11 +471,28 @@ RUN_TERMINAL = frozenset({RUN_COMPLETED, RUN_FAILED})
 @dataclass(frozen=True)
 class AgentRunView:
     """A read of an async agent run — just what this pipeline needs to decide
-    whether it is done and to extract its output-tool call."""
+    whether it is done and to extract its output-tool call.
+
+    ``annotations`` is Core's ``AgentRunResponse.annotations`` (biffo-template
+    #1528/#1530): the ``:online`` grounding citations the *runtime* recorded on
+    the run, independent of whatever the model chose to retype into its
+    structured tool call. It is a fact about the run, not an inference from
+    ``messages`` — which is exactly why the citation guard (#82) reads it
+    instead of, or as well as, ``messages``. Three states, each meaning
+    something different and none collapsible into another:
+
+    - ``None`` — this run predates the annotations column, or was never an
+      ``:online`` run. Whether retrieval happened is simply not known.
+    - ``[]`` — the run WAS asked to ground, and retrieval genuinely returned
+      nothing to cite.
+    - non-empty — retrieval succeeded; the run has evidence, whatever the
+      model's tool call did or didn't repeat of it.
+    """
 
     id: str
     status: str
     messages: list[dict[str, Any]] = field(default_factory=list)
+    annotations: list[dict[str, Any]] | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -500,7 +604,9 @@ async def advance_research(
             return None  # synthesis is running; nothing to do yet
         if not synthesis_run.succeeded:
             raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
-        return extract_research_synthesis(synthesis_run.messages)
+        return extract_research_synthesis(
+            synthesis_run.messages, annotations=synthesis_run.annotations
+        )
 
     # No synthesis run yet: either research is still in flight (the normal
     # case), or every research run has already failed and the engine correctly
@@ -563,7 +669,7 @@ async def advance_positioning(gateway: AgentGateway, *, run_id: str) -> Position
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The positioning run did not complete successfully.")
-    return extract_positioning(view.messages)
+    return extract_positioning(view.messages, annotations=view.annotations)
 
 
 async def start_channel_plan(
@@ -617,7 +723,7 @@ async def advance_channel_plan(
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
-    return extract_channel_plan(view.messages, taxonomy=taxonomy)
+    return extract_channel_plan(view.messages, taxonomy=taxonomy, annotations=view.annotations)
 
 
 async def start_copy(
@@ -662,7 +768,9 @@ async def advance_copy(
         return None
     if not view.succeeded:
         raise RunNotSucceededError("The copy run did not complete successfully.")
-    return extract_copy(view.messages, channel_plan_channels=channel_plan_channels)
+    return extract_copy(
+        view.messages, channel_plan_channels=channel_plan_channels, annotations=view.annotations
+    )
 
 
 def channel_plan_channel_map(
