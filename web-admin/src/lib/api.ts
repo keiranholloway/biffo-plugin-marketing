@@ -660,20 +660,54 @@ export interface ClickBreakdown {
  * itself known; `null` when it isn't. Render "not measurable" distinctly from
  * zero — this plugin has no reachable transport to `demo_requests`/
  * `lead_source_costs` (issue #31), so reporting zero would claim "we looked,
- * and nothing happened," which is not a claim it can make today. */
+ * and nothing happened," which is not a claim it can make today.
+ *
+ * Still the exact shape of the paid pack's `spend`, which really is
+ * unmeasurable on every instance. It is NOT the shape of the results
+ * dashboard's leads/conversions/cost — see {@link Metric}. */
 export interface UnmeasuredMetric {
   measurable: false
   denominator: number | null
   reason: string
 }
 
+/** A leads/conversions/cost figure the instance-configured leads source
+ * answered (issue #31). Mirrors `results_routes.py`'s `Metric` when
+ * `measurable` is `True`: `value` is a real number — a real zero is
+ * `value: 0, measurable: true`, distinguishable from unmeasurable by
+ * `measurable` alone and never by `value` being falsy — and `reason` is
+ * `null`, because there is nothing to excuse. */
+export interface MeasuredMetric {
+  value: number
+  measurable: true
+  denominator: number | null
+  reason: null
+}
+
+/** The other half of `results_routes.py`'s `Metric`: the source could not
+ * answer, and `reason` says why, verbatim from upstream where it gave one.
+ * `value` is `null` — the server sends the key, and it is never a zero. */
+export interface UnmeasurableMetric {
+  value: null
+  measurable: false
+  denominator: number | null
+  reason: string
+}
+
+/** Exactly the union `results_routes.py`'s `Metric` serialises, discriminated
+ * on `measurable`. Typing only the unmeasurable half made the measurable one
+ * unrepresentable, so the dashboard rendered a real leads figure as "not
+ * measurable — undefined" (issue #114). Both halves always carry
+ * `denominator`, measurable or not. */
+export type Metric = MeasuredMetric | UnmeasurableMetric
+
 export interface CampaignResults {
   campaign_id: string
   campaign_name: string
   clicks: ClickBreakdown
-  leads: UnmeasuredMetric
-  conversions: UnmeasuredMetric
-  cost: UnmeasuredMetric
+  leads: Metric
+  conversions: Metric
+  cost: Metric
 }
 
 export interface ResultsResponse {
