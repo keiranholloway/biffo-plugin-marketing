@@ -151,7 +151,31 @@ class ResearchSynthesis(BaseModel):
     reconcile into, and what is stored as the ``research`` artefact's body."""
 
     summary: str = Field(description="The research findings, reconciled into a few paragraphs.")
-    findings: list[ResearchFinding] = Field(default_factory=list)
+
+    #: A REQUIRED KEY that may legitimately be empty. This was
+    #: `default_factory=list`,
+    #: which made it optional in the generated tool schema — `"required":
+    #: ["summary"]` — so the model returned a summary and nothing else, every
+    #: time. Measured on dev 2026-08-12: both research agents cited correctly
+    #: (3 and 8 real sources), the synthesis run's tool call contained the
+    #: single key `summary`, and the citation guard then failed the run for
+    #: having no sources. The model was complying exactly with the contract it
+    #: was given; the contract did not ask for what the guard demands.
+    #:
+    #: Deliberately NOT `min_length=1`. `ResearchFinding.sources` is already
+    #: `min_length=1`, so demanding at least one finding would mean a valid
+    #: synthesis always carries a source — making the citation guard
+    #: unreachable, and forcing the model to invent a finding when retrieval
+    #: genuinely found nothing. That is the fabrication the guard exists to
+    #: prevent. An empty list is an honest answer; an absent key is not,
+    #: because it lets the model skip the question entirely.
+    findings: list[ResearchFinding] = Field(
+        description=(
+            "Every finding worth carrying forward, each with the sources that "
+            "support it. Carry sources through from the research you were given "
+            "— do not drop them and do not invent new ones."
+        ),
+    )
 
 
 class Segment(BaseModel):
