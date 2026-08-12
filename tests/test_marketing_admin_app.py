@@ -102,3 +102,30 @@ def test_the_manifest_app_path_resolves(monkeypatch: pytest.MonkeyPatch) -> None
     module_name, _, attr = "marketing.admin_app:app".partition(":")
     module = __import__(module_name, fromlist=[attr])
     assert getattr(module, attr) is not None
+
+
+# ── issue #49: one shared artefact-body parser, not six duplicated ternaries ─
+
+
+def test_parse_artefact_body_parses_a_json_string() -> None:
+    """The common case: `body` as Core actually persists it — JSON text."""
+    assert admin_app._parse_artefact_body('{"channels": []}') == {"channels": []}
+
+
+def test_parse_artefact_body_passes_a_dict_through_unchanged() -> None:
+    """A caller that already holds the parsed dict (never re-serialised) must
+    not be forced through `json.loads` a second time — this is what every
+    converted call site relied on the ternary for, not just the string case."""
+    body = {"channels": [{"channel_key": "x"}]}
+    assert admin_app._parse_artefact_body(body) is body
+
+
+def test_parse_artefact_body_treats_none_and_an_empty_dict_as_empty() -> None:
+    """A pending-state artefact's `body` can be `None` (never written yet) or
+    `{}` (a real, empty payload) — both non-string cases read as `{}`
+    without ever reaching `json.loads`, matching every ternary this helper
+    replaced. An empty *string* is deliberately NOT covered here: it is a
+    `str`, so it takes the `json.loads` branch and raises — the identical
+    behaviour the duplicated ternary already had, unchanged by this refactor."""
+    assert admin_app._parse_artefact_body(None) == {}
+    assert admin_app._parse_artefact_body({}) == {}

@@ -194,13 +194,17 @@ def test_the_75_case_itself_cannot_occur() -> None:
 class _FakeCore:
     """A minimal in-memory stand-in for the tenant's `marketing_channel` rows,
     behind the exact seam (`seed._request`) the real script calls through.
-    Records every method used, so a test can assert the script never issues a
-    PATCH or DELETE — the structural half of "never clobbers an instance's own
-    additions"."""
+    Records every method used and every PATCH body, so a test can assert both
+    halves of "never clobbers an instance's own additions": the script never
+    DELETEs or PUTs at all, and the only PATCH it may issue is a fill-if-null
+    backfill of a DEFAULT channel's never-set field (#103b)."""
 
     def __init__(self, initial: list[dict[str, Any]] | None = None) -> None:
         self.rows: list[dict[str, Any]] = [dict(row) for row in (initial or [])]
         self.methods_used: list[str] = []
+        #: (row_id, body) for every PATCH, so a test can assert exactly which
+        #: rows were touched and with what — not merely that a PATCH happened.
+        self.patches: list[tuple[str, dict]] = []
 
     def request(self, method: str, url: str, token: str, body: dict | None = None) -> Any:
         self.methods_used.append(method)
@@ -211,6 +215,15 @@ class _FakeCore:
             row = {**body, "id": f"row-{len(self.rows)}"}
             self.rows.append(row)
             return row
+        if method == "PATCH":
+            assert body is not None
+            row_id = url.rsplit("/", 1)[-1]
+            self.patches.append((row_id, dict(body)))
+            for row in self.rows:
+                if row.get("id") == row_id:
+                    row.update(body)
+                    return row
+            raise AssertionError(f"PATCH against unknown row {row_id!r}")
         raise AssertionError(f"unexpected method {method!r} — the seeder must never call this")
 
 
@@ -259,9 +272,14 @@ def test_reseeding_preserves_an_instance_added_channel(monkeypatch) -> None:
 
     assert rc == 0
     assert custom_channel in fake.rows, "the instance-added channel must survive re-seeding"
-    assert "PATCH" not in fake.methods_used
     assert "PUT" not in fake.methods_used
     assert "DELETE" not in fake.methods_used
+    # The seeder may now PATCH — but only to fill a DEFAULT channel's
+    # never-set field (#103b). It must never touch an instance-added row,
+    # whose key is absent from CHANNELS entirely.
+    assert all(row_id != custom_channel["id"] for row_id, _ in fake.patches), (
+        "an instance-added channel must never be PATCHed"
+    )
 
 
 def test_an_upgrade_adding_a_default_channel_reaches_an_existing_install(monkeypatch) -> None:
@@ -314,3 +332,78 @@ def test_it_hits_the_same_public_crud_mount_the_other_marketing_tables_use() -> 
     which had never once existed (#60). This script targets the same,
     already-proven mount, not a new or guessed one."""
     assert seed._CHANNELS_PATH == "/api/v1/plugins/marketing/channels"
+
+
+def test_a_field_added_to_a_default_channel_reaches_an_already_seeded_install(
+    monkeypatch,
+) -> None:
+    """The gap this backfill closes, and the reason the feature reading it
+    shipped dead.
+
+    `publish_url` (#103b) was added to `CHANNELS` after every existing
+    instance had already seeded its taxonomy. Because the seeder is
+    insert-only — it skips any key it already has — those rows kept NULL for
+    ever: the migration added the column, all 32 rows held NULL, and the UI
+    reading it rendered no links while its code, its tests and its CI all
+    passed. Observed exactly that on tabsii dev: 0 of 32 rows populated.
+    """
+    seeded = [
+        {**channel, "id": f"row-{i}", "publish_url": None} for i, channel in enumerate(CHANNELS)
+    ]
+    fake = _FakeCore(initial=seeded)
+
+    rc = _run_seed(monkeypatch, fake)
+
+    assert rc == 0
+    expected = {c["key"]: c["publish_url"] for c in CHANNELS if c.get("publish_url")}
+    assert expected, "this test is vacuous unless some default channel has a publish_url"
+    for row in fake.rows:
+        if row["key"] in expected:
+            assert row["publish_url"] == expected[row["key"]], (
+                f"{row['key']} should have been backfilled"
+            )
+
+
+def test_backfill_never_overwrites_a_value_an_operator_already_set(monkeypatch) -> None:
+    """Fill-if-null, never overwrite — the same rule that makes the seeder
+    insert-only in the first place, applied at field level rather than row
+    level. An operator who points a channel at their own composer keeps it."""
+    target = next(c for c in CHANNELS if c.get("publish_url"))
+    operator_value = "https://intranet.example.test/our-own-publishing-tool"
+    seeded = [
+        {
+            **channel,
+            "id": f"row-{i}",
+            "publish_url": operator_value if channel["key"] == target["key"] else None,
+        }
+        for i, channel in enumerate(CHANNELS)
+    ]
+    fake = _FakeCore(initial=seeded)
+
+    rc = _run_seed(monkeypatch, fake)
+
+    assert rc == 0
+    kept = next(r for r in fake.rows if r["key"] == target["key"])
+    assert kept["publish_url"] == operator_value, "an operator's own value must survive"
+    assert all(row_id != kept["id"] for row_id, _ in fake.patches), (
+        "a row whose field is already set must not be PATCHed at all"
+    )
+
+
+def test_backfill_leaves_a_channel_with_no_publish_url_alone(monkeypatch) -> None:
+    """A default channel whose `publish_url` is deliberately None — a pitch to
+    a publication, not a composer — must not be PATCHed with a null, which
+    would be a write that changes nothing and muddies the audit trail."""
+    seeded = [
+        {**channel, "id": f"row-{i}", "publish_url": None} for i, channel in enumerate(CHANNELS)
+    ]
+    fake = _FakeCore(initial=seeded)
+
+    _run_seed(monkeypatch, fake)
+
+    no_url_keys = {c["key"] for c in CHANNELS if c.get("publish_url") is None}
+    by_id = {r["id"]: r for r in fake.rows}
+    for row_id, _ in fake.patches:
+        assert by_id[row_id]["key"] not in no_url_keys, (
+            "a channel with no publish_url must never be PATCHed"
+        )

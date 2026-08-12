@@ -75,8 +75,7 @@ async def start_channel_plan_route(
             detail="The positioning artefact must be approved before this can proceed.",
         )
 
-    raw_body = approved_positioning.get("body")
-    positioning_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+    positioning_body = admin_app._parse_artefact_body(approved_positioning.get("body"))
     # The closed set of URLs this run is being shown (issue #22): exactly the
     # approved positioning's own citations. Read at start time and stashed on
     # the pending artefact below for the same reason `taxonomy_motions` is —
