@@ -75,4 +75,68 @@ describe('PaidPack', () => {
     expect(screen.getByText(/1 paid channel\(s\)/)).toBeInTheDocument()
     expect(screen.getByText(/not measurable — no route reachable/i)).toBeInTheDocument()
   })
+
+  // The three distinct 4xx branches `paid_pack_routes.get_paid_pack_route`
+  // actually raises (issue #85), mirroring `pack_routes.py`'s own wording —
+  // asserting the operator-facing text the server sent, not the status code.
+  // `detail` strings are copied verbatim from `paid_pack_routes.py`.
+  it('says there is no copy yet, not just "(404)"', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: 'No copy artefact for this campaign yet.' }),
+      }),
+    )
+
+    render(<PaidPack campaignId={CAMPAIGN} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/no copy artefact for this campaign yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the paid pack \(404\)$/i)).not.toBeInTheDocument()
+  })
+
+  it('says the campaign was not found, not just "(404)"', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: 'Campaign not found.' }),
+      }),
+    )
+
+    render(<PaidPack campaignId={CAMPAIGN} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/^campaign not found\./i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the paid pack \(404\)$/i)).not.toBeInTheDocument()
+  })
+
+  it('says the copy needs approving on a 409 — one click from resolved, not a bare status', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: 'The copy artefact must be approved before this can proceed (status: proposed).',
+        }),
+      }),
+    )
+
+    render(<PaidPack campaignId={CAMPAIGN} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/copy artefact must be approved before this can proceed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^could not load the paid pack \(409\)$/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/"detail"/)).not.toBeInTheDocument()
+  })
 })
