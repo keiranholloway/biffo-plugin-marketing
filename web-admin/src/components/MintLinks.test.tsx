@@ -26,6 +26,7 @@ const LINKEDIN_ORGANIC: ChannelTaxonomyEntry = {
   motion: 'organic',
   category: 'social',
   ad_platform: null,
+  publish_url: 'https://www.linkedin.com/feed/?shareActive=true',
 }
 const LINKEDIN_PAID: ChannelTaxonomyEntry = {
   key: 'linkedin_paid',
@@ -33,6 +34,7 @@ const LINKEDIN_PAID: ChannelTaxonomyEntry = {
   motion: 'paid',
   category: 'social',
   ad_platform: 'linkedin',
+  publish_url: 'https://www.linkedin.com/campaignmanager/',
 }
 
 /** A stub taxonomy lookup, matching the shape `useChannelTaxonomy` produces

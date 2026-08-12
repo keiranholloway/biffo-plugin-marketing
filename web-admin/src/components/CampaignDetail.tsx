@@ -87,7 +87,7 @@ export function CampaignDetail({
       <DistributionPack campaignId={campaign.id} channelLookup={channelLookup} />
 
       <h3>Paid brief pack</h3>
-      <PaidPack campaignId={campaign.id} />
+      <PaidPack campaignId={campaign.id} channelLookup={channelLookup} />
 
       <h3>Results</h3>
       <Results campaignId={campaign.id} />

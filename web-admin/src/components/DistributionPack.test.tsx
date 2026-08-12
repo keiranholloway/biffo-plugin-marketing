@@ -18,6 +18,20 @@ function stubSession(jwt = 'test-jwt') {
   } as never)
 }
 
+/** jsdom has no `navigator.clipboard` at all — see `PaidPack.test.tsx`'s own
+ * copy of this helper for why a click must go through a real stub rather
+ * than nothing, or every copy button here would silently land on
+ * `useClipboard`'s "could not copy" error path instead of the success one
+ * these tests are checking. */
+function stubClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText },
+    configurable: true,
+  })
+  return writeText
+}
+
 /** `channelLookup` is fetched once by `CampaignDetail` (`useChannelTaxonomy`)
  * and passed down — `DistributionPack` itself never fetches `/channels`, so
  * these tests only need this stub, not a second mocked response. */
@@ -32,6 +46,7 @@ const LINKEDIN: ChannelTaxonomyEntry = {
   motion: 'organic',
   category: 'social',
   ad_platform: null,
+  publish_url: 'https://www.linkedin.com/feed/?shareActive=true',
 }
 
 const CAMPAIGN = 'c1'
@@ -233,5 +248,110 @@ describe('DistributionPack', () => {
 
     expect(await screen.findByText(/loading channel/i)).toBeInTheDocument()
     expect(screen.queryByText(/unrecognised channel/i)).not.toBeInTheDocument()
+  })
+
+  // #103a/#103b: a copy control per copy block, a copy-all control that
+  // composes the channel's own tracked link in, and a publish link sourced
+  // from the taxonomy — the operator-experience gaps issue #103 reports.
+  it('gives every copy block its own copy button, composes copy-all with the tracked link, and links to where to publish', async () => {
+    stubSession()
+    // `userEvent.setup()` installs (and resets) its own `navigator.clipboard`
+    // stub, so this must be stubbed AFTER setup(), not before — otherwise
+    // `useClipboard` silently talks to userEvent's stub, not this test's.
+    const user = userEvent.setup()
+    const writeText = stubClipboard()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaign_id: CAMPAIGN,
+          assets: [],
+          missing_placements: [],
+          copy: [
+            {
+              channel_key: 'linkedin_organic',
+              motion: 'organic',
+              headline: 'Fast onboarding, done right',
+              body: 'Get every franchise unit live in a day.',
+              cta: 'Book a demo',
+              sources: [],
+            },
+          ],
+          links: [{ channel: 'linkedin_organic', variant: null, is_paid: false, url: 'https://x/c/tok' }],
+          guidance: '',
+        }),
+      }),
+    )
+
+    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    await user.click(screen.getByRole('button', { name: /load pack/i }))
+    await screen.findByText('Fast onboarding, done right')
+
+    // A copy control per block.
+    await user.click(screen.getByRole('button', { name: 'Copy headline' }))
+    expect(writeText).toHaveBeenLastCalledWith('Fast onboarding, done right')
+    await user.click(screen.getByRole('button', { name: 'Copy body' }))
+    expect(writeText).toHaveBeenLastCalledWith('Get every franchise unit live in a day.')
+    await user.click(screen.getByRole('button', { name: 'Copy CTA' }))
+    expect(writeText).toHaveBeenLastCalledWith('Book a demo')
+
+    // Copy-all composes headline + body + CTA + this channel's own tracked
+    // link — the real unit of work when pasting into a composer (#103a).
+    await user.click(screen.getByRole('button', { name: 'Copy all for this channel' }))
+    expect(writeText).toHaveBeenLastCalledWith(
+      ['Fast onboarding, done right', 'Get every franchise unit live in a day.', 'Book a demo', 'https://x/c/tok'].join(
+        '\n\n',
+      ),
+    )
+
+    // The publish link comes from the taxonomy (`LINKEDIN.publish_url`), not
+    // from anything hardcoded in this component (#103b).
+    const publishLink = screen.getByRole('link', { name: /publish on linkedin — organic/i })
+    expect(publishLink).toHaveAttribute('href', 'https://www.linkedin.com/feed/?shareActive=true')
+    expect(publishLink).toHaveAttribute('target', '_blank')
+    expect(publishLink).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('renders no publish link for a channel with no publish_url, never a dead or placeholder link', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    const NO_COMPOSER: ChannelTaxonomyEntry = {
+      key: 'trade_press_earned',
+      label: 'Trade press — earned coverage',
+      motion: 'organic',
+      category: 'trade_press',
+      ad_platform: null,
+      publish_url: null,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaign_id: CAMPAIGN,
+          assets: [],
+          missing_placements: [],
+          copy: [
+            {
+              channel_key: 'trade_press_earned',
+              motion: 'organic',
+              headline: 'H',
+              body: 'B',
+              cta: 'C',
+              sources: [],
+            },
+          ],
+          links: [],
+          guidance: '',
+        }),
+      }),
+    )
+
+    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([NO_COMPOSER])} />)
+    await user.click(screen.getByRole('button', { name: /load pack/i }))
+    await screen.findByText('Trade press — earned coverage')
+
+    expect(screen.queryByRole('link', { name: /publish on/i })).not.toBeInTheDocument()
   })
 })

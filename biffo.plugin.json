@@ -358,6 +358,12 @@
           "type": "String(32)",
           "nullable": true,
           "description": "Optional. The ad platform this channel's spend and character limits belong to (e.g. 'google', 'meta', 'linkedin', 'tiktok'), NULL for channels with no platform-specific limits (organic search, direct mail, events, ...). Exists now so the shape a future `_platform_for_channel` lookup needs (replacing today's substring guessing) does not require a second schema change — the lookup itself is #76 increment 2, out of scope here."
+        },
+        {
+          "name": "publish_url",
+          "type": "String(500)",
+          "nullable": true,
+          "description": "Optional. Where an operator actually goes to publish on this channel — LinkedIn's post composer, Google Ads, and so on (#103b). NULL for channels with no single composer to deep-link to: a pitch to a publication (`trade_press_earned`), a channel whose venue is tenant-specific (an owned email list, a chosen webinar platform), or one covering several distinct destinations under one taxonomy row (`short_form_video_organic`). Never a login/credential flow of this plugin's own — it is a plain third-party URL the browser opens in a new tab; an unauthenticated operator lands on that platform's own sign-in, which is expected. A wrong or dead link is worse than none, so this is left NULL on any channel this plugin isn't confident naming a stable entry point for, same discipline as `ad_platform` above."
         }
       ],
       "indexes": [
