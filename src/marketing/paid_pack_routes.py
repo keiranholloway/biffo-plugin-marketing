@@ -14,13 +14,19 @@ this module adds is the part that is genuinely paid-only:
    artefact's channels already exist (``copy_routes.py``, M5); this module
    filters to the ``paid`` ones and trims headline/body/cta to the limit its
    guessed platform actually enforces, never mid-word.
-2. **Targeting**, drawn straight from the approved positioning artefact's
+2. **Targeting**, drawn from the approved positioning artefact's
    ``segments`` — the only audience description this pipeline has ever
    produced, and the plugin's own citation discipline (every segment carries
-   ``sources``) already makes it a defensible brief rather than a guess. An
-   approved positioning with zero segments 404s rather than shipping an
-   empty targeting brief silently — the same gap-must-be-visible discipline
-   this file uses for ``paid_channels``.
+   ``sources``) already makes it a defensible brief rather than a guess. Only
+   ``name``, ``description`` and a ``source_count`` cross into the brief
+   (``_targeting_segment``): the full ``{url, note}`` pairs stay on the
+   positioning artefact itself, which is where an operator reviews evidence.
+   Carrying them into every paid brief too was the reported duplication —
+   the same handful of research URLs and notes, repeated verbatim on every
+   segment of every downstream artefact that touched them. An approved
+   positioning with zero segments 404s rather than shipping an empty
+   targeting brief silently — the same gap-must-be-visible discipline this
+   file uses for ``paid_channels``.
 3. **A budget recommendation.** This plugin calls no ad platform API and has
    no historical spend or performance data to optimise against, so this is a
    declared, fixed starting-point heuristic — not a bidding model — and says
@@ -252,6 +258,28 @@ def _budget_recommendation(paid_channel_count: int) -> dict[str, Any]:
     }
 
 
+def _targeting_segment(segment: dict[str, Any]) -> dict[str, Any]:
+    """One positioning segment, shaped for the targeting brief.
+
+    Deliberately drops the segment's full `sources` (each a `{url, note}`
+    pair) down to a bare count. The full citations already live on the
+    positioning artefact this pack was built from — this brief is meant to be
+    read by a person setting up ad targeting, not to re-litigate the
+    evidence, and repeating every source's URL and note on every segment here
+    was the exact duplication reported against the campaign studio: the same
+    handful of research URLs, verbatim, on every artefact that touches a
+    segment. `source_count` keeps the "this is evidenced, not a guess" signal
+    (the module docstring's own reasoning for using segments here) without
+    reprinting the evidence itself.
+    """
+    sources = segment.get("sources") or []
+    return {
+        "name": segment.get("name"),
+        "description": segment.get("description"),
+        "source_count": len(sources),
+    }
+
+
 @router.get("/campaigns/{campaign_id}/paid-pack")
 async def get_paid_pack_route(
     campaign_id: str,
@@ -346,12 +374,13 @@ async def get_paid_pack_route(
         if isinstance(raw_positioning_body, str)
         else (raw_positioning_body or {})
     )
-    targeting = positioning_body.get("segments") or []
-    if not targeting:
+    raw_segments = positioning_body.get("segments") or []
+    if not raw_segments:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The approved positioning artefact has no segments to target.",
         )
+    targeting = [_targeting_segment(s) for s in raw_segments]
 
     ad_platforms = await _channel_ad_platforms(admin.token)
 

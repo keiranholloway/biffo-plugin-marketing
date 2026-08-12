@@ -12,8 +12,17 @@ import { ChannelName } from './ChannelName'
 
 /** Every artefact kind's body is grounded in citations, and the citations are
  * the whole reason a human approval gate exists here at all — see
- * `pipeline.py`'s module docstring on the zero-citation guard. Shown next to
- * every claim, never collapsed into a count. */
+ * `pipeline.py`'s module docstring on the zero-citation guard.
+ *
+ * This is the ONE place a source's full `url` and `note` are ever printed —
+ * `ResearchArtefact` below, once per unique URL. Every downstream artefact
+ * (positioning, channel plan, copy) uses `SourceRefs` instead, which points
+ * back here rather than repeating the same URL and note on every segment,
+ * pillar, CTA, channel and piece of copy that draws on it — the literal
+ * defect reported: the same handful of research links and explanatory notes
+ * "duplicated everywhere" in the campaign studio. Provenance still lives in
+ * the data on every one of those items (`sources`, `Field(min_length=1)` in
+ * `definitions.py`) — only the RENDERING stops repeating it in full. */
 export function SourceList({ sources }: { sources: Source[] }) {
   if (sources.length === 0) {
     return <p className="no-sources">No sources cited.</p>
@@ -25,10 +34,94 @@ export function SourceList({ sources }: { sources: Source[] }) {
           <a href={s.url} target="_blank" rel="noreferrer">
             {s.url}
           </a>
-          <span className="note">{s.note}</span>
+          {s.note !== '' && <span className="note">{s.note}</span>}
         </li>
       ))}
     </ul>
+  )
+}
+
+/** The first occurrence of each URL, in encounter order — used both to build
+ * the research artefact's single canonical source list (so a URL cited by
+ * four findings is printed once, not four times) and to collapse one item's
+ * own `sources` down to what it actually adds. */
+function dedupeByUrl(sources: Source[]): Source[] {
+  const seen = new Set<string>()
+  const unique: Source[] = []
+  for (const s of sources) {
+    if (seen.has(s.url)) continue
+    seen.add(s.url)
+    unique.push(s)
+  }
+  return unique
+}
+
+/** A downstream item's compact pointer back to its evidence — a count plus,
+ * on request, the bare URLs (never the note: the note is where the verbatim
+ * duplication was worst, since the agent copied it wholesale from the
+ * research finding it drew from). Collapsed by default via `<details>`, so
+ * reviewing ten segments does not mean scrolling past the same citation ten
+ * times — the count alone already answers "is this grounded", which is what
+ * an operator scanning the artefact needs; the URLs are here for whoever
+ * wants to check one. */
+export function SourceRefs({ sources }: { sources: Source[] }) {
+  const unique = dedupeByUrl(sources)
+  if (unique.length === 0) {
+    return <p className="no-sources">No sources cited.</p>
+  }
+  return (
+    <details className="source-refs">
+      <summary>
+        {unique.length} source{unique.length === 1 ? '' : 's'} cited — see Research for the full citation
+      </summary>
+      <ul className="source-refs-list">
+        {unique.map((s) => (
+          <li key={s.url}>
+            <a href={s.url} target="_blank" rel="noreferrer">
+              {s.url}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+/** A research finding's compact pointer into the artefact's own "Sources
+ * cited" list, built once from every finding's sources combined
+ * (`ResearchArtefact`'s `indexByUrl`). This is what stops the WITHIN-research
+ * duplication: five findings that between them cite four unique URLs used to
+ * print each URL and its note up to five times over; each finding now prints
+ * a numbered marker instead, and the URL/note appear exactly once, in the
+ * canonical list below. The marker still links straight to the source and
+ * carries its note as a `title` tooltip, so nothing is less reachable — only
+ * less repeated. */
+function CitationMarkers({
+  sources,
+  indexByUrl,
+}: {
+  sources: Source[]
+  indexByUrl: Map<string, number>
+}) {
+  const unique = dedupeByUrl(sources)
+  if (unique.length === 0) {
+    return <p className="no-sources">No sources cited.</p>
+  }
+  return (
+    <p className="citation-markers">
+      {unique.map((s) => (
+        <a
+          key={s.url}
+          className="citation-marker"
+          href={s.url}
+          target="_blank"
+          rel="noreferrer"
+          title={s.note !== '' ? s.note : s.url}
+        >
+          [{indexByUrl.get(s.url)}]
+        </a>
+      ))}
+    </p>
   )
 }
 
@@ -47,15 +140,25 @@ interface FindingItem {
  * artefact kind's body is a list of exactly this shape (a heading, some
  * prose, and its sources), so the four renderers below share this one loop
  * rather than repeating `.map(...) => <div className="finding">…` four
- * times with nothing to keep them in step. */
-function FindingGroup({ items }: { items: FindingItem[] }) {
+ * times with nothing to keep them in step.
+ *
+ * `renderSources` is the one thing that varies: the research artefact prints
+ * full citations (`SourceList`) since it is the single home for them; every
+ * other artefact prints a compact reference (`SourceRefs`) instead. */
+function FindingGroup({
+  items,
+  renderSources,
+}: {
+  items: FindingItem[]
+  renderSources: (sources: Source[]) => ReactNode
+}) {
   return (
     <>
       {items.map((item) => (
         <div className="finding" key={item.key}>
           {item.heading}
           {item.body}
-          <SourceList sources={item.sources} />
+          {renderSources(item.sources)}
         </div>
       ))}
     </>
@@ -63,6 +166,13 @@ function FindingGroup({ items }: { items: FindingItem[] }) {
 }
 
 export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
+  // One canonical, deduplicated citation list for the whole artefact — a URL
+  // cited by several findings (common: two findings from different angles
+  // independently landing on the same source) used to print its full URL and
+  // note once per finding. Each finding now points at this list instead of
+  // repeating it.
+  const allSources = dedupeByUrl(body.findings.flatMap((f) => f.sources))
+  const indexByUrl = new Map(allSources.map((s, i) => [s.url, i + 1]))
   return (
     <div className="artefact-body">
       <p className="summary">{body.summary}</p>
@@ -73,7 +183,10 @@ export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
           body: <p>{f.why_it_matters}</p>,
           sources: f.sources,
         }))}
+        renderSources={(sources) => <CitationMarkers sources={sources} indexByUrl={indexByUrl} />}
       />
+      <h4>Sources cited</h4>
+      <SourceList sources={allSources} />
     </div>
   )
 }
@@ -89,6 +202,7 @@ export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
           body: <p>{s.description}</p>,
           sources: s.sources,
         }))}
+        renderSources={(sources) => <SourceRefs sources={sources} />}
       />
 
       <h4>Message pillars</h4>
@@ -99,6 +213,7 @@ export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
           body: <p>{p.rationale}</p>,
           sources: p.sources,
         }))}
+        renderSources={(sources) => <SourceRefs sources={sources} />}
       />
 
       <h4>Calls to action</h4>
@@ -109,6 +224,7 @@ export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
           body: <p>{c.rationale}</p>,
           sources: c.sources,
         }))}
+        renderSources={(sources) => <SourceRefs sources={sources} />}
       />
     </div>
   )
@@ -137,6 +253,7 @@ export function ChannelPlanArtefact({
           body: <p>{c.rationale}</p>,
           sources: c.sources,
         }))}
+        renderSources={(sources) => <SourceRefs sources={sources} />}
       />
     </div>
   )
@@ -163,6 +280,7 @@ export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; chann
           ),
           sources: c.sources,
         }))}
+        renderSources={(sources) => <SourceRefs sources={sources} />}
       />
     </div>
   )

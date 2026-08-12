@@ -116,7 +116,22 @@ class Source(BaseModel):
     """A piece of evidence an agent actually found, not a plausible-looking
     citation. The prompts require these to come from search results —
     ``url`` is required and non-empty by construction, so a claim with no
-    citation cannot be represented, only omitted."""
+    citation cannot be represented, only omitted.
+
+    ``note`` is deliberately NOT ``min_length=1``. On a research finding it
+    should always carry real content — that is the only place a source's
+    note is ever rendered in full (``ArtefactBody.tsx``'s ``SourceList``).
+    Downstream (positioning, channel plan, copy), the prompts now tell an
+    agent to leave ``note`` empty rather than retype the research finding's
+    note into every segment/pillar/CTA/channel that draws on it: a note
+    copied verbatim onto several items carries no information past its first
+    appearance, and was the reported "same explanatory notes... appearing
+    over and over" defect. The UI never shows a downstream item's ``note``
+    at all (``SourceRefs``, as opposed to research's ``SourceList``), so an
+    empty one costs nothing and a non-empty one is simply ignored there —
+    the field stays on every downstream item because the citation guard
+    (``pipeline.py``) counts entries in ``sources``, not characters in
+    ``note``."""
 
     url: str = Field(min_length=1, description="A URL the agent actually found.")
     note: str = Field(description="What this source shows, in one sentence.")
@@ -464,11 +479,17 @@ Turn the research into:
 3. **Calls to action** — candidate CTAs, each tied to the segment(s) and
    pillar(s) it serves.
 
-Every segment, pillar and CTA must carry `sources`: copy the relevant
-`Source` objects (url and note) from the research findings you were given —
-verbatim, not reworded. Never invent a source, and never produce a segment,
-pillar or CTA that cites nothing: if the research does not support a claim,
-do not make the claim.
+Every segment, pillar and CTA must carry `sources`: copy the `url` of each
+relevant `Source` from the research findings you were given, exactly as
+written — never invent one, alter one, or cite one you were not shown. For
+`note`, do NOT paste the research finding's note verbatim: your segment,
+pillar or CTA already has its own `description`/`rationale` explaining why it
+follows from the research, so a `note` that repeats that finding's note word
+for word adds nothing an operator hasn't already read twice. Write one short
+phrase naming what THIS item specifically draws from that source that its
+`description`/`rationale` doesn't already say, or leave `note` empty if there
+is nothing left to add. Never produce a segment, pillar or CTA that cites
+nothing: if the research does not support a claim, do not make the claim.
 
 If the research is too thin to support any segment, pillar or CTA, return
 empty lists rather than inventing content to fill them.
@@ -516,10 +537,13 @@ behind it is the most confident-sounding fabrication in this pipeline —
 anyone researched it, so generic channel wisdom is not an acceptable
 rationale.
 
-Every recommendation must carry `sources`: copy the relevant `Source` objects
-(url and note) from the positioning you were given — verbatim, not reworded.
-Never invent a source, and never recommend a channel that cites nothing: if
-the positioning does not support recommending a channel, do not recommend it.
+Every recommendation must carry `sources`: copy the `url` of each relevant
+`Source` from the positioning you were given, exactly as written. For `note`,
+do not paste the positioning item's note verbatim — your `rationale` already
+says why this channel follows from the evidence, so repeat only what a
+`note` genuinely adds beyond that, or leave it empty. Never invent a source,
+and never recommend a channel that cites nothing: if the positioning does not
+support recommending a channel, do not recommend it.
 
 If the positioning is too thin to support any recommendation in a motion,
 return fewer channels (or none) for that motion rather than inventing content
@@ -555,12 +579,14 @@ each channel:
 3. Ground every line in the positioning's segments, pillars and CTAs — never
    in generic marketing copy that could belong to any campaign.
 
-Every channel's copy must carry `sources`: copy the relevant `Source`
-objects (url and note) from the positioning pillar(s) or CTA(s) you drew from
-— verbatim, not reworded. Never invent a source, and never produce copy for a
-channel that cites nothing: if the positioning does not support what you
-would write, do not write it — omit that channel's copy rather than filling
-it with something ungrounded.
+Every channel's copy must carry `sources`: copy the `url` of each relevant
+`Source` from the positioning pillar(s) or CTA(s) you drew from, exactly as
+written. For `note`, do not paste the pillar's or CTA's note verbatim — say
+only what is specific to this piece of copy beyond that, or leave it empty.
+Never invent a source, and never produce copy for a channel that cites
+nothing: if the positioning does not support what you would write, do not
+write it — omit that channel's copy rather than filling it with something
+ungrounded.
 
 {_UNTRUSTED_INPUT_RULE}
 Return your answer by calling the `{COPY_TOOL_NAME}` tool exactly once. Do

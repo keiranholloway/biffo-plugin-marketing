@@ -412,6 +412,60 @@ def test_channel_copy_cannot_be_built_with_empty_sources() -> None:
         )
 
 
+def test_segment_cannot_be_built_with_empty_sources() -> None:
+    """Same structural half of the guard, for `Segment` (M3 positioning) —
+    the one the duplicated-links defect touched directly: fixing how sources
+    are rendered/attached downstream must not loosen this `min_length=1`."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import Segment
+
+    with pytest.raises(ValidationError):
+        Segment(name="x", description="y", sources=[])
+
+
+def test_message_pillar_cannot_be_built_with_empty_sources() -> None:
+    """Same structural half of the guard, for `MessagePillar` (M3 positioning)."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import MessagePillar
+
+    with pytest.raises(ValidationError):
+        MessagePillar(pillar="x", rationale="y", sources=[])
+
+
+def test_call_to_action_cannot_be_built_with_empty_sources() -> None:
+    """Same structural half of the guard, for `CallToAction` (M3 positioning)."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import CallToAction
+
+    with pytest.raises(ValidationError):
+        CallToAction(text="x", rationale="y", sources=[])
+
+
+def test_source_note_may_be_empty_but_url_still_cannot() -> None:
+    """The de-duplication fix (definitions.py's `POSITIONING_INSTRUCTIONS` /
+    `CHANNEL_PLAN_INSTRUCTIONS` / `COPY_INSTRUCTIONS`) now tells downstream
+    agents to leave `note` empty rather than paste a research note verbatim —
+    so `note` must genuinely accept `""`. `url` must not: it is the actual
+    citation, `Field(min_length=1)`, and nothing about this fix should touch
+    that half of the guard."""
+    from pydantic import ValidationError
+
+    from marketing.definitions import Segment, Source
+
+    # note="" is a legitimate downstream citation now — must not raise.
+    segment = Segment(
+        name="x", description="y", sources=[Source(url="https://example.com/a", note="")]
+    )
+    assert segment.sources[0].note == ""
+
+    # url="" must still be rejected — the guard's actual teeth are unchanged.
+    with pytest.raises(ValidationError):
+        Source(url="", note="")
+
+
 # ── extract_research_findings — per-angle, degrades rather than fails ────────
 #
 # Unlike the synthesis/positioning extractors above, one research angle

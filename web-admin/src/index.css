@@ -348,6 +348,39 @@ button.secondary {
   font-style: italic;
 }
 
+/* Downstream artefacts (positioning, channel plan, copy) point back at
+   research's full citations instead of repeating them — see
+   ArtefactBody.tsx's SourceRefs. Collapsed by default so scanning several
+   segments/pillars/CTAs doesn't mean scrolling past the same citation
+   repeatedly. */
+.source-refs {
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+}
+
+.source-refs summary {
+  cursor: pointer;
+  color: #666;
+}
+
+.source-refs-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.3rem 0 0;
+}
+
+/* A research finding's compact pointer into the artefact's own "Sources
+   cited" list (ArtefactBody.tsx's CitationMarkers) — the URL and note print
+   once in that list rather than once per finding that cites it. */
+.citation-markers {
+  margin: 0.3rem 0 0;
+}
+
+.citation-marker {
+  font-size: 0.75rem;
+  margin-right: 0.4rem;
+}
+
 .warning {
   background: #fff3cd;
   color: #7a5b00;

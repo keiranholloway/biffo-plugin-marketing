@@ -586,12 +586,25 @@ export interface BudgetRecommendation {
   basis: string
 }
 
+/** One segment as it appears in the paid pack's targeting brief —
+ * `paid_pack_routes.py`'s `_targeting_segment`. Deliberately NOT `Segment`:
+ * the full `sources` (`{url, note}` pairs) stay on the positioning artefact,
+ * where an operator reviews evidence. Repeating them on every targeting
+ * entry too was the reported duplication — the same handful of research
+ * URLs and notes on every artefact that touched a segment. `source_count`
+ * keeps the "this is evidenced" signal without the repetition. */
+export interface TargetingSegment {
+  name: string
+  description: string
+  source_count: number
+}
+
 export interface PaidPack {
   campaign_id: string
   ad_copy: AdCopyVariant[]
   assets: PackAsset[]
   missing_placements: string[]
-  targeting: Segment[]
+  targeting: TargetingSegment[]
   budget: BudgetRecommendation
   links: PackLink[]
   guidance: string

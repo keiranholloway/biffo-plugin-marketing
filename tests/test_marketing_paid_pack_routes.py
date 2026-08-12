@@ -441,8 +441,19 @@ def test_assembles_the_paid_pack(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["assets"][0]["is_source"] is True
     assert set(body["missing_placements"]) == set(PLACEMENTS)
 
-    # 3. Targeting: the approved positioning's segments, verbatim.
-    assert body["targeting"] == _SEGMENTS
+    # 3. Targeting: name + description from the approved positioning's
+    # segments, plus a source count — never the full {url, note} pairs.
+    # Those stay on the positioning artefact; repeating them here (the same
+    # handful of research URLs and notes on every downstream artefact) was
+    # the reported duplication.
+    assert body["targeting"] == [
+        {
+            "name": "Multi-site operators",
+            "description": "Operators running more than one location.",
+            "source_count": 1,
+        }
+    ]
+    assert "sources" not in body["targeting"][0]
 
     # 4. Budget: a stated, non-fabricated heuristic over the paid channel
     # count (2 here), not a bid-optimisation number.
