@@ -533,8 +533,9 @@ def _pipeline_error_to_http(exc: pipeline.PipelineError) -> HTTPException:
 #: their own branches below (#76 increment 2): both need extra context
 #: (the taxonomy/plan they were started against) read back from the pending
 #: artefact's own `body`, the same way `research_run_ids` already is — a
-#: shape this dict's uniform `advance(gateway, run_id=...)` call cannot carry.
-#: `positioning` is the one stage left that needs nothing beyond `run_id`:
+#: shape this dict's call cannot carry. `positioning` is the one stage left
+#: whose only extra context is the one EVERY downstream stage needs, the
+#: approved parent's citation URLs (issue #22), passed uniformly below:
 #: adding another like it grows this dict by one line, not `_advance_artefact`
 #: by a new branch.
 _SINGLE_RUN_ADVANCERS: dict[str, Callable[..., Any]] = {
@@ -564,8 +565,22 @@ async def _advance_artefact(
             )
         return run_id
 
+    # Everything each stage's starter route stashed for its own advance step,
+    # read back once here rather than per-branch. `research_run_ids`,
+    # `channel_taxonomy` and `channel_plan_channels` were already carried this
+    # way; `allowed_source_urls` (issue #22) joins them for the same reason —
+    # it must be the approved parent's citations as they stood when THIS run
+    # was started, not a fresh read of a parent that may have been re-run
+    # since. Absent (a legacy row, or an artefact started before #22 shipped)
+    # reads as `None`, i.e. "not known", which skips the provenance check
+    # rather than failing every in-flight run — see
+    # `pipeline._extract_cited_artefact` for why the two must not be collapsed.
+    pending = json.loads(artefact.get("body") or "{}")
+    allowed_source_urls = pending.get("allowed_source_urls")
+
     if kind == "research":
-        pending = json.loads(artefact.get("body") or "{}")
+        # `research` is the one stage with no closed prior source set — the
+        # web is its source — so it takes no `allowed_source_urls` at all.
         research_run_ids = pending.get("research_run_ids") or []
         result = await pipeline.advance_research(
             gateway, chain_id=artefact["causation_id"], research_run_ids=research_run_ids
@@ -576,22 +591,28 @@ async def _advance_artefact(
         # while pending, same pattern as `research_run_ids` above (#76
         # increment 2). See `pipeline.extract_channel_plan` for why it must
         # be what the run was shown, not a fresh fetch.
-        pending = json.loads(artefact.get("body") or "{}")
         taxonomy = pending.get("channel_taxonomy") or {}
         result = await pipeline.advance_channel_plan(
-            gateway, run_id=_require_run_id(), taxonomy=taxonomy
+            gateway,
+            run_id=_require_run_id(),
+            taxonomy=taxonomy,
+            allowed_source_urls=allowed_source_urls,
         )
     elif kind == "copy":
         # `channel_plan_channels` is `{channel_key: motion}` for the approved
         # plan's real entries this run was started against — same pattern,
         # see `pipeline.extract_copy`.
-        pending = json.loads(artefact.get("body") or "{}")
         channel_plan_channels = pending.get("channel_plan_channels") or {}
         result = await pipeline.advance_copy(
-            gateway, run_id=_require_run_id(), channel_plan_channels=channel_plan_channels
+            gateway,
+            run_id=_require_run_id(),
+            channel_plan_channels=channel_plan_channels,
+            allowed_source_urls=allowed_source_urls,
         )
     else:
-        result = await _SINGLE_RUN_ADVANCERS[kind](gateway, run_id=_require_run_id())
+        result = await _SINGLE_RUN_ADVANCERS[kind](
+            gateway, run_id=_require_run_id(), allowed_source_urls=allowed_source_urls
+        )
 
     if result is None:
         return artefact  # still in flight; nothing to propose yet
@@ -793,6 +814,14 @@ async def start_positioning_route(
     raw_body = approved_research.get("body")
     research_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
 
+    # The closed set of URLs this run is actually being shown: the approved
+    # research's own citations (issue #22). Read HERE, at start time, and
+    # stashed below — not re-read when the run completes, since research can
+    # be re-run and re-approved in between, and validating against a set this
+    # run never saw would fail an honest positioning run (and pass a
+    # dishonest one).
+    allowed_source_urls = pipeline.citation_source_urls(approved_research.get("citations"))
+
     causation_id, run_id = await pipeline.start_positioning(gateway, research_body=research_body)
 
     created = await _core(
@@ -805,6 +834,11 @@ async def start_positioning_route(
             "status": "pending",
             "causation_id": causation_id,
             "agent_run_id": run_id,
+            # Pending-state payload, overwritten with the real positioning
+            # once proposed — the same shape `start_research_route` uses for
+            # `research_run_ids` and `start_channel_plan_route` for
+            # `channel_taxonomy`.
+            "body": json.dumps({"allowed_source_urls": allowed_source_urls}),
         },
     )
     created.raise_for_status()

@@ -477,6 +477,44 @@ def test_start_positioning_runs_once_research_is_approved(ctx) -> None:
     assert positioning_requests[0]["input_payload"]["research"]["summary"] == "One clear signal."
 
 
+def test_start_positioning_stashes_the_approved_research_citation_urls(ctx) -> None:
+    """Issue #22: the legitimate source set for positioning is closed and
+    already known — it is exactly the approved research's `citations` column —
+    so it is stashed on the pending artefact at START time, the same way
+    `research_run_ids`/`channel_taxonomy` already are. Captured here rather
+    than re-read at advance time on purpose: it must be what THIS run was
+    shown, not whatever research has been re-run to since."""
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+
+    pending = json.loads(started["body"])
+    assert pending["allowed_source_urls"] == ["https://example.com/thread"]
+
+
+def test_get_positioning_artefact_502s_a_fabricated_citation_and_leaves_it_pending(ctx) -> None:
+    """The issue's actual case at the HTTP boundary: the run cites *a* URL, so
+    the count-only guard is satisfied, but it is not one the approved research
+    ever contained. It must not reach an operator as evidenced."""
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_positioning_call(url="https://marketing-statistics.example/benchmarks"),
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")
+
+    assert resp.status_code == 502
+    assert "marketing-statistics.example" in resp.json()["detail"]
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
 def test_get_positioning_artefact_proposes_once_it_succeeds(ctx) -> None:
     client, core, gateway = ctx
     _propose_research(client, core, gateway)
@@ -589,6 +627,39 @@ def test_get_channel_plan_artefact_502s_a_zero_citation_run_and_leaves_it_pendin
     resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 502
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_start_channel_plan_stashes_the_approved_positioning_citation_urls(ctx) -> None:
+    """Issue #22, the channel-plan half — stashed alongside `channel_taxonomy`
+    in the same pending body, since both are "what this run was shown"."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    pending = json.loads(started["body"])
+    assert pending["allowed_source_urls"] == ["https://example.com/thread"]
+    assert pending["channel_taxonomy"], "the taxonomy stash must survive the new key"
+
+
+def test_get_channel_plan_artefact_502s_a_fabricated_citation_and_leaves_it_pending(ctx) -> None:
+    """The issue's case one stage down: a channel recommendation citing a URL
+    the approved positioning never contained is the most confident-sounding
+    fabrication in the pipeline."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_channel_plan_call(url="https://marketing-statistics.example/benchmarks"),
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    assert resp.status_code == 502
+    assert "marketing-statistics.example" in resp.json()["detail"]
     assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
 
 
@@ -755,6 +826,61 @@ def test_get_copy_artefact_502s_a_zero_citation_run_and_leaves_it_pending(ctx) -
 
     assert resp.status_code == 502
     assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_start_copy_stashes_the_union_of_both_approved_inputs_citation_urls(ctx) -> None:
+    """Issue #22, the copy half. Copy is started against TWO approved
+    artefacts, so its legitimate source set is the union of both — the
+    channel plan's own citations are a subset of the positioning's in
+    practice, but that is a consequence of this very check holding upstream,
+    not something this stage should assume."""
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+
+    pending = json.loads(started["body"])
+    assert pending["allowed_source_urls"] == ["https://example.com/thread"]
+    assert pending["channel_plan_channels"], "the channel stash must survive the new key"
+
+
+def test_get_copy_artefact_502s_a_fabricated_citation_and_leaves_it_pending(ctx) -> None:
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_copy_call(url="https://marketing-statistics.example/benchmarks"),
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/copy")
+
+    assert resp.status_code == 502
+    assert "marketing-statistics.example" in resp.json()["detail"]
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_a_pending_artefact_started_before_this_check_still_advances(ctx) -> None:
+    """The deploy-day case: a positioning run started by the old code carries
+    no `allowed_source_urls` in its pending body. That is "not known", not
+    "nothing allowed" — it must still advance, or shipping this check would
+    strand every in-flight run on evidence nobody recorded."""
+    client, core, gateway = ctx
+    _propose_research(client, core, gateway)
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+    core.artefacts[started["id"]]["body"] = None  # as the pre-#22 route wrote it
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_positioning_call(url="https://marketing-statistics.example/benchmarks"),
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "proposed"
 
 
 def test_copy_artefact_can_be_approved(ctx) -> None:

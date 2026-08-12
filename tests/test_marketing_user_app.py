@@ -149,7 +149,7 @@ def _approved_copy_artefact(**overrides: Any) -> dict[str, Any]:
 def fake_signed_client(monkeypatch: pytest.MonkeyPatch):
     def _install(responses: dict[str, tuple[int, bytes]]) -> _FakeSignedCoreClient:
         client = _FakeSignedCoreClient(responses)
-        monkeypatch.setattr(principal_client, "SignedCoreClient", lambda token, **kw: client)
+        monkeypatch.setattr(principal_client, "SignedCoreClient", lambda **kw: client)
         monkeypatch.setattr(admin_app, "CORE_API_URL", _CORE_API_URL)
         return client
 
