@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from aws_lambda_powertools import Logger
 from pydantic import BaseModel, ValidationError
 
 from .definitions import (
@@ -89,7 +90,10 @@ from .definitions import (
     positioning_definition,
     positioning_tool_schema,
     research_definition,
+    research_search_query,
 )
+
+logger = Logger(child=True)
 
 
 class PipelineError(Exception):
@@ -745,7 +749,20 @@ async def start_research(
                 model=research_model, instructions=RESEARCH_INSTRUCTIONS[agent_name]
             ),
             output_tool=findings_tool_schema(),
-            input_payload={"brief": brief},
+            # `search_query` FIRST, and per agent (issue #101). An `:online`
+            # run's retrieval is derived from this payload — the provider
+            # searches before the model is invoked — so the payload, not the
+            # instructions, is the only place an angle can affect what is
+            # retrieved. Both agents used to be sent the identical
+            # `{"brief": brief}` and duly received the same pages (4 of 5
+            # shared on campaign `ed7c5bc2`). `brief` is unchanged and still
+            # carries the full brief for the model to read; the query line is
+            # additive, and first because JSON key order is preserved and the
+            # angle should lead the text a query is derived from.
+            input_payload={
+                "search_query": research_search_query(agent_name=agent_name, brief=brief),
+                "brief": brief,
+            },
             causation_id=chain_id,
         )
         research_run_ids.append(run_id)
@@ -800,6 +817,116 @@ def _aggregate_research_annotations(
     return []
 
 
+def _annotation_url(entry: Any) -> str | None:
+    """The URL inside one ``annotations`` entry, whichever shape it arrived in.
+
+    Core stores what the runtime recorded, and OpenRouter's ``url_citation``
+    annotation has been seen both flattened (``{"type": "url_citation",
+    "url": ...}`` — the shape every fixture in this repo uses and the shape
+    Core writes today) and nested (``{"url_citation": {"url": ...}}``, the
+    upstream OpenAI-compatible form). Reading only one of them would make the
+    breadth measurement below silently report zero the day the other appears,
+    which is exactly the kind of quiet blindness issue #101 was filed about.
+    """
+    if not isinstance(entry, dict):
+        return None
+    url = entry.get("url")
+    if not isinstance(url, str) or not url:
+        nested = entry.get("url_citation")
+        url = nested.get("url") if isinstance(nested, dict) else None
+    return url if isinstance(url, str) and url else None
+
+
+def _is_site_root(url: str) -> bool:
+    """True for a bare origin — ``https://example.com`` or
+    ``https://example.com/`` — and false for anything carrying a path or a
+    query. The distinction issue #101 measured by hand: a homepage citation
+    cannot substantiate a claim about a price on a pricing page."""
+    parts = urlsplit(url.strip())
+    return parts.path.strip("/") == "" and not parts.query
+
+
+@dataclass(frozen=True)
+class EvidenceProfile:
+    """How broad and how deep one research chain's retrieval actually was.
+
+    Every number here was measured **by hand**, off provider annotations, to
+    file issue #101 — 5 URLs per agent, 4 shared, 6 distinct, 0 deep pages.
+    That is the argument for computing it on every run instead: the evidence
+    base being thin is not visible in any artefact an operator reads, and
+    nothing failed, so the only way to notice was for somebody to go looking.
+
+    ``runs_measured`` is deliberately separate from the count of runs asked
+    about: a run whose ``annotations`` are ``None`` (not a grounded run, or a
+    vanished view) contributes nothing and must not be read as one that
+    retrieved zero URLs — the same tri-state distinction
+    :func:`_aggregate_research_annotations` keeps one level up.
+    """
+
+    runs_measured: int
+    distinct_urls: int
+    shared_urls: int
+    deep_pages: int
+    site_roots: int
+
+
+def evidence_profile(views: Collection[AgentRunView | None]) -> EvidenceProfile:
+    """Measure the retrieval pool the research runs actually drew on.
+
+    ``shared_urls`` counts distinct URLs returned to more than one run — the
+    fan-out's redundancy, and the number that says whether running two angles
+    bought two evidence pools or one. ``site_roots`` counts distinct URLs with
+    no path at all, which is the depth question: a pool of home pages cannot
+    support a finding that quotes a figure, however many home pages it holds.
+    """
+    per_run: list[set[str]] = []
+    for view in views:
+        if view is None or view.annotations is None:
+            continue
+        urls = {u for u in (_annotation_url(a) for a in view.annotations) if u}
+        per_run.append({_url_key(u) for u in urls})
+    distinct: set[str] = set().union(*per_run) if per_run else set()
+    shared = {url for url in distinct if sum(url in run for run in per_run) > 1}
+    roots = {url for url in distinct if _is_site_root(url)}
+    return EvidenceProfile(
+        runs_measured=len(per_run),
+        distinct_urls=len(distinct),
+        shared_urls=len(shared),
+        deep_pages=len(distinct) - len(roots),
+        site_roots=len(roots),
+    )
+
+
+def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | None]) -> None:
+    """Record this chain's retrieval breadth where an operator investigating a
+    thin artefact will find it, without failing the run over it.
+
+    Not a guard, on purpose. Thin, homepage-only retrieval is a property of
+    what the provider returned, not of anything the model did wrong, so
+    failing on it would strand a campaign on a condition re-running cannot
+    fix — see this module's docstring on why the citation guards fail closed
+    and this one does not.
+    """
+    profile = evidence_profile(views)
+    logger.info(
+        "research retrieval breadth: %d distinct URLs across %d grounded run(s) "
+        "(%d shared by more than one, %d deep pages, %d site roots)",
+        profile.distinct_urls,
+        profile.runs_measured,
+        profile.shared_urls,
+        profile.deep_pages,
+        profile.site_roots,
+        extra={
+            "causation_id": chain_id,
+            "research_runs_measured": profile.runs_measured,
+            "research_distinct_urls": profile.distinct_urls,
+            "research_shared_urls": profile.shared_urls,
+            "research_deep_pages": profile.deep_pages,
+            "research_site_roots": profile.site_roots,
+        },
+    )
+
+
 async def advance_research(
     gateway: AgentGateway,
     *,
@@ -826,6 +953,12 @@ async def advance_research(
     issue #90: the synthesis run is never a grounded (``:online``) run, so its
     ``.annotations`` can never answer "did retrieval find anything"; the two
     research runs named in ``research_run_ids`` are the ones that retrieved.
+
+    Those same annotations are also measured and logged
+    (:func:`_log_evidence_profile`, issue #101) — how many distinct URLs the
+    chain retrieved, how many both angles were handed, and how many were bare
+    home pages. That is a report, not a gate: it never changes what this
+    function returns or raises.
     """
     del synthesis_model  # the engine chooses the synthesis run's model, not us
 
@@ -838,6 +971,7 @@ async def advance_research(
         if not synthesis_run.succeeded:
             raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
         research_views = [await gateway.get_agent_run(run_id=rid) for rid in research_run_ids]
+        _log_evidence_profile(chain_id=chain_id, views=research_views)
         return extract_research_synthesis(
             synthesis_run.messages,
             annotations=_aggregate_research_annotations(research_views),
