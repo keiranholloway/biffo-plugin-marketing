@@ -1,4 +1,6 @@
 import type { PackAsset, PackLink } from '../lib/api'
+import { assetFilename } from '../lib/assetFilename'
+import { DownloadButton } from './DownloadButton'
 
 /** The organic pack (M5) and paid pack (M9) are the same shape with
  * paid-specific additions on top (`paid_pack_routes.py`'s own module
@@ -9,6 +11,11 @@ import type { PackAsset, PackLink } from '../lib/api'
  * failure path (see `useClipboard`) or to how a missing render is disclosed
  * now lands in one place for both packs, not one and possibly not the
  * other.
+ *
+ * #117's download affordance is why that matters concretely: the creative
+ * grid is one component, so both packs gained the ability to save an asset
+ * in the same change rather than the organic pack getting it and the paid
+ * pack silently keeping a bare `<img>`.
  */
 
 export function MissingPlacementsWarning({ missingPlacements }: { missingPlacements: string[] }) {
@@ -21,7 +28,30 @@ export function MissingPlacementsWarning({ missingPlacements }: { missingPlaceme
   )
 }
 
-export function PackAssets({ assets }: { assets: PackAsset[] }) {
+/** What one asset is, in the operator's words — the label under the
+ * thumbnail and the thing the download control names. `is_source` and
+ * `placement` are the only two things that distinguish assets in a pack
+ * (`pack_routes._existing_assets`). */
+function assetLabel(a: PackAsset): string {
+  if (a.is_source === true) return 'source'
+  return a.placement ?? 'creative'
+}
+
+/** The creative grid, with a save affordance per asset (#117).
+ *
+ * `campaignName` exists solely to name the downloaded file — object storage
+ * knows the bytes only as a uuid, so without it the operator's camera roll
+ * fills with indistinguishable `9f1c….png`s. See `lib/assetFilename.ts` for
+ * how the name is composed and `DownloadButton.tsx` for why this is a plain
+ * link rather than a fetch-to-blob.
+ */
+export function PackAssets({
+  assets,
+  campaignName,
+}: {
+  assets: PackAsset[]
+  campaignName: string
+}) {
   return (
     <>
       <h4>Creative</h4>
@@ -31,6 +61,11 @@ export function PackAssets({ assets }: { assets: PackAsset[] }) {
           <li key={a.id}>
             <img src={a.url} alt={a.placement ?? 'Source creative'} />
             <span>{a.is_source === true ? 'Source' : (a.placement ?? '—')}</span>
+            <DownloadButton
+              url={a.url}
+              filename={assetFilename(a, campaignName)}
+              accessibleName={`Download ${assetLabel(a)} creative`}
+            />
           </li>
         ))}
       </ul>

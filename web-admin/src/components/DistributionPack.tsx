@@ -25,9 +25,15 @@ import { PublishLink } from './PublishLink'
  */
 export function DistributionPack({
   campaignId,
+  campaignName,
   channelLookup,
 }: {
   campaignId: string
+  /** Only used to name a downloaded creative (#117) — object storage knows
+   * the bytes as a uuid, so the pack has to supply the human name. Threaded
+   * from `CampaignDetail`, which already holds the campaign row, rather than
+   * refetched here. */
+  campaignName: string
   channelLookup: ChannelLookup
 }) {
   const [pack, setPack] = useState<Pack | null>(null)
@@ -60,7 +66,7 @@ export function DistributionPack({
         <div className="pack-body">
           <MissingPlacementsWarning missingPlacements={pack.missing_placements} />
 
-          <PackAssets assets={pack.assets} />
+          <PackAssets assets={pack.assets} campaignName={campaignName} />
 
           <h4>Copy</h4>
           {pack.copy.length === 0 && <p className="empty">No approved copy channels.</p>}

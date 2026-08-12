@@ -867,6 +867,42 @@ details.mint-toggle[open] > .mint {
   margin-bottom: 0.25rem;
 }
 
+/* ── Download affordance on a creative asset (#117) ───────────────────────
+ *
+ * An `<a download>`, not a `<button>` — see `DownloadButton.tsx` for why the
+ * fetch-to-blob shape cannot work against a presigned URL here — so it needs
+ * its own rules: the `button.secondary` block above is element-scoped and an
+ * anchor picks up none of it, including the focus ring.
+ */
+
+.download-btn {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.download-btn:hover {
+  background: var(--neutral-bg);
+  border-color: var(--text-muted);
+}
+
+.download-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 4px var(--focus-ring);
+}
+
 .stills .cost {
   margin: 0.15rem 0 0;
   color: var(--text-muted);

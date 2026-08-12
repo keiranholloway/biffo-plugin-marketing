@@ -82,7 +82,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/missing renders for: feed_1x1, story_9x16/i)).toBeInTheDocument()
@@ -110,7 +110,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/no public base url configured/i)).toBeInTheDocument()
@@ -135,7 +135,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/no copy artefact for this campaign yet/i)).toBeInTheDocument()
@@ -154,7 +154,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/^campaign not found\./i)).toBeInTheDocument()
@@ -175,7 +175,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/copy artefact must be approved before this can proceed/i)).toBeInTheDocument()
@@ -206,7 +206,7 @@ describe('DistributionPack', () => {
 
     // An empty taxonomy (not yet loaded any real entries) — a channel_key
     // with nothing to resolve against.
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     const badge = await screen.findByText(/unrecognised channel/i)
@@ -243,7 +243,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([], true)} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([], true)} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
 
     expect(await screen.findByText(/loading channel/i)).toBeInTheDocument()
@@ -284,7 +284,7 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([LINKEDIN])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([LINKEDIN])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
     await screen.findByText('Fast onboarding, done right')
 
@@ -348,10 +348,76 @@ describe('DistributionPack', () => {
       }),
     )
 
-    render(<DistributionPack campaignId={CAMPAIGN} channelLookup={makeLookup([NO_COMPOSER])} />)
+    render(<DistributionPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([NO_COMPOSER])} />)
     await user.click(screen.getByRole('button', { name: /load pack/i }))
     await screen.findByText('Trade press — earned coverage')
 
     expect(screen.queryByRole('link', { name: /publish on/i })).not.toBeInTheDocument()
+  })
+
+  // #117: the pack exists so an operator standing in a venue can get the
+  // creative out of it. Until this, the only affordance was long-pressing
+  // the `<img>` and hoping.
+  it('offers a download per creative asset, named for the campaign rather than the storage key', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaign_id: CAMPAIGN,
+          assets: [
+            {
+              id: 'as1',
+              campaign_id: CAMPAIGN,
+              media_kind: 'image',
+              placement: null,
+              media_id: 'm1',
+              is_source: true,
+              url: 'https://bucket.s3.amazonaws.com/plugins/marketing/9f1c.png?X-Amz-Signature=a',
+            },
+            {
+              id: 'as2',
+              campaign_id: CAMPAIGN,
+              media_kind: 'image',
+              placement: 'feed_1x1',
+              media_id: 'm2',
+              is_source: false,
+              url: 'https://bucket.s3.amazonaws.com/plugins/marketing/7b2d.png?X-Amz-Signature=b',
+            },
+          ],
+          missing_placements: [],
+          copy: [],
+          links: [],
+          guidance: '',
+        }),
+      }),
+    )
+
+    render(
+      <DistributionPack
+        campaignId={CAMPAIGN}
+        campaignName="Spring Launch"
+        channelLookup={makeLookup([LINKEDIN])}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /load pack/i }))
+
+    const source = await screen.findByRole('link', { name: /download source creative/i })
+    // Built from the URL the page already holds — a presign is minted per
+    // read and cannot be re-derived here (`pack_routes._asset_with_url`).
+    expect(source).toHaveAttribute(
+      'href',
+      'https://bucket.s3.amazonaws.com/plugins/marketing/9f1c.png?X-Amz-Signature=a',
+    )
+    expect(source).toHaveAttribute('download', 'spring-launch-source.png')
+
+    const placed = screen.getByRole('link', { name: /download feed_1x1 creative/i })
+    expect(placed).toHaveAttribute(
+      'href',
+      'https://bucket.s3.amazonaws.com/plugins/marketing/7b2d.png?X-Amz-Signature=b',
+    )
+    expect(placed).toHaveAttribute('download', 'spring-launch-feed-1x1.png')
   })
 })

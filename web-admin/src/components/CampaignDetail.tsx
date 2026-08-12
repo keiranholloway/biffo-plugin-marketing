@@ -84,10 +84,18 @@ export function CampaignDetail({
       <ImageGenerator campaignId={campaign.id} />
 
       <h3>Distribution pack</h3>
-      <DistributionPack campaignId={campaign.id} channelLookup={channelLookup} />
+      <DistributionPack
+        campaignId={campaign.id}
+        campaignName={campaign.name}
+        channelLookup={channelLookup}
+      />
 
       <h3>Paid brief pack</h3>
-      <PaidPack campaignId={campaign.id} channelLookup={channelLookup} />
+      <PaidPack
+        campaignId={campaign.id}
+        campaignName={campaign.name}
+        channelLookup={channelLookup}
+      />
 
       <h3>Results</h3>
       <Results campaignId={campaign.id} />
