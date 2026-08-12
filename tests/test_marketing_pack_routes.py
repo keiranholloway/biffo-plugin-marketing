@@ -679,3 +679,140 @@ def test_does_not_remint_or_drop_a_link_with_null_is_paid(monkeypatch: pytest.Mo
     assert len(links) == 1
     assert links[0]["url"] == f"{_BASE_URL}/c/null-is-paid-token"
     assert core.links == [core.links[0]]
+
+
+# ── the assets-only read (#102) ──────────────────────────────────────────────
+#
+# `GET /campaigns/{id}/assets` exists because the admin UI's stills panel held
+# generated stills in React state alone and rendered "No stills generated yet
+# this session" for a campaign whose creative was generated earlier — an empty
+# state indistinguishable from "this campaign has no creative", in front of
+# the one button in this plugin that spends money. These tests hold the two
+# properties that make it usable on mount, both of which `/pack` lacks: it is
+# not gated on approved copy, and it writes nothing.
+
+
+def test_assets_route_serves_existing_creative_with_no_copy_artefact_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #102 case exactly: a still generated before copy was approved.
+    `/pack` 404s here (see `test_404s_when_no_copy_artefact_exists`), which is
+    precisely why the panel could not read from it — and precisely the
+    operator most at risk of paying for a second copy of an image they
+    already have."""
+    core = _FakeCore(copy_artefact=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["assets"]) == 1
+    assert body["assets"][0]["is_source"] is True
+    assert body["assets"][0]["url"].startswith("https://bucket.s3.eu-west-1.amazonaws.com/")
+    assert set(body["missing_placements"]) == set(PLACEMENTS)
+
+
+def test_assets_route_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No link minting, and no dependence on `destination_url` or a public
+    base URL — a panel that loads on mount must not write rows, and must not
+    422/503 on a campaign that simply has no destination set yet. `/pack`
+    does both (`_ensure_links`), which is the second reason this is its own
+    route rather than a call to that one."""
+    core = _FakeCore(
+        campaign={"id": _CAMPAIGN, "destination_url": None, "guidance": None},
+        copy_artefact=_copy_artefact(_CHANNELS),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 200
+    assert core.links == []
+    assert "links" not in resp.json()
+
+
+def test_assets_route_reports_an_empty_campaign_as_empty_not_as_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A campaign with nothing generated yet is a 200 with an empty list, not
+    a 404 — the panel distinguishes "nothing here" from "could not check",
+    and can only do that if this route answers the first case cleanly."""
+    core = _FakeCore(copy_artefact=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    client = TestClient(
+        _app(core_client=_FakeStorageClient(), campaign_client=_FakeCampaignClient(assets=[]))
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 200
+    assert resp.json()["assets"] == []
+    assert resp.json()["superseded_source_count"] == 0
+
+
+def test_assets_route_404s_an_unknown_campaign(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = _FakeCore(campaign=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    client = TestClient(
+        _app(core_client=_FakeStorageClient(), campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 404
+
+
+def test_assets_route_applies_the_same_newest_source_wins_dedup_as_the_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same helper, therefore the same answer (#54): one surface showing
+    every duplicate source labelled "Source" while the other shows one is a
+    worse failure than either behaviour on its own, since the operator
+    reading both cannot tell which is the creative in effect."""
+    core = _FakeCore(copy_artefact=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    older = {
+        **_source_asset(),
+        "id": "asset-source-older",
+        "media_id": "media-older",
+        "created_at": "2026-08-01T00:00:00Z",
+    }
+    newer = {
+        **_source_asset(),
+        "id": "asset-source-newer",
+        "media_id": "media-newer",
+        "created_at": "2026-08-05T00:00:00Z",
+    }
+    campaign_client = _FakeCampaignClient(assets=[older, newer])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["assets"]) == 1
+    assert body["assets"][0]["media_id"] == "media-newer"
+    assert body["superseded_source_count"] == 1
+
+
+def test_assets_route_includes_placement_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The placements `generate_still_route` writes (#36) are part of what
+    already exists, so the panel shows them too — the point is "what has this
+    campaign already been paid for", not "what was the source"."""
+    core = _FakeCore(copy_artefact=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    assets = [_source_asset()] + [_placement_asset(p, media_id=f"media-{p}") for p in PLACEMENTS]
+    campaign_client = _FakeCampaignClient(assets=assets)
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {a["placement"] for a in body["assets"] if a["placement"]} == set(PLACEMENTS)
+    assert body["missing_placements"] == []

@@ -563,6 +563,28 @@ export interface Pack {
   guidance: string
 }
 
+/** The assets half of the pack, on its own — no copy gate, no link minting.
+ * `pack_routes.list_assets_route` explains why this is a separate route
+ * rather than a `/pack` call: `/pack` 404s/409s until copy is approved and
+ * mints tracked links as a side effect, neither of which a panel that loads
+ * on mount can accept. */
+export interface CampaignAssets {
+  campaign_id: string
+  assets: PackAsset[]
+  missing_placements: string[]
+  superseded_source_count: number
+}
+
+export async function getCampaignAssets(campaignId: string): Promise<CampaignAssets> {
+  return request<CampaignAssets>(
+    'GET',
+    `/campaigns/${campaignId}/assets`,
+    undefined,
+    ADMIN_BASE,
+    "load this campaign's existing creative",
+  )
+}
+
 export async function getPack(campaignId: string): Promise<Pack> {
   return request<Pack>('GET', `/campaigns/${campaignId}/pack`, undefined, ADMIN_BASE, 'load the distribution pack')
 }
