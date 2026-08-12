@@ -144,11 +144,22 @@ def _validated_campaign_id(campaign_id: str) -> str:
 
 
 class MintRequest(BaseModel):
-    """One link to mint: a channel, optionally a variant, organic or paid."""
+    """One link to mint: a channel key, and optionally a variant.
+
+    No ``is_paid`` here (#84). It used to be a caller-supplied flag,
+    independent of ``channel`` — which meant an operator could tick "Paid
+    placement" for a channel whose own taxonomy row already says
+    ``motion: organic``, or leave it unticked for one that is inherently
+    paid, and nothing reconciled the two. Motion now lives on the channel
+    (#76 increment 2), so ``mint_links`` derives ``is_paid`` from the
+    selected channel's own ``motion`` and this model does not accept a
+    second, independently-wrong answer to the same question. A legacy
+    caller that still sends ``is_paid`` is not rejected for it — pydantic
+    ignores unknown fields by default — it is simply not consulted.
+    """
 
     channel: str = Field(min_length=1, max_length=64)
     variant: str | None = Field(default=None, max_length=64)
-    is_paid: bool = False
 
 
 class MintBody(BaseModel):
@@ -205,8 +216,30 @@ async def mint_links(
             detail="This campaign has no destination_url, so its links would lead nowhere.",
         )
 
+    # #84: `marketing_link.channel` now holds taxonomy keys everywhere else
+    # (`pack_routes._ensure_links`) — this was the one path still writing
+    # whatever an operator typed. Validated here, against this tenant's own
+    # `marketing_channel` rows, not against a hardcoded list: an
+    # instance-added channel must mint exactly as well as a seeded one.
+    channel_motions = await _channel_motions(admin.token)
+    unrecognised = sorted(
+        {spec.channel for spec in body.links if spec.channel not in channel_motions}
+    )
+    if unrecognised:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Not a recognised channel key: {', '.join(unrecognised)}. "
+                f"Valid channel keys: {', '.join(sorted(channel_motions))}."
+            ),
+        )
+
     minted: list[dict[str, Any]] = []
     for spec in body.links:
+        # Derived from the channel's own taxonomy row, not from anything the
+        # caller sent (#84) — see `MintRequest`'s docstring for why there is
+        # no independent `is_paid` on the request any more.
+        is_paid = channel_motions[spec.channel] == "paid"
         token = mint_token()
         created = await _core(
             "POST",
@@ -217,7 +250,7 @@ async def mint_links(
                 "token": token,
                 "channel": spec.channel,
                 "variant": spec.variant,
-                "is_paid": spec.is_paid,
+                "is_paid": is_paid,
                 # Resolved HERE, once, and stored. The public redirect sends the
                 # caller to exactly what is stored, so editing the campaign
                 # tomorrow cannot rewrite a link published today.
@@ -226,7 +259,7 @@ async def mint_links(
                     campaign_id=campaign_id,
                     channel=spec.channel,
                     variant=spec.variant,
-                    is_paid=spec.is_paid,
+                    is_paid=is_paid,
                 ),
             },
         )
@@ -237,12 +270,27 @@ async def mint_links(
                 "id": row.get("id"),
                 "channel": spec.channel,
                 "variant": spec.variant,
-                "is_paid": spec.is_paid,
+                "is_paid": is_paid,
                 "url": tracked_url(base_url, token),
             }
         )
 
     return {"campaign_id": campaign_id, "links": minted}
+
+
+async def _channel_motions(admin_token: str) -> dict[str, str]:
+    """``{channel_key: motion}`` for this tenant's channel taxonomy — what
+    `mint_links` validates a requested channel against, and derives `is_paid`
+    from (#84). Mirrors `paid_pack_routes._channel_ad_platforms`, which fetches
+    the same table for the same reason on the pack side; kept as two small
+    functions rather than one shared helper because the two callers want
+    different projections of the same rows (`ad_platform` there, `motion`
+    here) and a single "give me the taxonomy" helper would just push the
+    projection back onto each call site anyway."""
+    resp = await _core("GET", f"{_INTERNAL_PREFIX}/channels", admin_token)
+    resp.raise_for_status()
+    rows = resp.json() or []
+    return {row["key"]: row["motion"] for row in rows}
 
 
 async def _core(method: str, path: str, token: str, **kw: Any) -> httpx.Response:

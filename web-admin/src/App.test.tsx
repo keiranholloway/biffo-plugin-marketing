@@ -14,13 +14,22 @@ describe('App', () => {
   })
 
   it('lists campaigns it receives', async () => {
+    // Routed by URL, not a single blanket response — `App` now also fetches
+    // `/channels` (`useChannelTaxonomy`, #84), and a campaign row is not a
+    // `ChannelTaxonomyEntry`: reusing the campaigns array for both used to
+    // hand `MintLinks` a list of `{key: undefined}` "channels".
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => [
-          { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null },
-        ],
+      vi.fn((url: string) => {
+        if (typeof url === 'string' && url.endsWith('/channels')) {
+          return Promise.resolve({ ok: true, json: async () => [] })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null },
+          ],
+        })
       }),
     )
     render(<App />)
@@ -36,17 +45,24 @@ describe('App', () => {
 
 describe('creating a campaign', () => {
   it('submits the form and refreshes the list', async () => {
+    // Dispatched by URL/method, not call order (`CampaignDetail.test.tsx`'s
+    // own pattern): `App` now also fetches `/channels` via
+    // `useChannelTaxonomy` (#84), whose effect can fire before or after
+    // `load()`'s — a fixed three-call queue silently mis-fed the taxonomy
+    // fetch a `Campaign` and vice versa the moment a second concurrent
+    // caller was added.
+    let campaigns: unknown[] = []
     const user = userEvent.setup()
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => [] })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: '1' }) })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [
-          { id: '1', name: 'Spring', status: 'draft', destination_url: 'https://x/demo' },
-        ],
-      })
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (typeof url === 'string' && url.endsWith('/channels')) {
+        return Promise.resolve({ ok: true, json: async () => [] })
+      }
+      if (typeof url === 'string' && url.endsWith('/campaigns') && init?.method === 'POST') {
+        campaigns = [{ id: '1', name: 'Spring', status: 'draft', destination_url: 'https://x/demo' }]
+        return Promise.resolve({ ok: true, json: async () => ({ id: '1' }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => campaigns })
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
@@ -68,11 +84,16 @@ describe('creating a campaign', () => {
 
 describe('opening a campaign studio', () => {
   it('switches to the campaign detail view, and back again', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => [
-        { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null, brief: null },
-      ],
+    const fetchMock = vi.fn((url: string) => {
+      if (typeof url === 'string' && url.endsWith('/channels')) {
+        return Promise.resolve({ ok: true, json: async () => [] })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [
+          { id: '1', name: 'Spring demo push', status: 'draft', destination_url: null, brief: null },
+        ],
+      })
     })
     vi.stubGlobal('fetch', fetchMock)
 

@@ -9,6 +9,7 @@ import {
   getResults,
   listCampaigns,
   listChannels,
+  mintLinks,
   parseArtefactBody,
   startResearch,
   updateCampaign,
@@ -199,6 +200,70 @@ describe('pipeline artefacts', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/plugins/marketing/admin/campaigns/c1/artefacts/channel_plan/approve')
     expect(init.method).toBe('POST')
+  })
+})
+
+describe('mintLinks', () => {
+  it('sends only the channel key (and variant, if given) — no is_paid (#84)', async () => {
+    stubSession('abc123')
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ links: [] }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await mintLinks('c1', [{ channel: 'linkedin_organic' }])
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/plugins/marketing/admin/campaigns/c1/links')
+    expect(JSON.parse(init.body as string)).toEqual({ links: [{ channel: 'linkedin_organic' }] })
+  })
+
+  it('surfaces a FastAPI validation error verbatim from the real API shape (#83)', async () => {
+    // The exact response the API returns for an over-long channel (issue
+    // #83's own repro): `detail` is a LIST of pydantic error objects, not
+    // the hand-authored string every other endpoint returns. This is a
+    // direct API caller's route to the bug — the web-admin picker (#84)
+    // makes an over-long CHANNEL unreachable through the form, but this is
+    // the shape the whole plugin can return, which is why the fix lives in
+    // `detailMessage`/`onError`, not in one component.
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              type: 'string_too_long',
+              loc: ['body', 'links', 0, 'channel'],
+              msg: 'String should have at most 64 characters',
+              ctx: { max_length: 64 },
+            },
+          ],
+        }),
+      }),
+    )
+
+    await expect(mintLinks('c1', [{ channel: 'x'.repeat(80) }])).rejects.toThrow(
+      /channel: String should have at most 64 characters \(422\)/,
+    )
+  })
+
+  it('surfaces the hand-authored string detail for an unrecognised channel key (#84)', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: "Not a recognised channel key: totally made up channel. Valid channel keys: linkedin_organic.",
+        }),
+      }),
+    )
+
+    await expect(mintLinks('c1', [{ channel: 'totally made up channel' }])).rejects.toThrow(
+      /not a recognised channel key/i,
+    )
   })
 })
 

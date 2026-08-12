@@ -57,17 +57,56 @@ async function getIdToken(): Promise<string | null> {
   return session?.getIdToken().getJwtToken() ?? null
 }
 
+/** One entry of a FastAPI/pydantic validation-error list — the shape `detail`
+ * takes on a 422 raised by request-body validation itself (a `Field`
+ * constraint), rather than by a plugin's own `raise HTTPException(...)`. See
+ * {@link detailMessage}'s docstring for why this is a second shape `detail`
+ * takes, not a malformed instance of the string one. */
+interface ValidationErrorItem {
+  loc?: unknown[]
+  msg?: string
+}
+
+/** Turns a FastAPI validation-error list into one operator-readable line per
+ * error — the field name (the last, most specific segment of `loc`, e.g.
+ * `["body","links",0,"channel"]` → `channel`) and pydantic's own `msg`
+ * ("String should have at most 64 characters"), which between them are
+ * exactly "the field and the constraint" #83 asks the UI to show. `null`
+ * only if every item is unusable (missing `msg`), so the caller still has a
+ * status-coded fallback rather than an empty string. */
+function formatValidationErrors(items: unknown[]): string | null {
+  const lines = items
+    .map((item): string | null => {
+      if (item === null || typeof item !== 'object') return null
+      const { loc, msg } = item as ValidationErrorItem
+      if (typeof msg !== 'string') return null
+      const field = Array.isArray(loc) && loc.length > 0 ? String(loc[loc.length - 1]) : null
+      return field !== null ? `${field}: ${msg}` : msg
+    })
+    .filter((line): line is string => line !== null)
+  return lines.length > 0 ? lines.join('; ') : null
+}
+
+/** Extracts an operator-readable reason from a failed response's body, or
+ * `null` if there is nothing safe to show.
+ *
+ * `detail` takes TWO shapes here, both genuine, and conflating them is #83:
+ * a **string** for every `HTTPException` this plugin raises itself (hand-
+ * authored specifically to be read), and a **list** of
+ * {@link ValidationErrorItem} for a 422 FastAPI raises on its own, before a
+ * route body ever runs, when a `Field` constraint rejects the request (e.g.
+ * `channel: str = Field(max_length=64)` on a channel over that length). The
+ * first version of this function handled only the string case, so a
+ * validation 422 fell through silently — not a wrong message, no message,
+ * because nothing here recognised the shape at all.
+ */
 async function detailMessage(response: Response): Promise<string | null> {
   try {
     const body: unknown = await response.json()
-    if (
-      body !== null &&
-      typeof body === 'object' &&
-      'detail' in body &&
-      typeof (body as { detail?: unknown }).detail === 'string'
-    ) {
-      return (body as { detail: string }).detail
-    }
+    if (body === null || typeof body !== 'object' || !('detail' in body)) return null
+    const detail = (body as { detail?: unknown }).detail
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail)) return formatValidationErrors(detail)
   } catch {
     // Not JSON, or an empty body — nothing safe to extract, fall through to a
     // generic message rather than guessing at unstructured text.
@@ -83,14 +122,21 @@ async function detailMessage(response: Response): Promise<string | null> {
  * behind the hook `api-core.ts` added specifically so they would not have to
  * collapse into a generic status message.
  *
- * `createCampaign`/`listCampaigns`/`mintLinks` hit Core's *generic* CRUD, whose
- * 403 text ("Administrator access required") is Core's own wording, not this
- * plugin's — the tests deliberately do not surface it verbatim, so those three
- * keep their own hand-authored messages rather than reading `detail`.
- * Everything else hits THIS plugin's own admin routes, whose `detail` text is
- * hand-authored specifically to be read by the operator — extracting and
- * showing it is the point (see the file-level comment below for the fuller
- * version of this split).
+ * `createCampaign`/`listCampaigns`/`mintLinks` hit Core's *generic* CRUD (or,
+ * for `mintLinks`, the host's own `group_gate` ahead of it), whose 403 text
+ * ("Administrator access required") is Core's own wording, not this plugin's
+ * — the tests deliberately do not surface it verbatim, so those three keep
+ * their own hand-authored 403 message rather than reading `detail`.
+ * `mintLinks`'s 422, unlike its 403, is NOT generic: it is either this
+ * plugin's own hand-authored `HTTPException` (`admin_app.mint_links`'s "no
+ * destination_url" and channel-taxonomy checks) or FastAPI's own validation
+ * error for a `Field` constraint on the request body (both plugin-specific —
+ * `MintRequest` is this plugin's own model), so it reads `detail` the same
+ * way the `default` branch below does (#83 — the earlier hardcoded 422
+ * message discarded both). Everything else hits THIS plugin's own admin
+ * routes, whose `detail` text is hand-authored specifically to be read by the
+ * operator — extracting and showing it is the point (see the file-level
+ * comment below for the fuller version of this split).
  */
 async function onError(response: Response, context: string | undefined): Promise<never> {
   if (response.status === 401) {
@@ -113,6 +159,18 @@ async function onError(response: Response, context: string | undefined): Promise
         throw new Error('you need the admin role to mint links (403)')
       }
       if (response.status === 422) {
+        // Reads `detail` rather than assuming what a 422 here means (#83):
+        // it is one of "no destination_url" (a hand-authored string), an
+        // unrecognised channel key (#84, also a string), or a `Field`
+        // constraint like `channel`'s 64-character ceiling (a validation
+        // list) — three different causes that used to render the same
+        // hardcoded sentence regardless of which one actually happened.
+        // Falls back to the pre-#83 wording only when nothing readable came
+        // back at all, so a genuinely bodyless 422 still says something.
+        const detail = await detailMessage(response)
+        if (detail !== null) {
+          throw new Error(`${detail} (422)`)
+        }
         throw new Error('this campaign has no destination URL, so its links would lead nowhere')
       }
       if (response.status === 503) {
@@ -171,14 +229,20 @@ export interface MintedLink {
 
 /** Mint tracked links for a campaign.
  *
- * The caller supplies only a channel (and optionally a variant, and whether it
- * is paid). The token and the destination — including `utm_campaign`, which is
- * the campaign's own id — are derived server-side and cannot be supplied. That
- * is the point of the whole milestone, so the form does not offer them.
+ * The caller supplies a channel **key** from the taxonomy (`listChannels`),
+ * and optionally a variant. The token and the destination — including
+ * `utm_campaign`, which is the campaign's own id — are derived server-side
+ * and cannot be supplied. That is the point of the whole milestone, so the
+ * form does not offer them.
+ *
+ * No `is_paid` parameter (#84): motion lives on the channel now, so the
+ * server derives `is_paid` from the selected channel's own taxonomy row
+ * rather than trusting a second, independently-settable flag that could
+ * disagree with it.
  */
 export async function mintLinks(
   campaignId: string,
-  links: { channel: string; variant?: string; is_paid?: boolean }[],
+  links: { channel: string; variant?: string }[],
 ): Promise<MintedLink[]> {
   const body = await request<{ links?: MintedLink[] }>(
     'POST',

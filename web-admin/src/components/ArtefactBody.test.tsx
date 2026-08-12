@@ -16,7 +16,7 @@ import {
  * shape it produces. */
 function makeLookup(entries: ChannelTaxonomyEntry[], loading = false): ChannelLookup {
   const byKey = new Map(entries.map((e) => [e.key, e]))
-  return { get: (key) => byKey.get(key), loading }
+  return { get: (key) => byKey.get(key), entries, loading }
 }
 
 describe('SourceList', () => {

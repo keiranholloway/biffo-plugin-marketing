@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { CampaignDetail } from './components/CampaignDetail'
 import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
+import { useChannelTaxonomy } from './lib/useChannelTaxonomy'
 
 /** The campaign studio's admin surface.
  *
@@ -22,6 +23,11 @@ export default function App() {
   const [destination, setDestination] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  // Fetched once here, not once per row's `MintLinks` (#84) — the same
+  // one-fetch-per-view sharing `CampaignDetail` already does for
+  // `Pipeline`/`DistributionPack` via this same hook.
+  const channelLookup = useChannelTaxonomy()
 
   function load() {
     listCampaigns()
@@ -125,7 +131,7 @@ export default function App() {
                 <td>{c.status}</td>
                 <td>{c.destination_url ?? '—'}</td>
                 <td>
-                  <MintLinks campaignId={c.id} />
+                  <MintLinks campaignId={c.id} channelLookup={channelLookup} />
                 </td>
                 <td>
                   <button type="button" onClick={() => setSelected(c)}>
