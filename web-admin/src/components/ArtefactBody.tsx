@@ -165,6 +165,23 @@ function FindingGroup({
   )
 }
 
+/** `summary` is deliberately "reconciled into a few paragraphs"
+ * (`ResearchSynthesis.summary`'s own field description, `definitions.py`) —
+ * the model already separates its topline claim from the supporting detail
+ * with blank lines. Rendering the whole string as one bold `<p>` discarded
+ * both signals at once: no paragraph breaks (a wall of text regardless of
+ * length) and no distinction between the claim and its elaboration (all of
+ * it the same heavy weight). This restores what the string already carries
+ * rather than inventing new structure. A summary with no blank line in it
+ * (the common case in tests, and a legitimately short real one) still comes
+ * back as a single one-element array, so it renders exactly as before. */
+function summaryParagraphs(summary: string): string[] {
+  return summary
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p !== '')
+}
+
 export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
   // One canonical, deduplicated citation list for the whole artefact — a URL
   // cited by several findings (common: two findings from different angles
@@ -173,9 +190,16 @@ export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
   // repeating it.
   const allSources = dedupeByUrl(body.findings.flatMap((f) => f.sources))
   const indexByUrl = new Map(allSources.map((s, i) => [s.url, i + 1]))
+  const paragraphs = summaryParagraphs(body.summary)
   return (
     <div className="artefact-body">
-      <p className="summary">{body.summary}</p>
+      {paragraphs.map((paragraph, i) => (
+        // The first paragraph is the claim (kept bold, `.summary`'s original
+        // weight); anything after it is elaboration and renders regular.
+        <p key={i} className={i === 0 ? 'summary' : 'summary-elaboration'}>
+          {paragraph}
+        </p>
+      ))}
       <FindingGroup
         items={body.findings.map((f, i) => ({
           key: `${f.signal}-${i}`,

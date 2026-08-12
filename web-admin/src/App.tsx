@@ -128,10 +128,19 @@ export default function App() {
             {campaigns.map((c) => (
               <tr key={c.id}>
                 <td>{c.name}</td>
-                <td>{c.status}</td>
+                <td>
+                  <span className={`badge badge-${c.status}`}>{c.status}</span>
+                </td>
                 <td>{c.destination_url ?? '—'}</td>
                 <td>
-                  <MintLinks campaignId={c.id} channelLookup={channelLookup} />
+                  {/* Collapsed behind a disclosure so a row with tracked
+                      links to mint is still one line — the full channel
+                      picker used to render inline in every row, which is a
+                      per-row ACTION, not table content. */}
+                  <details className="mint-toggle">
+                    <summary>Mint link</summary>
+                    <MintLinks campaignId={c.id} channelLookup={channelLookup} />
+                  </details>
                 </td>
                 <td>
                   <button type="button" onClick={() => setSelected(c)}>
