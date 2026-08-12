@@ -13,10 +13,17 @@ A standalone app with only `image_routes.router` — not `admin_app.build_app()`
 concurrently, and so overriding `image_routes.require_admin` cannot be
 confused with `admin_app.require_admin` (two different dependency callables,
 per the module's own docstring on why routes live here rather than there).
+
+The issue #36 tests near the bottom of this file import `pack_routes` too —
+not to exercise its app, only to call `pack_routes._existing_assets`
+directly and prove it needs no change to pick up the rows this route now
+writes. See the import block's own comment for why `admin_app` has to be
+imported ahead of it there.
 """
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
 import httpx
@@ -24,14 +31,36 @@ import pytest
 from biffo_plugin_sdk import BiffoAPIError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from marketing import image_routes
+# `admin_app` MUST be imported before `pack_routes` in this statement:
+# `pack_routes.py` imports `admin_app`, which in turn imports `pack_routes`'s
+# own `router` to mount it (`admin_app.build_app`) — importing `pack_routes`
+# first would catch it only partially initialized. Importing `admin_app`
+# first here lets that chain resolve fully before this module asks for
+# `pack_routes` itself, exactly the ordering `test_marketing_pack_routes.py`
+# already relies on (`from marketing import admin_app, config, pack_routes`).
+from marketing import admin_app, image_routes, pack_routes  # noqa: F401
+from marketing.definitions import PLACEMENTS
 from marketing.image_provider import GeneratedImage, ImageProviderError
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000ef"
 _MEDIA_ID = "media-1"
 _LEDGER_ID = "ledger-1"
 _PRESIGN_URL = "https://s3.example.invalid/upload"
+
+
+def _png_bytes(width: int, height: int, color: tuple[int, int, int] = (10, 20, 30)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+#: A real, decodable image, square (1:1) — matches `feed_1x1`'s ratio exactly
+#: (so that placement is a no-op render) while `portrait_4x5` and
+#: `story_9x16` both need an actual crop. One fixture exercises both halves
+#: of `render.render`'s contract at once.
+_SQUARE_SOURCE = _png_bytes(300, 300)
 
 
 class _FakeImageProvider:
@@ -612,3 +641,165 @@ def test_rejects_an_empty_prompt() -> None:
     resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": ""})
 
     assert resp.status_code == 422
+
+
+# ── issue #36: placements are rendered here, from the provider's in-memory
+# bytes, never fetched back from storage — see `_store_placement_renders` ──
+
+
+def _find_upload(calls: list[httpx.Request], *, name_contains: str) -> httpx.Request:
+    """The one raw S3 upload whose multipart filename contains
+    `name_contains` — `_placement_variant` names every rendered file
+    `f"{placement}-{uuid}.{ext}"`, so the placement name in the multipart
+    body is enough to tell the source upload and each placement's upload
+    apart without threading anything extra through the fakes."""
+    for call in calls:
+        if name_contains.encode() in call.content:
+            return call
+    raise AssertionError(f"no upload call contained {name_contains!r} in {len(calls)} calls")
+
+
+def test_writes_one_marketing_asset_row_per_placement_alongside_the_source(_s3_upload_ok) -> None:
+    """The core of issue #36. Before the fix, `generate_still_route` wrote
+    only the source row — this fails against that code (only 1 row, not 4)
+    and passes once placements are rendered and stored here."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient()
+    client = TestClient(
+        _app(provider=provider, core_client=_FakeCoreClient(), campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 201
+    # The source row, unchanged.
+    assert campaign.created_assets[0]["is_source"] is True
+    assert campaign.created_assets[0]["placement"] is None
+
+    # One row per placement, mirroring the source row's shape.
+    placement_rows = campaign.created_assets[1:]
+    assert len(placement_rows) == len(PLACEMENTS)
+    assert {row["placement"] for row in placement_rows} == set(PLACEMENTS)
+    for row in placement_rows:
+        assert row["is_source"] is False
+        assert row["campaign_id"] == _CAMPAIGN
+        assert row["media_kind"] == "image"
+        assert row["media_id"]
+
+
+async def test_pack_reports_no_missing_placements_after_generation(_s3_upload_ok) -> None:
+    """Integration proof of the PR's central claim: `pack_routes.py` needs no
+    change. `pack_routes._existing_assets` — untouched by this change — is
+    fed exactly the rows `generate_still_route` wrote and reports the gap
+    closed, the same way `test_marketing_pack_routes.py`'s own
+    `test_includes_placement_assets_that_already_exist_and_reports_no_gap`
+    proves it generically from synthetic fixtures."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient()
+    client = TestClient(
+        _app(provider=provider, core_client=_FakeCoreClient(), campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+    assert resp.status_code == 201
+
+    class _AssetsOnlyClient:
+        async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            assert path == f"{pack_routes._INTERNAL_PREFIX}/assets"
+            return campaign.created_assets
+
+    # `_AssetsOnlyClient` is a structural stand-in for
+    # `principal_client.PrincipalCoreClient` (only `.get` is called by
+    # `_existing_assets`) — pyright checks nominally, so the mismatch is
+    # silenced here rather than making the fake inherit from the real
+    # dual-auth client just to satisfy the checker.
+    _, missing_placements, _ = await pack_routes._existing_assets(
+        _CAMPAIGN,
+        campaign_client=_AssetsOnlyClient(),  # type: ignore[arg-type]
+    )
+    assert missing_placements == []
+
+
+def test_a_source_already_matching_a_placements_ratio_is_not_re_encoded(_s3_upload_ok) -> None:
+    """`render.render`'s no-op path (see its own module docstring): a source
+    already at a placement's exact ratio is returned byte-for-byte, not
+    decoded and re-encoded. `_SQUARE_SOURCE` is 1:1, matching `feed_1x1`
+    exactly, so that placement's upload must carry the ORIGINAL source bytes
+    verbatim — provable here because multipart embeds file bytes unchanged,
+    so the raw source bytes appear as a literal substring of the request
+    that succeeded, and only for that placement."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    client = TestClient(
+        _app(
+            provider=provider,
+            core_client=_FakeCoreClient(),
+            campaign_client=_FakeCampaignClient(),
+        )
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+    assert resp.status_code == 201
+
+    feed_call = _find_upload(_s3_upload_ok, name_contains="feed_1x1")
+    assert _SQUARE_SOURCE in feed_call.content
+
+    # The other two placements DO need a crop — their upload must NOT carry
+    # the untouched source bytes (a no-op there would mean the crop never
+    # actually ran).
+    for placement in ("portrait_4x5", "story_9x16"):
+        cropped_call = _find_upload(_s3_upload_ok, name_contains=placement)
+        assert _SQUARE_SOURCE not in cropped_call.content
+
+
+def test_a_failed_placement_upload_does_not_lose_the_source_or_fail_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The partial-failure decision this issue asks for: the provider has
+    already been paid and the source has already been stored by the time
+    placement rendering runs, so a failure storing ONE placement (here,
+    `portrait_4x5`'s S3 upload is refused) must not lose the source row, must
+    not fail the request with a 5xx that would prompt an operator to
+    regenerate (and be charged again), and must leave exactly that placement
+    absent from `marketing_asset` — the gap `pack_routes.py`'s
+    `missing_placements` already reports honestly, rather than a new failure
+    mode invented here."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if b"portrait_4x5" in request.content:
+            return httpx.Response(403, text="access denied")
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    class _PatchedClient(real_async_client):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _PatchedClient)
+
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient()
+    core = _FakeCoreClient()
+    client = TestClient(_app(provider=provider, core_client=core, campaign_client=campaign))
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    # Not a 5xx: the failure is contained, never surfaced as a request
+    # failure over an already-charged, already-stored generation.
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["asset"]["is_source"] is True
+    assert body["asset"]["media_id"] == _MEDIA_ID
+
+    # The ledger was written exactly once — no re-charge was attempted or
+    # implied by this partial failure.
+    ledger_calls = [c for c in core.calls if c[1] == image_routes._LEDGER_PATH]
+    assert len(ledger_calls) == 1
+
+    placements_written = {row["placement"] for row in campaign.created_assets if row["placement"]}
+    assert placements_written == {"feed_1x1", "story_9x16"}
+    assert "portrait_4x5" not in placements_written
