@@ -1,8 +1,14 @@
 name: CI
 
 # Scaled down from biffo-template's own root .github/workflows/ci.yml for a
-# single Python package: a plugin repo (per ADR-0003) extends the SDK and
-# has no JS/TS of its own.
+# plugin repo (per ADR-0003) whose main package is Python.
+#
+# It is NOT Python-only. This comment used to say the repo "has no JS/TS of its
+# own" while `web-admin/` sat beside it with 108 vitest tests, a typecheck, a
+# lint config and a Vite build — none of which any job ran (#97). That is the
+# same shape as the Terraform paragraph below: an untrue sentence in the file
+# that decides what gets checked is exactly why nothing checked it. See the
+# `admin-frontend` job.
 #
 # It DOES have Terraform. This comment used to claim the opposite — "no
 # Terraform of its own; Terraform, if a plugin ships any, is provisioned by the
@@ -80,6 +86,60 @@ jobs:
         if: always()
         with:
           files: coverage.xml
+
+  # `web-admin/` is the plugin's entire operator surface, and until #97 nothing
+  # in CI entered it: every job above runs `uv` at the repo root, and the admin
+  # UI is a nested pnpm project with its own package.json and lockfile, so no
+  # root-level command reaches it. A PR could break all of its tests, fail
+  # typecheck and merge green — the whole of it was gated by whether the person
+  # or agent making the change happened to run pnpm by hand.
+  #
+  # Kept deliberately in step with the same job in biffo-plugin-idea-scout
+  # (`admin-frontend`, same name and same steps), so a plugin's admin UI is
+  # checked identically wherever it lives.
+  #
+  # ## No `paths:` filter, on purpose
+  #
+  # Every other job here runs on every PR, and this one must too: a job that is
+  # skipped on a PR touching no `web-admin/` files reports nothing, and a
+  # required check that reports nothing blocks the PR for ever. The install is
+  # cached and the whole job is seconds; a path filter would buy nothing and
+  # cost the gate.
+  admin-frontend:
+    name: Admin frontend (lint, types, test, build)
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web-admin
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web-admin/pnpm-lock.yaml
+      # `--ignore-workspace` pins this install to web-admin/ alone. The repo
+      # root carries no package.json today, so pnpm has nothing to walk up
+      # into — but the day one appears (a shared tsconfig, a root tooling
+      # package) an unflagged install would silently resolve the root project
+      # instead and this job would install, lint and test nothing while
+      # reporting green. The flag is what makes that impossible rather than
+      # merely unlikely; it is the same trap the platform deploy workflow
+      # documents for plugin `web/` directories.
+      - run: pnpm install --frozen-lockfile --ignore-workspace
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      # `vitest run` exits non-zero when it finds no test files, so this step
+      # cannot pass by having quietly stopped collecting them.
+      - run: pnpm run test
+      # Build last: a bundle that type-checks but does not build is still a
+      # broken admin UI, and web-admin/dist is what the consuming project
+      # serves for `admin_ingress`.
+      - run: pnpm run build
 
   validate-manifest:
     name: Validate biffo.plugin.json
