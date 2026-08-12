@@ -1,17 +1,35 @@
 import { useEffect, useState } from 'react'
 
-import { getResults, type CampaignResults, type UnmeasuredMetric } from '../lib/api'
+import { getResults, type CampaignResults, type Metric } from '../lib/api'
 
-/** One unmeasurable metric, rendered so it can never be mistaken for a zero.
+/** One leads/conversions/cost figure — measured, or explicitly not.
+ *
  * `results_routes.py`'s own discipline: "no data" is a structurally distinct
  * thing from "zero" — a confident number that is wrong in a systematic
- * direction is worse than a missing one. Every share carries its
- * denominator, when one is known here. */
-function UnmeasuredCell({ label, metric }: { label: string; metric: UnmeasuredMetric }) {
+ * direction is worse than a missing one. So the two branches read
+ * differently on purpose, and a measured `0` renders as `0` rather than
+ * borrowing the unmeasurable wording.
+ *
+ * The denominator is printed the same way in **both** branches. Showing it
+ * only when a metric was unmeasurable (the pre-#114 behaviour) inverted the
+ * requirement: the population vanished at exactly the moment there was a
+ * share to state it for. */
+function MetricCell({ label, metric }: { label: string; metric: Metric }) {
+  const denominator = metric.denominator !== null && <> (denominator: {metric.denominator})</>
+
+  if (metric.measurable) {
+    return (
+      <p className="measured">
+        <strong>{label}:</strong> {metric.value}
+        {denominator}
+      </p>
+    )
+  }
+
   return (
     <p className="unmeasurable">
       <strong>{label}:</strong> not measurable — {metric.reason}
-      {metric.denominator !== null && <> (denominator: {metric.denominator})</>}
+      {denominator}
     </p>
   )
 }
@@ -21,13 +39,20 @@ function UnmeasuredCell({ label, metric }: { label: string; metric: UnmeasuredMe
  * the campaign this detail view is showing, rather than adding a
  * per-campaign route that does not exist server-side.
  *
- * Clicks are real, measured rows. Leads, conversions and cost are not — this
- * plugin has no reachable transport to `demo_requests`/`lead_source_costs`
- * (issue #31) — and are rendered as explicitly unmeasurable, never as a
- * silent zero.
+ * Clicks are real, measured rows. Leads, conversions and cost come from the
+ * instance-configured leads source (issue #31): a real figure where that
+ * source answered, and an explicit reason where it could not — never a
+ * silent zero, and never a measured figure disguised as unmeasurable.
+ *
+ * `unattributed_clicks` is tenant-wide rather than per-campaign, so it is
+ * rendered once for the whole section: it is the count excluded from every
+ * campaign's total above, and stating it is what stops a share here being
+ * computed over a filtered population and read as if it covered the whole
+ * one.
  */
 export function Results({ campaignId }: { campaignId: string }) {
   const [results, setResults] = useState<CampaignResults | null>(null)
+  const [unattributed, setUnattributed] = useState(0)
   const [found, setFound] = useState(true)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -41,6 +66,7 @@ export function Results({ campaignId }: { campaignId: string }) {
         if (cancelled) return
         const mine = all.campaigns.find((c) => c.campaign_id === campaignId) ?? null
         setResults(mine)
+        setUnattributed(all.unattributed_clicks)
         setFound(mine !== null)
       })
       .catch((e: unknown) => {
@@ -71,9 +97,14 @@ export function Results({ campaignId }: { campaignId: string }) {
         )}
       </p>
 
-      <UnmeasuredCell label="Leads" metric={results.leads} />
-      <UnmeasuredCell label="Conversions" metric={results.conversions} />
-      <UnmeasuredCell label="Cost" metric={results.cost} />
+      <MetricCell label="Leads" metric={results.leads} />
+      <MetricCell label="Conversions" metric={results.conversions} />
+      <MetricCell label="Cost" metric={results.cost} />
+
+      <p className="excluded">
+        {unattributed} click{unattributed === 1 ? '' : 's'} could not be attributed to any campaign
+        {unattributed > 0 ? ' — excluded from every campaign total above.' : '.'}
+      </p>
     </section>
   )
 }

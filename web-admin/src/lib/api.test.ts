@@ -406,4 +406,36 @@ describe('getResults', () => {
     expect(results.campaigns[0].clicks.total).toBe(4)
     expect(results.campaigns[0].leads.measurable).toBe(false)
   })
+
+  it('can represent a measurable metric — the shape the API sends when the leads source answered', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaigns: [
+            {
+              campaign_id: 'c1',
+              campaign_name: 'Spring',
+              clicks: { total: 12, paid: 5, organic: 7, unknown_channel_type: 0 },
+              leads: { value: 3, measurable: true, denominator: 12, reason: null },
+              conversions: { value: null, measurable: false, denominator: null, reason: 'no signal' },
+              cost: { value: 250.5, measurable: true, denominator: null, reason: null },
+            },
+          ],
+          unattributed_clicks: 2,
+        }),
+      }),
+    )
+    const results = await getResults()
+    const leads = results.campaigns[0].leads
+    // Narrowing on the discriminant must reach a branch that HAS a value — with
+    // `measurable: false` as a literal type this branch is unreachable and
+    // `.value` does not typecheck at all, which is the defect (issue #114).
+    if (!leads.measurable) throw new Error('expected leads to be measurable')
+    expect(leads.value).toBe(3)
+    expect(leads.denominator).toBe(12)
+    expect(results.unattributed_clicks).toBe(2)
+  })
 })
