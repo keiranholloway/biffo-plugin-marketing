@@ -45,7 +45,7 @@ describe('PaidPack', () => {
           ],
           assets: [],
           missing_placements: ['feed_1x1'],
-          targeting: [{ name: 'Busy owners', description: 'Time-poor franchise owners.', sources: [] }],
+          targeting: [{ name: 'Busy owners', description: 'Time-poor franchise owners.', source_count: 2 }],
           budget: {
             currency: 'USD',
             channel_count: 1,
@@ -72,6 +72,9 @@ describe('PaidPack', () => {
     expect(await screen.findByText(/missing renders for: feed_1x1/i)).toBeInTheDocument()
     expect(screen.getByText(/trimmed to 125 chars/i)).toBeInTheDocument()
     expect(screen.getByText('Busy owners')).toBeInTheDocument()
+    // Grounded, but the full {url, note} pairs are not repeated here — only
+    // a count, pointing back at the positioning artefact for the citations.
+    expect(screen.getByText(/grounded in 2 research sources/i)).toBeInTheDocument()
     expect(screen.getByText(/1 paid channel\(s\)/)).toBeInTheDocument()
     expect(screen.getByText(/not measurable — no route reachable/i)).toBeInTheDocument()
   })

@@ -78,6 +78,10 @@ export function PaidPack({ campaignId }: { campaignId: string }) {
               <li key={`${s.name}-${i}`}>
                 <strong>{s.name}</strong>
                 <p>{s.description}</p>
+                <p className="hint">
+                  Grounded in {s.source_count} research source{s.source_count === 1 ? '' : 's'} — see the
+                  positioning artefact for the full citations.
+                </p>
               </li>
             ))}
           </ul>

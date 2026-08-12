@@ -9,6 +9,7 @@ import {
   PositioningArtefact,
   ResearchArtefact,
   SourceList,
+  SourceRefs,
 } from './ArtefactBody'
 
 /** A stub taxonomy lookup — the real one is `useChannelTaxonomy`'s hook,
@@ -43,7 +44,7 @@ describe('SourceList', () => {
 })
 
 describe('ResearchArtefact', () => {
-  it('renders the summary and every finding with its sources', () => {
+  it('renders the summary and every finding, with its citation reachable via the Sources cited list', () => {
     render(
       <ResearchArtefact
         body={{
@@ -61,6 +62,40 @@ describe('ResearchArtefact', () => {
     expect(screen.getByText('Owners want faster onboarding.')).toBeInTheDocument()
     expect(screen.getByText('Competitors take 3 weeks')).toBeInTheDocument()
     expect(screen.getByText('https://example.com/report')).toBeInTheDocument()
+    expect(screen.getByText('Industry report')).toBeInTheDocument()
+    // The finding itself points at the citation with a compact marker, not
+    // a second copy of the URL — the URL text above is the canonical list's.
+    expect(screen.getByText('[1]')).toBeInTheDocument()
+  })
+
+  it('prints a source shared by several findings exactly once, not once per finding (#93 follow-up)', () => {
+    // Live evidence this regresses against: a real research run had
+    // https://gorilladash.com/ cited by 4 of 5 findings, each printing the
+    // full URL and note — 13 source lines for 5 unique URLs.
+    const shared = { url: 'https://gorilladash.com/', note: 'All-in-one franchise platform.' }
+    render(
+      <ResearchArtefact
+        body={{
+          summary: 'Multiple angles converge on one competitor.',
+          findings: [
+            {
+              signal: 'Audience signal A',
+              why_it_matters: 'Matters A',
+              sources: [shared],
+            },
+            {
+              signal: 'Audience signal B',
+              why_it_matters: 'Matters B',
+              sources: [shared],
+            },
+          ],
+        }}
+      />,
+    )
+    expect(screen.getAllByText('https://gorilladash.com/')).toHaveLength(1)
+    expect(screen.getAllByText('All-in-one franchise platform.')).toHaveLength(1)
+    // Both findings still carry a working, distinct pointer to it.
+    expect(screen.getAllByText('[1]')).toHaveLength(2)
   })
 })
 
@@ -99,6 +134,64 @@ describe('PositioningArtefact', () => {
     expect(screen.getByText('https://example.com/segment')).toBeInTheDocument()
     expect(screen.getByText('https://example.com/pillar')).toBeInTheDocument()
     expect(screen.getByText('https://example.com/cta')).toBeInTheDocument()
+  })
+
+  it('never renders a source note downstream, even when the agent copied it byte-for-byte onto every item (#93 follow-up)', () => {
+    // Live evidence this regresses against: an identical note string
+    // appeared under a segment AND a message pillar AND in research — the
+    // note carries no new information at its 2nd/3rd appearance, and the
+    // fix is that it is not shown here at all, only the reference count.
+    const copiedVerbatimNote =
+      "States that most networks use their platform to replace 'six to ten separate subscriptions'."
+    render(
+      <PositioningArtefact
+        body={{
+          segments: [
+            {
+              name: 'Busy owners',
+              description: 'Time-poor franchise owners.',
+              sources: [{ url: 'https://example.com/shared', note: copiedVerbatimNote }],
+            },
+          ],
+          pillars: [
+            {
+              pillar: 'Onboard in a day, not a month',
+              rationale: 'Speed is the differentiator',
+              sources: [{ url: 'https://example.com/shared', note: copiedVerbatimNote }],
+            },
+          ],
+          ctas: [],
+        }}
+      />,
+    )
+    expect(screen.queryByText(copiedVerbatimNote)).not.toBeInTheDocument()
+    // The compact reference is still there — provenance is not lost, only
+    // the repeated note text.
+    expect(screen.getAllByText(/1 source cited/)).toHaveLength(2)
+  })
+})
+
+describe('SourceRefs', () => {
+  it('collapses a source list to a count, deduplicated by URL, with no note text', () => {
+    render(
+      <SourceRefs
+        sources={[
+          { url: 'https://example.com/a', note: 'Note A' },
+          { url: 'https://example.com/a', note: 'Note A repeated' },
+          { url: 'https://example.com/b', note: 'Note B' },
+        ]}
+      />,
+    )
+    expect(screen.getByText(/2 sources cited/)).toBeInTheDocument()
+    expect(screen.getByText('https://example.com/a')).toBeInTheDocument()
+    expect(screen.getByText('https://example.com/b')).toBeInTheDocument()
+    expect(screen.queryByText('Note A')).not.toBeInTheDocument()
+    expect(screen.queryByText('Note B')).not.toBeInTheDocument()
+  })
+
+  it('says plainly when there are no sources — the zero-citation case', () => {
+    render(<SourceRefs sources={[]} />)
+    expect(screen.getByText(/no sources cited/i)).toBeInTheDocument()
   })
 })
 
