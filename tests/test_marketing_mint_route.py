@@ -24,11 +24,27 @@ _ATTACKER_TOKEN = "attacker-chosen"  # noqa: S105
 _BASE = "https://dev.tabsii.com"
 
 
+#: A small slice of the real seeded taxonomy (scripts/seed_marketing_channels.py)
+#: — enough to exercise organic vs paid and an unrecognised key, without
+#: reproducing all 31 rows in every test.
+_TAXONOMY = [
+    {"key": "linkedin_organic", "label": "LinkedIn — organic", "motion": "organic"},
+    {"key": "linkedin_paid", "label": "LinkedIn ads", "motion": "paid"},
+    {"key": "instagram_organic", "label": "Instagram — organic", "motion": "organic"},
+]
+
+
 class _FakeCore:
     """Records what the plugin asked Core to do, and answers plausibly."""
 
-    def __init__(self, *, destination: str | None = "https://tabsii.com/intake/demo") -> None:
+    def __init__(
+        self,
+        *,
+        destination: str | None = "https://tabsii.com/intake/demo",
+        channels: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.destination = destination
+        self.channels = _TAXONOMY if channels is None else channels
         self.created: list[dict[str, Any]] = []
 
     async def __call__(self, method: str, path: str, token: str, **kw: Any) -> httpx.Response:
@@ -41,6 +57,8 @@ class _FakeCore:
                 json={"id": _CAMPAIGN, "destination_url": self.destination},
                 request=request,
             )
+        if method == "GET" and path == f"{admin_app._INTERNAL_PREFIX}/channels":
+            return httpx.Response(200, json=self.channels, request=request)
         if method == "POST" and path == f"{admin_app._INTERNAL_PREFIX}/links":
             body = kw["json"]
             self.created.append(body)
@@ -69,7 +87,12 @@ def test_minting_returns_a_publishable_url_per_link(ctx) -> None:
     client, _ = ctx
     resp = client.post(
         f"/campaigns/{_CAMPAIGN}/links",
-        json={"links": [{"channel": "linkedin"}, {"channel": "instagram", "variant": "b"}]},
+        json={
+            "links": [
+                {"channel": "linkedin_organic"},
+                {"channel": "instagram_organic", "variant": "b"},
+            ]
+        },
     )
 
     assert resp.status_code == 201
@@ -84,7 +107,7 @@ def test_each_link_gets_its_own_token(ctx) -> None:
     client, core = ctx
     client.post(
         f"/campaigns/{_CAMPAIGN}/links",
-        json={"links": [{"channel": "linkedin"}, {"channel": "instagram"}]},
+        json={"links": [{"channel": "linkedin_organic"}, {"channel": "instagram_organic"}]},
     )
 
     tokens = {row["token"] for row in core.created}
@@ -94,7 +117,7 @@ def test_each_link_gets_its_own_token(ctx) -> None:
 def test_the_stored_destination_carries_the_campaign_id(ctx) -> None:
     """The whole milestone, asserted at the row that actually gets written."""
     client, core = ctx
-    client.post(f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin"}]})
+    client.post(f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_organic"}]})
 
     stored = core.created[0]["destination_url"]
     assert parse_qs(urlsplit(stored).query)["utm_campaign"] == [_CAMPAIGN]
@@ -113,7 +136,7 @@ def test_the_caller_cannot_supply_the_destination_or_the_token(ctx) -> None:
         json={
             "links": [
                 {
-                    "channel": "linkedin",
+                    "channel": "linkedin_organic",
                     "token": _ATTACKER_TOKEN,
                     "destination_url": "https://evil.example/",
                 }
@@ -124,6 +147,50 @@ def test_the_caller_cannot_supply_the_destination_or_the_token(ctx) -> None:
     stored = core.created[0]
     assert stored["token"] != _ATTACKER_TOKEN
     assert stored["destination_url"].startswith("https://tabsii.com/intake/demo")
+
+
+def test_channel_is_validated_against_the_tenants_own_taxonomy(ctx) -> None:
+    """#84: `marketing_link.channel` now holds taxonomy keys everywhere else
+    (`pack_routes._ensure_links`) — free text minted here would be the one
+    path still writing whatever an operator typed, and would never group with
+    the same channel minted through the pipeline."""
+    client, core = ctx
+    resp = client.post(
+        f"/campaigns/{_CAMPAIGN}/links",
+        json={"links": [{"channel": "totally made up channel"}]},
+    )
+
+    assert resp.status_code == 422
+    # Naming what IS valid, not just that this value wasn't — an operator
+    # calling the API directly (not through the picker) needs to see the
+    # actual keys, not guess at them.
+    assert "totally made up channel" in resp.json()["detail"]
+    assert "linkedin_organic" in resp.json()["detail"]
+    assert core.created == [], "nothing should have been written"
+
+
+def test_is_paid_is_derived_from_the_channels_own_motion_not_the_caller(ctx) -> None:
+    """#84: motion lives on the channel now. A caller-supplied `is_paid` used
+    to be a second, independent answer to the same question — sending one
+    that disagrees with the channel's own taxonomy row must not reach
+    storage, because nothing downstream (`_platform_for_channel`, results
+    grouping) trusts anything else."""
+    client, core = ctx
+    client.post(
+        f"/campaigns/{_CAMPAIGN}/links",
+        # `linkedin_organic` is organic in `_TAXONOMY`; an attacker (or a
+        # stale client) claiming `is_paid: true` must be overruled.
+        json={"links": [{"channel": "linkedin_organic", "is_paid": True}]},
+    )
+
+    assert core.created[0]["is_paid"] is False
+
+
+def test_is_paid_true_for_a_paid_channel_even_with_no_flag_sent(ctx) -> None:
+    client, core = ctx
+    client.post(f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_paid"}]})
+
+    assert core.created[0]["is_paid"] is True
 
 
 def test_a_campaign_with_no_destination_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,7 +209,7 @@ def test_a_campaign_with_no_destination_is_refused(monkeypatch: pytest.MonkeyPat
     )()
 
     resp = TestClient(app).post(
-        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin"}]}
+        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_organic"}]}
     )
 
     assert resp.status_code == 422
@@ -161,7 +228,7 @@ def test_an_unconfigured_deployment_says_so_rather_than_minting_a_broken_url(
     )()
 
     resp = TestClient(app).post(
-        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin"}]}
+        f"/campaigns/{_CAMPAIGN}/links", json={"links": [{"channel": "linkedin_organic"}]}
     )
     assert resp.status_code == 503
 
@@ -220,7 +287,7 @@ def test_a_valid_uuid_is_re_rendered_canonically(ctx) -> None:
     """Even a value that parses is rewritten, so no caller formatting survives."""
     client, core = ctx
     upper = _CAMPAIGN.upper()
-    client.post(f"/campaigns/{upper}/links", json={"links": [{"channel": "linkedin"}]})
+    client.post(f"/campaigns/{upper}/links", json={"links": [{"channel": "linkedin_organic"}]})
 
     assert core.created, "a valid campaign_id should still mint"
     assert core.created[0]["campaign_id"] == _CAMPAIGN, "the id should be canonical lowercase"

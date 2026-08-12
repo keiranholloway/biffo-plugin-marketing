@@ -23,7 +23,7 @@ function stubSession(jwt = 'test-jwt') {
  * these tests only need this stub, not a second mocked response. */
 function makeLookup(entries: ChannelTaxonomyEntry[], loading = false): ChannelLookup {
   const byKey = new Map(entries.map((e) => [e.key, e]))
-  return { get: (key) => byKey.get(key), loading }
+  return { get: (key) => byKey.get(key), entries, loading }
 }
 
 const LINKEDIN: ChannelTaxonomyEntry = {
