@@ -22,4 +22,41 @@ by `cli/src/lib/plugin-skeleton-second-occupant.test.ts`.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+@pytest.fixture(autouse=True)
+def _reenable_disabled_loggers() -> None:
+    """Undo `disable_existing_loggers` before each test.
+
+    `logging.config.dictConfig()` defaults `disable_existing_loggers` to
+    **True**, which sets ``disabled = True`` on every logger that already
+    exists. Something in `tabsii-platform`'s suite calls it, so by the time
+    these tests run — vendored into that instance and executed after ~5400
+    other tests — this plugin's module-level `Logger(child=True)` objects are
+    switched off entirely:
+
+        'service_undefined.marketing.ssm'  propagate=True  disabled=True
+        'service_undefined'                propagate=True  disabled=True
+        isEnabledFor(WARNING) = False
+
+    So the log line is never emitted, `caplog` sees nothing, and two tests
+    asserting on log content fail — in the instance only. They pass in this
+    repo because nothing here reconfigures logging.
+
+    Measured, not assumed: three earlier hypotheses (a powertools version
+    difference, a specific polluting test, propagation severed at the parent)
+    each looked right and were each disproved by testing them. The state above
+    is what the failing test actually sees.
+
+    Re-enabling per test is the portable fix: it makes no claim about who
+    reconfigured logging or when, and holds wherever this plugin is vendored.
+    """
+    import logging
+
+    for name in list(logging.root.manager.loggerDict):
+        obj = logging.getLogger(name)
+        if isinstance(obj, logging.Logger):
+            obj.disabled = False
