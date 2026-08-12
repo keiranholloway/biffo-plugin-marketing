@@ -266,6 +266,53 @@ async def test_advance_research_reads_annotations_from_research_runs_not_synthes
 
 
 @pytest.mark.asyncio
+async def test_advance_research_logs_how_broad_the_retrieval_actually_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #101: the evidence base being thin and duplicated across the two
+    angles was invisible — nothing failed, and the numbers existed only in
+    provider annotations somebody had to go and read. Every research chain
+    now states its own breadth, and this asserts it is a *report*: the run
+    still succeeds, and the synthesis still comes back."""
+    logged: list[dict[str, Any]] = []
+
+    class _CapturingLogger:
+        def info(self, *args: Any, **kwargs: Any) -> None:
+            logged.append(kwargs.get("extra") or {})
+
+    monkeypatch.setattr(pipeline, "logger", _CapturingLogger())
+
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    shared = {"type": "url_citation", "url": "https://example.com/", "title": "Root"}
+    gateway.complete(run_ids[0], status="completed", annotations=[shared])
+    gateway.complete(
+        run_ids[1],
+        status="completed",
+        annotations=[shared, {"type": "url_citation", "url": "https://example.com/pricing"}],
+    )
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_findings_call("audience"),
+    )
+
+    result = await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    assert isinstance(result, pipeline.ResearchSynthesis)  # a report, not a gate
+    assert logged == [
+        {
+            "causation_id": chain_id,
+            "research_runs_measured": 2,
+            "research_distinct_urls": 2,
+            "research_shared_urls": 1,
+            "research_deep_pages": 1,
+            "research_site_roots": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_advance_research_unions_annotations_when_only_one_research_angle_retrieved() -> None:
     """Decision (issue #90): a chain where one research angle retrieved and
     the other found nothing is not distinguished from "both retrieved" — the
