@@ -312,6 +312,183 @@ async def test_advance_research_logs_how_broad_the_retrieval_actually_was(
     ]
 
 
+# ── The breadth line reaches a real log record, on every terminal path ────────
+#
+# The tests below use `caplog` rather than a substituted `logger`, because the
+# thing being guarded is that an operator can *find this in CloudWatch*. A
+# monkeypatched logger proves `_log_evidence_profile` was called; it cannot
+# prove the powertools `Logger` actually emitted a record, at INFO, carrying
+# the structured keys somebody has been told to filter on. (The autouse
+# `_reenable_disabled_loggers` fixture in `conftest.py` is what makes `caplog`
+# see anything at all once this plugin is vendored — see commit 657de60.)
+
+
+BREADTH_PREFIX = "research retrieval breadth"
+
+
+def _breadth_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [r for r in caplog.records if r.getMessage().startswith(BREADTH_PREFIX)]
+
+
+async def _chain_with_retrieval(gateway: _FakeGateway) -> tuple[str, list[str]]:
+    """Two research runs that both succeeded and both retrieved: one shared
+    site root, one deep page seen by a single angle."""
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    shared = {"type": "url_citation", "url": "https://example.com/", "title": "Root"}
+    gateway.complete(run_ids[0], status="completed", annotations=[shared])
+    gateway.complete(
+        run_ids[1],
+        status="completed",
+        annotations=[shared, {"type": "url_citation", "url": "https://example.com/pricing"}],
+    )
+    return chain_id, run_ids
+
+
+@pytest.mark.asyncio
+async def test_breadth_line_reaches_the_real_log_on_the_success_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gateway = _FakeGateway()
+    chain_id, run_ids = await _chain_with_retrieval(gateway)
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_findings_call("audience"),
+    )
+
+    with caplog.at_level("INFO"):
+        result = await pipeline.advance_research(
+            gateway, chain_id=chain_id, research_run_ids=run_ids
+        )
+
+    assert isinstance(result, pipeline.ResearchSynthesis)
+    (record,) = _breadth_records(caplog)  # exactly one, never doubled
+    assert "2 distinct URLs across 2 grounded run(s)" in record.getMessage()
+    assert record.causation_id == chain_id
+    assert record.research_runs_measured == 2
+    assert record.research_distinct_urls == 2
+    assert record.research_shared_urls == 1
+    assert record.research_deep_pages == 1
+    assert record.research_site_roots == 1
+
+
+@pytest.mark.asyncio
+async def test_breadth_line_is_logged_when_the_synthesis_run_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The failure path an operator most needs this on. "The research was
+    thin" and "the synthesis failed" produce the same dead artefact, and the
+    breadth line is the only thing that tells them apart — so logging it only
+    on success withholds it exactly when it is being asked for."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await _chain_with_retrieval(gateway)
+    gateway.fire_chain_run(
+        chain_id=chain_id, agent_name=RESEARCH_SYNTHESIS_AGENT_NAME, status="failed"
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    (record,) = _breadth_records(caplog)
+    assert "2 distinct URLs across 2 grounded run(s)" in record.getMessage()
+    assert record.causation_id == chain_id
+    assert record.research_distinct_urls == 2
+    assert record.research_site_roots == 1
+
+
+@pytest.mark.asyncio
+async def test_breadth_line_is_logged_when_every_research_run_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No synthesis run was ever fired, so the success path is never reached —
+    and this is the chain where "what did retrieval actually return?" is the
+    whole question. A failed run can still have retrieved before it died."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(
+        run_ids[0],
+        status="failed",
+        annotations=[{"type": "url_citation", "url": "https://example.com/pricing"}],
+    )
+    gateway.complete(run_ids[1], status="failed", annotations=[])
+
+    with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    (record,) = _breadth_records(caplog)
+    assert "1 distinct URLs across 2 grounded run(s)" in record.getMessage()
+    assert record.causation_id == chain_id
+    assert record.research_runs_measured == 2
+    assert record.research_distinct_urls == 1
+
+
+@pytest.mark.asyncio
+async def test_breadth_line_says_unmeasured_rather_than_reporting_a_false_zero(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`annotations is None` means "we do not know what this run retrieved",
+    not "it retrieved nothing" — the tri-state `evidence_profile` is careful
+    to keep. Logging `0 distinct URLs across 0 grounded run(s)` here would
+    throw that distinction away at the only point a human reads it, and would
+    read as a measured, catastrophic zero."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    for run_id in run_ids:
+        gateway.complete(run_id, status="failed", annotations=None)
+
+    with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    (record,) = _breadth_records(caplog)
+    message = record.getMessage()
+    assert "not measured" in message
+    assert "distinct URLs across" not in message  # not a measurement
+    assert record.causation_id == chain_id
+    assert record.research_runs_measured == 0
+    assert record.research_distinct_urls is None  # unknown, not zero
+
+
+@pytest.mark.asyncio
+async def test_breadth_logging_never_replaces_the_real_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A report that throws while reporting on a failure turns a diagnosable
+    error into a spurious one. Whatever the gateway does, the caller must
+    still see `RunNotSucceededError`."""
+
+    class _BrokenGateway(_FakeGateway):
+        async def get_agent_run(self, *, run_id: str) -> pipeline.AgentRunView | None:
+            raise RuntimeError("run view unavailable")
+
+    gateway = _BrokenGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.fire_chain_run(
+        chain_id=chain_id, agent_name=RESEARCH_SYNTHESIS_AGENT_NAME, status="failed"
+    )
+
+    with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+
+@pytest.mark.asyncio
+async def test_no_breadth_line_while_the_chain_is_still_in_flight(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`advance_research` is polled. Logging breadth on a non-terminal chain
+    would emit the line once per poll, so the number an operator finds in
+    CloudWatch would be whichever partial snapshot they scrolled to."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+
+    with caplog.at_level("INFO"):
+        assert (
+            await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+            is None
+        )
+
+    assert _breadth_records(caplog) == []
+
+
 @pytest.mark.asyncio
 async def test_advance_research_unions_annotations_when_only_one_research_angle_retrieved() -> None:
     """Decision (issue #90): a chain where one research angle retrieved and
