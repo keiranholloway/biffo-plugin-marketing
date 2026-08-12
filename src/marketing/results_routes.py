@@ -19,51 +19,69 @@ there is nothing this deployment could ever call to learn them. Nothing below
 renders a click, a mint, or a download count as if it said anything about
 who saw a post.
 
-## Clicks are measured; leads, conversions and cost are not — yet
+## Clicks are measured directly; leads, conversions and cost go through the
+## instance's own leads source (issue #31, option B)
 
 `marketing_click` and `marketing_link` are this plugin's own generated-CRUD
 tables (declared in `biffo.plugin.json`), reachable through the same
 internal, SigV4-signed mount every other route in this file uses
 (`admin_app._core`, `_INTERNAL_PREFIX`). Clicks per campaign, and the
 paid/organic split, are real numbers computed from real rows this plugin
-wrote itself.
+wrote itself, and stay that way regardless of anything below.
 
 Leads (`public.demo_requests`, tabsii-platform) and cost
-(`tabsii.lead_source_costs`, DDL module 049) are **not** reachable from here
-today, and this is a genuinely missing capability rather than an oversight in
-this module. Both surfaces exist and are queried in `tabsii-platform`, but
-neither is registered under `/api/v1/internal/*` — the only tree a
-SigV4-signed plugin call can reach at all (`services/api/src/api/main.py`'s
-full router-registration list has no `internal_*` router for either table).
-`demo_requests` sits behind Core's own `/api/v1/admin/demo-requests`, gated
-by `require_admin`, which is built on `require_auth`
-(`services/api/src/api/middleware/auth.py`) — bearer-`Authorization`-only,
-with no forwarded-token acceptance the way `require_principal` (the guard
-`require_principal_crud_permission` uses) has. `lead_source_costs` sits
-behind tabsii-CRM's `/api/v1/data/lead_source_costs` and
-`/api/v1/analytics/pipeline/*`, gated on RBAC permission codes
-(`leads.read`, `lead_source_costs.read`) that have nothing to do with the
-"admin" Cognito group this plugin's own admin surface authorises on. Even if
-either surface were reachable, `demo_requests.status` has no mutation path
-yet (`demo_requests_admin.py`'s own docstring: "there's no mutation surface
-yet"), so "conversion" has no signal to read regardless of transport.
+(`tabsii.lead_source_costs`, DDL module 049) are tabsii concepts this plugin
+must never import directly — a marketing plugin installed on biffo-platform
+has no such tables and never will. Issue #31's settled design (option B) is
+that **the plugin declares it needs a leads source, and the instance
+configures which endpoint answers it**: `MARKETING_LEADS_SOURCE_URL`
+(delivered via `plugin_host_environment`, biffo-template#1534). When set,
+this module calls
 
-So "no data" here is not a placeholder for effort not yet spent on a query —
-it is the honest, current state of a real transport gap, filed as issue #31.
-Until that closes, every campaign's leads, conversions and cost render as
-**unmeasurable**, never as zero: reporting zero would claim "we looked, and
-nothing happened," which is not a claim this plugin can make today.
+    GET <leads_source_url>?campaign_id=<uuid>&campaign_id=<uuid>...
+
+and expects back `{"campaigns": [{campaign_id, leads: {value, measurable[,
+reason]}, conversions: {...}, cost: {...}}]}` — see `_fetch_leads_source` and
+`_metric_from_raw`. tabsii's implementation of that endpoint is a grouped
+count over `demo_requests.utm_campaign`, `.status`, and a join to
+`lead_source_costs`; another platform answering the same three questions from
+entirely different tables is an equally valid implementation. None of that
+lives here — this file knows only the wire contract.
+
+**Unset is a first-class state, not an error.** A platform with no leads
+source configured (every platform other than tabsii, today) renders
+leads/conversions/cost as unmeasurable with the reason "no leads source is
+configured for this deployment" — the honest answer, not a failure.
+
+**The source failing must never take down results that already work.** A
+timeout, a non-200, or a malformed body degrades every campaign's
+leads/conversions/cost to unmeasurable-with-a-reason; clicks, computed
+locally, keep rendering regardless (`_fetch_leads_source` never raises).
+
+**A campaign the source doesn't know about is unmeasurable, not an error** —
+see the "unknown campaign id" handling in `_metrics_for_campaign`.
+
+**`measurable: false` is never rendered as a zero, and an upstream `reason`
+is always preserved verbatim** when the source gives one — see
+`_metric_from_raw`. A real zero (`value: 0, measurable: true`) stays
+distinguishable throughout.
 """
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Any
+from urllib.parse import urlencode
 
+import httpx
+from aws_lambda_powertools import Logger
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from . import admin_app
+
+logger = Logger(child=True)
 
 router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 
@@ -85,15 +103,43 @@ _INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 #: silently under-count.
 _LIST_PAGE_SIZE = 200
 
-#: Why leads/conversions/cost cannot be computed from here today — see the
-#: module docstring for the full mechanism. Surfaced verbatim in the
-#: response so a caller reading only the JSON, not this file, still gets the
-#: real reason rather than a bare `false`.
-_UNMEASURABLE_REASON = (
-    "No route reachable from this plugin's internal Core transport exposes this yet "
-    "(tracked in issue #31) — 'unmeasurable' means the transport does not exist, "
-    "not that the count is zero."
-)
+#: issue #31's contract: the instance tells this plugin which endpoint
+#: answers "leads, conversions and cost for these campaign ids" by setting
+#: this environment variable (delivered via `plugin_host_environment`,
+#: biffo-template#1534). The value is the full path/URL to call — this
+#: module appends the `campaign_id` query params and calls it exactly as
+#: given, through the same dual-auth transport (`admin_app._core`) every
+#: other Core call in this file uses.
+_LEADS_SOURCE_URL_ENV = "MARKETING_LEADS_SOURCE_URL"
+
+#: A platform with no leads source configured is normal, not broken — every
+#: platform other than tabsii sees exactly this today. Verbatim text from
+#: issue #31's settled contract, since a caller reading only the JSON should
+#: get the same words this docstring does.
+_NOT_CONFIGURED_REASON = "no leads source is configured for this deployment"
+
+#: The URL is configured but the call itself did not produce a usable
+#: response — timeout, connection failure, or a non-200 status. Degrades to
+#: unmeasurable rather than a 500 on the whole dashboard; see
+#: `_fetch_leads_source`.
+_SOURCE_UNREACHABLE_REASON = "the configured leads source could not be reached"
+
+#: The URL answered, but the body wasn't the shape the contract promises
+#: (not JSON, no `campaigns` list, or a per-metric object missing the
+#: `value`/`measurable` the contract requires). Kept distinct from
+#: `_SOURCE_UNREACHABLE_REASON` so an operator reading the reason can tell
+#: "nothing answered" from "something answered wrong".
+_SOURCE_MALFORMED_REASON = "the configured leads source returned data this plugin could not parse"
+
+#: The call succeeded and the source is working — this specific campaign id
+#: simply wasn't in its response. Per the contract: "a campaign the source
+#: does not know about is simply unmeasurable, not a 500."
+_UNKNOWN_TO_SOURCE_REASON = "the configured leads source has no data for this campaign"
+
+#: `measurable: false` with no `reason` at all is itself a malformed
+#: response — the contract requires one — but still degrades to unmeasurable
+#: rather than failing the whole call. See `_metric_from_raw`.
+_NO_REASON_GIVEN = "the configured leads source marked this unmeasurable but gave no reason"
 
 
 class ClickBreakdown(BaseModel):
@@ -126,20 +172,50 @@ class UnmeasuredMetric(BaseModel):
     for a click-to-lead rate) when that population is itself known here;
     `None` when it isn't (e.g. a conversion rate's denominator is a lead
     count this plugin cannot see either).
+
+    Still used verbatim by `paid_pack_routes.py` for its own, still-genuinely
+    -unreachable `spend` field — unrelated to the leads/conversions/cost
+    metrics below, which now go through `Metric` instead.
     """
 
     measurable: bool = False
     denominator: int | None = None
-    reason: str = _UNMEASURABLE_REASON
+    reason: str = (
+        "No route reachable from this plugin's internal Core transport exposes this yet "
+        "(tracked in issue #31) — 'unmeasurable' means the transport does not exist, "
+        "not that the count is zero."
+    )
+
+
+class Metric(BaseModel):
+    """A leads/conversions/cost figure sourced from the instance-configured
+    leads source (issue #31) — or the reason it could not be measured.
+
+    Exactly one of two shapes, matching the wire contract:
+
+    - `measurable=True`, `value` set to a real number (a real zero renders
+      exactly this way — `value=0, measurable=True`, distinguishable from an
+      unmeasurable metric by `measurable` alone, never by `value` being falsy).
+    - `measurable=False`, `value=None`, `reason` set to why.
+
+    `denominator` carries the same meaning as `UnmeasuredMetric.denominator`
+    above (see that class) and is populated the same way regardless of
+    whether this instance ended up measurable or not.
+    """
+
+    value: float | int | None = None
+    measurable: bool
+    denominator: int | None = None
+    reason: str | None = None
 
 
 class CampaignResults(BaseModel):
     campaign_id: str
     campaign_name: str
     clicks: ClickBreakdown
-    leads: UnmeasuredMetric
-    conversions: UnmeasuredMetric
-    cost: UnmeasuredMetric
+    leads: Metric
+    conversions: Metric
+    cost: Metric
 
 
 class ResultsResponse(BaseModel):
@@ -194,6 +270,156 @@ def _click_breakdown(
     )
 
 
+class _LeadsSourceResult:
+    """The outcome of the one call to the instance-configured leads source.
+
+    Exactly one of the three states below holds — callers (`_metrics_for_campaign`)
+    check `not_configured` first, then `failure`, then fall through to
+    `by_campaign_id`:
+
+    - `not_configured=True`: `MARKETING_LEADS_SOURCE_URL` is unset. A normal,
+      first-class state (see module docstring), not a failure.
+    - `failure` set: the URL is configured but the call did not produce a
+      usable response (timeout, non-200, malformed body). Degrades to
+      unmeasurable with `failure` as the reason for every campaign — never a
+      500 on the results dashboard.
+    - `by_campaign_id` populated (possibly empty): the call succeeded.
+      A campaign id simply absent from it is unknown to the source, not an
+      error — handled by `_metrics_for_campaign`, not here.
+    """
+
+    def __init__(
+        self,
+        *,
+        not_configured: bool = False,
+        failure: str | None = None,
+        by_campaign_id: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self.not_configured = not_configured
+        self.failure = failure
+        self.by_campaign_id = by_campaign_id or {}
+
+
+async def _fetch_leads_source(campaign_ids: list[str], token: str) -> _LeadsSourceResult:
+    """Call the instance-configured leads source for `campaign_ids`, or
+    report why it couldn't be reached — never raises.
+
+    Every failure mode (unset URL, timeout, connection error, non-200,
+    unparseable body, wrong shape) is caught here and turned into a
+    `_LeadsSourceResult` state rather than an exception, because a broken
+    leads source must not take down `/results` — clicks are computed
+    locally from this plugin's own tables and must keep rendering
+    regardless of what this call does.
+    """
+    url = os.environ.get(_LEADS_SOURCE_URL_ENV, "").strip()
+    if not url:
+        return _LeadsSourceResult(not_configured=True)
+
+    if not campaign_ids:
+        # Nothing to ask about — same as a successful call that named no
+        # campaigns; every campaign below will fall into the "unknown to
+        # source" branch, which is the honest answer to "the source knows
+        # nothing about a campaign we never asked it about".
+        return _LeadsSourceResult(by_campaign_id={})
+
+    query = urlencode([("campaign_id", campaign_id) for campaign_id in campaign_ids])
+    full_path = f"{url}?{query}"
+
+    try:
+        resp = await admin_app._core("GET", full_path, token)
+    except httpx.HTTPError:
+        logger.warning("Leads source request failed", path=url, exc_info=True)
+        return _LeadsSourceResult(failure=_SOURCE_UNREACHABLE_REASON)
+    except Exception:  # noqa: BLE001 - a broken leads source must never 500 /results
+        logger.warning("Leads source request raised unexpectedly", path=url, exc_info=True)
+        return _LeadsSourceResult(failure=_SOURCE_UNREACHABLE_REASON)
+
+    if resp.status_code != 200:
+        logger.warning(
+            "Leads source returned a non-200 status", path=url, status_code=resp.status_code
+        )
+        return _LeadsSourceResult(failure=_SOURCE_UNREACHABLE_REASON)
+
+    try:
+        body = resp.json()
+    except ValueError:
+        logger.warning("Leads source returned a non-JSON body", path=url)
+        return _LeadsSourceResult(failure=_SOURCE_MALFORMED_REASON)
+
+    if not isinstance(body, dict) or not isinstance(body.get("campaigns"), list):
+        logger.warning("Leads source response missing a 'campaigns' list", path=url)
+        return _LeadsSourceResult(failure=_SOURCE_MALFORMED_REASON)
+
+    by_campaign_id: dict[str, dict[str, Any]] = {}
+    for entry in body["campaigns"]:
+        if isinstance(entry, dict) and isinstance(entry.get("campaign_id"), str):
+            by_campaign_id[entry["campaign_id"]] = entry
+    return _LeadsSourceResult(by_campaign_id=by_campaign_id)
+
+
+def _metric_from_raw(raw: Any, *, denominator: int | None = None) -> Metric:
+    """Parse one `{value, measurable[, reason]}` object from the leads
+    source into a `Metric`, defensively — a malformed individual field
+    degrades to unmeasurable rather than raising and taking the rest of the
+    response down with it.
+    """
+    if not isinstance(raw, dict):
+        return Metric(measurable=False, denominator=denominator, reason=_SOURCE_MALFORMED_REASON)
+
+    measurable = raw.get("measurable")
+    if measurable is True:
+        value = raw.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return Metric(
+                measurable=False, denominator=denominator, reason=_SOURCE_MALFORMED_REASON
+            )
+        return Metric(value=value, measurable=True, denominator=denominator)
+
+    if measurable is False:
+        reason = raw.get("reason")
+        if not isinstance(reason, str) or not reason:
+            reason = _NO_REASON_GIVEN
+        return Metric(measurable=False, denominator=denominator, reason=reason)
+
+    # `measurable` missing or not a bool at all — the contract requires it.
+    return Metric(measurable=False, denominator=denominator, reason=_SOURCE_MALFORMED_REASON)
+
+
+def _metrics_for_campaign(
+    campaign_id: str, source: _LeadsSourceResult, *, denominator: int
+) -> tuple[Metric, Metric, Metric]:
+    """`(leads, conversions, cost)` for one campaign, given the whole leads
+    source call's outcome.
+
+    `denominator` (the campaign's click count) is applied to `leads` only,
+    in every branch — matching the pre-#31 behaviour, since a click-to-lead
+    rate's population is this campaign's click count regardless of whether
+    leads turned out measurable. `conversions`/`cost` never carry one: a
+    conversion rate's population is a lead count this plugin does not
+    independently verify, and cost is an amount, not a share.
+    """
+    if source.not_configured:
+        reason = _NOT_CONFIGURED_REASON
+    elif source.failure is not None:
+        reason = source.failure
+    else:
+        entry = source.by_campaign_id.get(campaign_id)
+        if entry is None:
+            reason = _UNKNOWN_TO_SOURCE_REASON
+        else:
+            return (
+                _metric_from_raw(entry.get("leads"), denominator=denominator),
+                _metric_from_raw(entry.get("conversions")),
+                _metric_from_raw(entry.get("cost")),
+            )
+
+    return (
+        Metric(measurable=False, denominator=denominator, reason=reason),
+        Metric(measurable=False, reason=reason),
+        Metric(measurable=False, reason=reason),
+    )
+
+
 @router.get("/results")
 async def results(admin: Any = Depends(admin_app.require_admin)) -> ResultsResponse:
     """Clicks, leads, conversions and cost, per campaign.
@@ -202,16 +428,18 @@ async def results(admin: Any = Depends(admin_app.require_admin)) -> ResultsRespo
     clicks — each paged in full via `_list_all`, then joined in memory:
     `marketing_click.link_id` -> `marketing_link.is_paid` for the paid/organic
     split, and `marketing_click.campaign_id` -> `marketing_campaign.id` for
-    the per-campaign grouping. See the module docstring for why leads,
-    conversions and cost are reported as `UnmeasuredMetric` rather than
-    computed: no reachable Core surface carries them yet.
+    the per-campaign grouping. Leads, conversions and cost come from one
+    additional call to the instance-configured leads source (`_fetch_leads_source`),
+    made once for every campaign id this call knows about — see the module
+    docstring for the full contract.
     """
     campaigns = await _list_all(f"{_INTERNAL_PREFIX}/campaigns", admin.token, {})
     links = await _list_all(f"{_INTERNAL_PREFIX}/links", admin.token, {})
     clicks = await _list_all(f"{_INTERNAL_PREFIX}/clicks", admin.token, {})
 
     links_by_id = {link["id"]: link for link in links if link.get("id")}
-    known_campaign_ids = {campaign["id"] for campaign in campaigns if campaign.get("id")}
+    campaign_ids = [campaign["id"] for campaign in campaigns if campaign.get("id")]
+    known_campaign_ids = set(campaign_ids)
 
     clicks_by_campaign: dict[str, list[dict[str, Any]]] = defaultdict(list)
     unattributed = 0
@@ -222,24 +450,23 @@ async def results(admin: Any = Depends(admin_app.require_admin)) -> ResultsRespo
         else:
             unattributed += 1
 
+    leads_source = await _fetch_leads_source(campaign_ids, admin.token)
+
     out: list[CampaignResults] = []
     for campaign in campaigns:
         campaign_id = campaign["id"]
         breakdown = _click_breakdown(clicks_by_campaign.get(campaign_id, []), links_by_id)
+        leads, conversions, cost = _metrics_for_campaign(
+            campaign_id, leads_source, denominator=breakdown.total
+        )
         out.append(
             CampaignResults(
                 campaign_id=campaign_id,
                 campaign_name=campaign.get("name") or "",
                 clicks=breakdown,
-                # `denominator=breakdown.total`: once leads become reachable,
-                # a click-to-lead rate's population is exactly this
-                # campaign's click count. `conversions`/`cost` have no known
-                # denominator here — a conversion rate is a share of leads,
-                # which this plugin cannot see either, and cost is an amount
-                # rather than a share at all.
-                leads=UnmeasuredMetric(denominator=breakdown.total),
-                conversions=UnmeasuredMetric(),
-                cost=UnmeasuredMetric(),
+                leads=leads,
+                conversions=conversions,
+                cost=cost,
             )
         )
 
