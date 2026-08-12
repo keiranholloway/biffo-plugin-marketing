@@ -90,6 +90,157 @@ def test_copy_with_no_channels_raises_no_citations() -> None:
         extract_copy(messages, channel_plan_channels={})
 
 
+# ── The guard's message is grounded in `annotations`, not just `sources`
+# (issue #82) ─────────────────────────────────────────────────────────────────
+#
+# OpenRouter returns `:online` grounding citations out of band, on
+# `message.annotations` (biffo-template#1528/#1530) — a fact about the RUN,
+# independent of whatever the model chose to retype into its structured tool
+# call. Before this, a run that genuinely retrieved evidence and a run that
+# never retrieved anything were indistinguishable the moment the model failed
+# to transcribe: both produced empty `sources` and the identical "fetched
+# zero URLs" message, which is false for the first. `annotations` is what
+# makes the two tell apart. `extract_research_synthesis` stands in for all
+# four `_extract_cited_artefact` callers below since they share one
+# implementation — proven directly on it, then spot-checked on the other
+# three so a change to any one extractor's wiring cannot silently drop the
+# `annotations` argument.
+
+_A_URL_CITATION = {"type": "url_citation", "url": "https://example.com/found", "title": "Found"}
+
+
+def test_empty_sources_with_null_annotations_reads_as_not_known_not_as_zero() -> None:
+    """`annotations=None` — this run predates the annotations column, or was
+    never a grounded (`:online`) run. The guard still fails (empty `sources`
+    is still empty `sources`; this is not a new pass condition), but the
+    message must not claim retrieval fetched zero URLs, because that is not
+    established. Deliberately the SAME failure as before this issue's fix —
+    a pre-upgrade artefact is not retroactively treated as a proven-zero
+    retrieval, only described honestly as an unknown one."""
+    messages = _tool_call(
+        "submit_research_synthesis", {"summary": "Nothing usable was found.", "findings": []}
+    )
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_research_synthesis(messages, annotations=None)
+
+    detail = str(excinfo.value)
+    assert "not known" in detail
+    assert "fetched zero URLs" in detail  # the base sentence is kept, not replaced
+
+
+def test_empty_sources_with_empty_annotations_is_a_genuine_zero_url_retrieval() -> None:
+    """`annotations=[]` — the run WAS asked to ground and retrieval genuinely
+    found nothing. This is the one case where the original "fetched zero
+    URLs, try again" message is fully accurate, so it is used unchanged, and
+    retrying is explicitly not promised to help."""
+    messages = _tool_call(
+        "submit_research_synthesis", {"summary": "Nothing usable was found.", "findings": []}
+    )
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_research_synthesis(messages, annotations=[])
+
+    detail = str(excinfo.value)
+    assert detail == (
+        "The research run fetched zero URLs. Nothing was found to cite, so no "
+        "artefact was produced — try running research again."
+    )
+
+
+def test_empty_sources_with_non_empty_annotations_is_a_transcription_not_a_dead_search() -> None:
+    """`annotations` non-empty, `sources` empty — the defect issue #82 reports:
+    retrieval worked, the model did not transcribe it. This must NOT read as
+    "fetched zero URLs" (false — it fetched some) and must be phrased as
+    transient, since retrying is likely to produce a citable result without
+    the brief changing at all."""
+    messages = _tool_call(
+        "submit_research_synthesis", {"summary": "Nothing usable was found.", "findings": []}
+    )
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_research_synthesis(messages, annotations=[_A_URL_CITATION])
+
+    detail = str(excinfo.value)
+    assert "fetched zero URLs" not in detail
+    assert "1 source" in detail
+    assert "transcription failure" in detail
+    assert "try running research again" in detail
+
+
+def test_the_three_annotation_cases_produce_three_different_messages() -> None:
+    """The whole point: an operator (or a log line) must be able to tell the
+    three cases apart without reading code. Guards against a future edit that
+    reconverges them onto one message string."""
+    messages = _tool_call(
+        "submit_research_synthesis", {"summary": "Nothing usable was found.", "findings": []}
+    )
+
+    def _message(annotations: list[dict[str, Any]] | None) -> str:
+        with pytest.raises(NoCitationsError) as excinfo:
+            extract_research_synthesis(messages, annotations=annotations)
+        return str(excinfo.value)
+
+    null_message = _message(None)
+    empty_message = _message([])
+    found_message = _message([_A_URL_CITATION])
+
+    assert len({null_message, empty_message, found_message}) == 3
+
+
+def test_non_empty_annotations_does_not_salvage_into_sources_and_still_fails() -> None:
+    """The decision this issue asks to be argued: salvaging `annotations` into
+    a finding's `sources` is tempting and wrong, because an annotation is not
+    attributed to any particular claim — attaching one to a finding would
+    fabricate the exact claim-to-evidence mapping the citation discipline
+    exists to guarantee. So a run with rich `annotations` but empty `sources`
+    still raises `NoCitationsError`; nothing manufactures a `Source` from an
+    annotation on its behalf."""
+    messages = _tool_call(
+        "submit_research_synthesis", {"summary": "Nothing usable was found.", "findings": []}
+    )
+
+    with pytest.raises(NoCitationsError):
+        extract_research_synthesis(
+            messages,
+            annotations=[
+                _A_URL_CITATION,
+                {"type": "url_citation", "url": "https://example.com/other", "title": "Other"},
+            ],
+        )
+
+
+def test_positioning_wires_annotations_into_its_message() -> None:
+    """Spot check on `extract_positioning`: the other three `_extract_cited_
+    artefact` callers share the same implementation as research-synthesis, but
+    a future refactor could drop the argument from one of them silently — this
+    proves it is actually wired, not just present in the signature."""
+    messages = _tool_call("submit_positioning", {"segments": [], "pillars": [], "ctas": []})
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_positioning(messages, annotations=[_A_URL_CITATION])
+
+    assert "transcription failure" in str(excinfo.value)
+
+
+def test_channel_plan_wires_annotations_into_its_message() -> None:
+    messages = _tool_call("submit_channel_plan", {"channels": []})
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_channel_plan(messages, taxonomy={}, annotations=[_A_URL_CITATION])
+
+    assert "transcription failure" in str(excinfo.value)
+
+
+def test_copy_wires_annotations_into_its_message() -> None:
+    messages = _tool_call("submit_copy", {"channels": []})
+
+    with pytest.raises(NoCitationsError) as excinfo:
+        extract_copy(messages, channel_plan_channels={}, annotations=[_A_URL_CITATION])
+
+    assert "transcription failure" in str(excinfo.value)
+
+
 # ── The guard does not fire on genuine content ───────────────────────────────
 
 

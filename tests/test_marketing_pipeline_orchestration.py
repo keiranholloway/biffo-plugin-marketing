@@ -73,10 +73,15 @@ class _FakeGateway:
     # ── Test-only helpers, standing in for the runtime and the engine ────────
 
     def complete(
-        self, run_id: str, *, status: str = "completed", messages: list | None = None
+        self,
+        run_id: str,
+        *,
+        status: str = "completed",
+        messages: list | None = None,
+        annotations: list[dict[str, Any]] | None = None,
     ) -> None:
         self._runs[run_id] = pipeline.AgentRunView(
-            id=run_id, status=status, messages=messages or []
+            id=run_id, status=status, messages=messages or [], annotations=annotations
         )
 
     def fire_chain_run(
@@ -86,12 +91,13 @@ class _FakeGateway:
         agent_name: str,
         status: str = "completed",
         messages: list | None = None,
+        annotations: list[dict[str, Any]] | None = None,
     ) -> str:
         """Simulate the engine's `agent_fan_in` firing a joining agent."""
         self._next_id += 1
         run_id = f"run-{self._next_id}"
         self._runs[run_id] = pipeline.AgentRunView(
-            id=run_id, status=status, messages=messages or []
+            id=run_id, status=status, messages=messages or [], annotations=annotations
         )
         self._chain_runs[(chain_id, agent_name)] = run_id
         return run_id
@@ -206,6 +212,46 @@ async def test_advance_research_raises_when_every_research_agent_failed() -> Non
         await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
 
 
+@pytest.mark.asyncio
+async def test_advance_research_propagates_the_synthesis_runs_annotations_into_the_error() -> None:
+    """Issue #82: `advance_research` must read `annotations` off the
+    engine-fired synthesis run itself (`AgentRunView.annotations`), not just
+    its `messages`, and pass it all the way into the citation guard. A
+    synthesis run that cited nothing in its tool call but WAS given retrieval
+    evidence must fail with the "transcription failure" message, not the
+    "fetched zero URLs" one — proven here through the real orchestration
+    function, not just the extractor directly."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    for run_id in run_ids:
+        gateway.complete(run_id, status="completed")
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "submit_research_synthesis",
+                            "arguments": {"summary": "Nothing usable.", "findings": []},
+                        }
+                    }
+                ],
+            }
+        ],
+        annotations=[{"type": "url_citation", "url": "https://example.com/z", "title": "Z"}],
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    detail = str(excinfo.value)
+    assert "fetched zero URLs" not in detail
+    assert "transcription failure" in detail
+
+
 # ── start_positioning / advance_positioning ──────────────────────────────────
 
 
@@ -279,6 +325,40 @@ async def test_advance_positioning_raises_when_the_run_failed() -> None:
 
     with pytest.raises(pipeline.RunNotSucceededError):
         await pipeline.advance_positioning(gateway, run_id=run_id)
+
+
+@pytest.mark.asyncio
+async def test_advance_positioning_propagates_the_runs_annotations_into_the_error() -> None:
+    """Issue #82, positioning half: a run whose retrieval genuinely found
+    nothing (`annotations=[]`) must keep the "retrying will not help" reading
+    — proven through `advance_positioning`, not the extractor directly."""
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_positioning(gateway, research_body={})
+    gateway.complete(
+        run_id,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "submit_positioning",
+                            "arguments": {"segments": [], "pillars": [], "ctas": []},
+                        }
+                    }
+                ],
+            }
+        ],
+        annotations=[],
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_positioning(gateway, run_id=run_id)
+
+    assert str(excinfo.value) == (
+        "The positioning run cited nothing from the approved research. Nothing "
+        "was produced — try running positioning again."
+    )
 
 
 # ── start_channel_plan / advance_channel_plan (M4) ───────────────────────────
@@ -370,6 +450,34 @@ async def test_advance_channel_plan_raises_when_the_run_failed() -> None:
         await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
 
 
+@pytest.mark.asyncio
+async def test_advance_channel_plan_propagates_null_annotations_into_the_error() -> None:
+    """Issue #82, channel-plan half: `annotations=None` (a pre-upgrade run, or
+    a non-`:online` model) must NOT be reported as a confirmed zero-URL
+    retrieval — proven through `advance_channel_plan`."""
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_channel_plan(
+        gateway, positioning_body={}, taxonomy=[]
+    )
+    gateway.complete(
+        run_id,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "submit_channel_plan", "arguments": {"channels": []}}}
+                ],
+            }
+        ],
+        annotations=None,
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
+
+    assert "not known" in str(excinfo.value)
+
+
 # ── start_copy / advance_copy (M5, issue #4) ─────────────────────────────────
 
 
@@ -458,6 +566,33 @@ async def test_advance_copy_raises_when_the_run_failed() -> None:
 
     with pytest.raises(pipeline.RunNotSucceededError):
         await pipeline.advance_copy(gateway, run_id=run_id, channel_plan_channels={})
+
+
+@pytest.mark.asyncio
+async def test_advance_copy_propagates_the_runs_annotations_into_the_error() -> None:
+    """Issue #82, copy half: retrieval succeeding while the model's tool call
+    cites nothing must read as transient — proven through `advance_copy`."""
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_copy(
+        gateway, positioning_body={}, channel_plan_body={}
+    )
+    gateway.complete(
+        run_id,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "submit_copy", "arguments": {"channels": []}}}
+                ],
+            }
+        ],
+        annotations=[{"type": "url_citation", "url": "https://example.com/z", "title": "Z"}],
+    )
+
+    with pytest.raises(pipeline.NoCitationsError) as excinfo:
+        await pipeline.advance_copy(gateway, run_id=run_id, channel_plan_channels={})
+
+    assert "transcription failure" in str(excinfo.value)
 
 
 # ── require_approved ──────────────────────────────────────────────────────────
