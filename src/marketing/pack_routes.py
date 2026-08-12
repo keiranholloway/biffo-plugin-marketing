@@ -27,6 +27,13 @@ Its own module for the same reason ``image_routes.py`` is: resolving a
 ``media_id`` to a fresh GET url needs the SigV4-signed internal client for
 object storage, which ``admin_app._core``'s Cognito-bearer path cannot reach.
 
+That same capability is why the assets-only read, ``list_assets_route``,
+lives here too rather than next to ``image_routes.generate_still_route``:
+it needs exactly the SigV4 client and the two helpers this module already
+has, and ``image_routes`` cannot import this module (``pack_routes`` imports
+``admin_app``, which includes ``image_routes``' router — a cycle). See that
+route's own docstring for why it is not simply a call to ``/pack``.
+
 ## What this module deliberately does NOT do — placement rendering
 
 An earlier version of this route rendered ``PLACEMENTS`` here: fetch the
@@ -407,6 +414,67 @@ async def _ensure_links(
             }
         )
     return out
+
+
+@router.get("/campaigns/{campaign_id}/assets")
+async def list_assets_route(
+    campaign_id: str,
+    core_client: BiffoAPIClient = Depends(get_core_client),
+    campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
+    admin: Any = Depends(require_admin),
+) -> dict[str, Any]:
+    """Every ``marketing_asset`` row this campaign already has, resolved to a
+    fresh GET url — the assets half of the pack, on its own, with **no copy
+    gate and no side effects**.
+
+    This exists because of issue #102, which is a money defect rather than a
+    cosmetic one. The admin UI's stills panel held generated stills in React
+    state only, so a campaign whose creative was generated in any earlier
+    session rendered "No stills generated yet this session" — indistinguishable
+    from "this campaign has no creative". Image generation is the one
+    irreversibly billable step in this plugin (``image_routes.py``'s own
+    ordering rationale for issue #24), so an empty state that cannot tell
+    those two apart actively invites a duplicate paid generation.
+
+    **Why the frontend could not just call ``/pack`` for this.** The pack is
+    a different question with two properties that make it wrong here:
+
+    1. It is **gated on approved copy** — 404 with no copy artefact, 409 with
+       one that is not approved yet. Generating a still before copy is
+       approved is a perfectly ordinary order of work, and that is exactly
+       the campaign whose operator most needs to see what already exists.
+    2. It **mints tracked links as a side effect** (``_ensure_links``). A
+       panel that loads on mount must not write rows, and must not depend on
+       ``destination_url``/a public base URL being configured — both of which
+       ``_ensure_links`` can legitimately 422/503 on.
+
+    So this is a read: campaign existence, then ``_existing_assets`` and
+    ``_asset_with_url``, the same two helpers ``get_pack_route`` uses — which
+    is deliberately the whole implementation. Reusing ``_existing_assets``
+    means the newest-source-wins dedup and the ``superseded_source_count``
+    disclosure it returns are the same here as in the pack, rather than one
+    surface hiding duplicate sources and another showing them.
+    """
+    campaign_id = admin_app._validated_campaign_id(campaign_id)
+
+    campaign_resp = await admin_app._core(
+        "GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", admin.token
+    )
+    if campaign_resp.status_code == status.HTTP_404_NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
+    campaign_resp.raise_for_status()
+
+    assets, missing_placements, superseded_source_count = await _existing_assets(
+        campaign_id, campaign_client=campaign_client
+    )
+    assets_with_urls = [await _asset_with_url(core_client, a) for a in assets]
+
+    return {
+        "campaign_id": campaign_id,
+        "assets": assets_with_urls,
+        "missing_placements": missing_placements,
+        "superseded_source_count": superseded_source_count,
+    }
 
 
 @router.get("/campaigns/{campaign_id}/pack")
