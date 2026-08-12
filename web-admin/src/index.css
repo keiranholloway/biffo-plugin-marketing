@@ -895,6 +895,62 @@ details.mint-toggle[open] > .mint {
   text-transform: uppercase;
 }
 
+/* ── Copy blocks and publish links (#103a, #103b) ─────────────────────────
+ *
+ * Every headline/body/CTA row gets its own copy control, plus one
+ * "copy all for this channel" action per channel (composed in
+ * `lib/packCopy.ts`) — the actual unit of work when pasting into a
+ * composer. `.publish-link` sits beside the channel name/motion badge,
+ * pointing at wherever `marketing_channel.publish_url` says the operator
+ * actually goes to publish; it renders nothing when there is none
+ * (`PublishLink.tsx`), so no extra "empty" styling is needed here.
+ */
+
+.copy-list-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.copy-field {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.copy-field > span:first-child {
+  flex: 1;
+}
+
+.copy-btn {
+  flex: none;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.65rem;
+  white-space: nowrap;
+}
+
+.copy-actions {
+  margin-top: 0.5rem;
+}
+
+.copy-btn.copy-all {
+  font-weight: 700;
+}
+
+.publish-link {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.publish-link:hover {
+  text-decoration: underline;
+}
+
 /* ── Accessibility: keyboard focus ────────────────────────────────────────
  *
  * A catch-all for anything interactive not already covered above (links,

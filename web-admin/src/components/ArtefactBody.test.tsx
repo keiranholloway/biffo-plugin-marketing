@@ -238,6 +238,7 @@ const LINKEDIN: ChannelTaxonomyEntry = {
   motion: 'organic',
   category: 'social',
   ad_platform: null,
+  publish_url: null,
 }
 const GOOGLE: ChannelTaxonomyEntry = {
   key: 'google_search_paid',
@@ -245,6 +246,7 @@ const GOOGLE: ChannelTaxonomyEntry = {
   motion: 'paid',
   category: 'search',
   ad_platform: 'google',
+  publish_url: null,
 }
 
 describe('ChannelPlanArtefact', () => {

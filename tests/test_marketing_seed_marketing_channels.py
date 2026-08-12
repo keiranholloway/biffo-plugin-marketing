@@ -107,6 +107,46 @@ def test_taxonomy_has_no_duplicate_keys() -> None:
     assert len(set(keys)) == len(keys)
 
 
+# ── publish_url (#103b) ───────────────────────────────────────────────────
+
+
+def test_every_channel_declares_a_publish_url_key() -> None:
+    """`None` is a valid, deliberate value (most channels have no single
+    composer) — the key must still be present so a caller can tell "checked,
+    found none" from "this row predates the field"."""
+    for channel in CHANNELS:
+        assert "publish_url" in channel, channel["key"]
+
+
+def test_publish_url_is_either_none_or_a_stable_https_link() -> None:
+    """A wrong link is worse than no link (#103b's own instruction) — every
+    non-`None` value must at least be shaped like a real, stable third-party
+    URL: `https://`, no query-string credential/token, no bare IP."""
+    for channel in CHANNELS:
+        url = channel["publish_url"]
+        if url is None:
+            continue
+        assert url.startswith("https://"), channel["key"]
+        assert "@" not in url, f"{channel['key']!r} looks like it embeds credentials"
+
+
+def test_trade_press_earned_has_no_publish_url() -> None:
+    """#103's own framing: `trade_press_earned` is a pitch to a publication,
+    not a composer — the channel most likely to be reached for a deep link
+    that must not exist."""
+    trade_press_earned = next(c for c in CHANNELS if c["key"] == "trade_press_earned")
+    assert trade_press_earned["publish_url"] is None
+
+
+def test_at_least_one_channel_per_named_platform_has_a_publish_url() -> None:
+    """The load-bearing coverage check for #103b: enough of the taxonomy
+    actually carries a link that the feature is not vacuously true. Every key
+    here is asserted present above in `CHANNELS`."""
+    have_links = {c["key"] for c in CHANNELS if c["publish_url"] is not None}
+    expected = {"google_search_paid", "linkedin_organic", "linkedin_paid", "tiktok_organic"}
+    assert expected <= have_links
+
+
 def test_taxonomy_contains_nothing_platform_or_vertical_specific() -> None:
     """This plugin installs on every Biffo platform. Franchise operators are
     the motivating example for breadth (#67), not a reason to encode

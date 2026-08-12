@@ -68,6 +68,18 @@ _CHANNELS_PATH = "/api/v1/plugins/marketing/channels"
 #: `category` values are exactly #67's eleven: search, social, video, email,
 #: content, communities, partner, events, trade_press, direct_mail, local_field
 #: — asserted by `tests/test_marketing_seed_marketing_channels.py`.
+#:
+#: `publish_url` (#103b) is the operator's actual "where do I go to publish"
+#: link, opened in a new tab and never handling credentials of its own — an
+#: unauthenticated operator bounces through that platform's own sign-in,
+#: which is the expected flow. Set only where a channel has one genuinely
+#: stable, single composer/landing entry point; left `None` everywhere else —
+#: a pitch to a named outlet (`trade_press_earned`/`trade_press_paid`), a
+#: venue that is tenant-specific (an owned email list, a chosen webinar tool,
+#: a physical event), or a taxonomy row that spans more than one real
+#: destination (`short_form_video_organic` covers Reels, Shorts and TikTok
+#: clips at once). A wrong link is worse than no link, so this stays `None`
+#: on anything this list is not confident naming.
 CHANNELS: list[dict[str, Any]] = [
     # ── Search ───────────────────────────────────────────────────────────────
     {
@@ -76,6 +88,9 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "search",
         "ad_platform": None,
+        # No single composer — SEO is published through whatever the
+        # tenant's own site/CMS is, not a third-party surface.
+        "publish_url": None,
     },
     {
         "key": "google_search_paid",
@@ -83,6 +98,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "search",
         "ad_platform": "google",
+        "publish_url": "https://ads.google.com/home/",
     },
     # ── Social — organic and paid are separate channels (#67) ──────────────────
     {
@@ -91,6 +107,9 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "social",
         "ad_platform": None,
+        # Meta Business Suite is where an operator composes and publishes an
+        # organic Facebook Page post today, not facebook.com itself.
+        "publish_url": "https://business.facebook.com/latest/home",
     },
     {
         "key": "facebook_paid",
@@ -98,6 +117,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "social",
         "ad_platform": "meta",
+        "publish_url": "https://adsmanager.facebook.com/adsmanager/",
     },
     {
         "key": "instagram_organic",
@@ -105,6 +125,9 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "social",
         "ad_platform": None,
+        # Same composer as Facebook organic — Meta Business Suite manages
+        # both connected surfaces from one place.
+        "publish_url": "https://business.facebook.com/latest/home",
     },
     {
         "key": "instagram_paid",
@@ -112,6 +135,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "social",
         "ad_platform": "meta",
+        "publish_url": "https://adsmanager.facebook.com/adsmanager/",
     },
     {
         "key": "linkedin_organic",
@@ -119,6 +143,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "social",
         "ad_platform": None,
+        "publish_url": "https://www.linkedin.com/feed/?shareActive=true",
     },
     {
         "key": "linkedin_paid",
@@ -126,6 +151,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "social",
         "ad_platform": "linkedin",
+        "publish_url": "https://www.linkedin.com/campaignmanager/",
     },
     {
         "key": "tiktok_organic",
@@ -133,6 +159,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "social",
         "ad_platform": None,
+        "publish_url": "https://www.tiktok.com/upload",
     },
     {
         "key": "tiktok_paid",
@@ -140,6 +167,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "social",
         "ad_platform": "tiktok",
+        "publish_url": "https://ads.tiktok.com/",
     },
     {
         "key": "x_organic",
@@ -147,6 +175,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "social",
         "ad_platform": None,
+        "publish_url": "https://twitter.com/compose/tweet",
     },
     {
         "key": "x_paid",
@@ -154,6 +183,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "social",
         "ad_platform": "x",
+        "publish_url": "https://ads.twitter.com/",
     },
     # ── Video — short-form and long-form (#67) ──────────────────────────────
     {
@@ -162,6 +192,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "video",
         "ad_platform": None,
+        "publish_url": "https://www.youtube.com/upload",
     },
     {
         "key": "youtube_paid",
@@ -169,6 +200,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "video",
         "ad_platform": "google",
+        # YouTube ads are bought through Google Ads, the same as search.
+        "publish_url": "https://ads.google.com/home/",
     },
     {
         "key": "short_form_video_organic",
@@ -176,6 +209,9 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "video",
         "ad_platform": None,
+        # Spans three distinct platforms/composers under one taxonomy row —
+        # no single stable URL to send an operator to.
+        "publish_url": None,
     },
     # ── Email ────────────────────────────────────────────────────────────────
     {
@@ -184,6 +220,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "email",
         "ad_platform": None,
+        # Whatever ESP the tenant uses — not this plugin's to guess.
+        "publish_url": None,
     },
     {
         "key": "email_newsletter_sponsorship",
@@ -191,6 +229,9 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "email",
         "ad_platform": None,
+        # Bought directly from whichever newsletter is sponsored — no
+        # general-purpose URL exists.
+        "publish_url": None,
     },
     # ── Content ──────────────────────────────────────────────────────────────
     {
@@ -199,6 +240,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "content",
         "ad_platform": None,
+        # Published to the tenant's own site/CMS.
+        "publish_url": None,
     },
     {
         "key": "guest_content",
@@ -206,6 +249,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "content",
         "ad_platform": None,
+        # A pitch to whichever outlet, not a composer.
+        "publish_url": None,
     },
     {
         "key": "webinar",
@@ -213,6 +258,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "content",
         "ad_platform": None,
+        # Whatever webinar platform the tenant runs on.
+        "publish_url": None,
     },
     # ── Communities ──────────────────────────────────────────────────────────
     {
@@ -221,6 +268,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "communities",
         "ad_platform": None,
+        # No single community — this row covers however many the tenant is in.
+        "publish_url": None,
     },
     # ── Partner / affiliate ──────────────────────────────────────────────────
     {
@@ -229,6 +278,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "partner",
         "ad_platform": None,
+        "publish_url": None,
     },
     {
         "key": "affiliate_referral",
@@ -236,6 +286,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "partner",
         "ad_platform": None,
+        # Whichever affiliate network/platform the tenant uses.
+        "publish_url": None,
     },
     # ── Events ───────────────────────────────────────────────────────────────
     {
@@ -244,6 +296,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "events",
         "ad_platform": None,
+        # Physical presence — nothing to deep-link to.
+        "publish_url": None,
     },
     {
         "key": "own_event",
@@ -251,6 +305,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "events",
         "ad_platform": None,
+        "publish_url": None,
     },
     {
         "key": "event_sponsorship",
@@ -258,6 +313,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "events",
         "ad_platform": None,
+        # A negotiated placement with a specific event organiser.
+        "publish_url": None,
     },
     # ── Trade press ──────────────────────────────────────────────────────────
     {
@@ -266,6 +323,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "trade_press",
         "ad_platform": None,
+        # A pitch to a publication (#103's own framing), not a URL.
+        "publish_url": None,
     },
     {
         "key": "trade_press_paid",
@@ -273,6 +332,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "trade_press",
         "ad_platform": None,
+        # Bought directly from whichever outlet — no general entry point.
+        "publish_url": None,
     },
     # ── Direct mail ──────────────────────────────────────────────────────────
     {
@@ -281,6 +342,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "direct_mail",
         "ad_platform": None,
+        # Physical mail — nothing online to link to.
+        "publish_url": None,
     },
     # ── Local / field ────────────────────────────────────────────────────────
     {
@@ -289,6 +352,7 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "organic",
         "category": "local_field",
         "ad_platform": None,
+        "publish_url": None,
     },
     {
         "key": "local_paid_advertising",
@@ -296,6 +360,8 @@ CHANNELS: list[dict[str, Any]] = [
         "motion": "paid",
         "category": "local_field",
         "ad_platform": None,
+        # Bought directly from whichever local outlet — no general URL.
+        "publish_url": None,
     },
 ]
 

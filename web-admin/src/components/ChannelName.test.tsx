@@ -11,6 +11,7 @@ const LINKEDIN_PAID: ChannelTaxonomyEntry = {
   motion: 'paid',
   category: 'social',
   ad_platform: 'linkedin',
+  publish_url: null,
 }
 
 function fakeLookup(entries: ChannelTaxonomyEntry[], loading = false): ChannelLookup {

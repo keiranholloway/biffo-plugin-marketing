@@ -406,6 +406,11 @@ export interface ChannelTaxonomyEntry {
   motion: 'organic' | 'paid'
   category: string
   ad_platform: string | null
+  /** Where an operator actually goes to publish on this channel — LinkedIn's
+   * post composer, Google Ads, and so on (#103b). `null` for channels with
+   * no single composer (a pitch to a publication, a tenant-specific email
+   * tool) — render nothing, never a placeholder or dead link. */
+  publish_url: string | null
 }
 
 export async function listChannels(): Promise<ChannelTaxonomyEntry[]> {

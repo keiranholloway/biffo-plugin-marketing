@@ -1,10 +1,13 @@
 import { useState } from 'react'
 
 import { getPack, type Pack } from '../lib/api'
+import { composeChannelCopy } from '../lib/packCopy'
 import { useClipboard } from '../lib/useClipboard'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import { ChannelName } from './ChannelName'
+import { CopyButton } from './CopyButton'
 import { MissingPlacementsWarning, PackAssets, PackGuidance, PackLinks } from './PackParts'
+import { PublishLink } from './PublishLink'
 
 /** The distribution pack (M5): assets, approved copy, tracked links and
  * guidance, assembled from an **approved** copy artefact — `pack_routes.py`'s
@@ -62,17 +65,48 @@ export function DistributionPack({
           <h4>Copy</h4>
           {pack.copy.length === 0 && <p className="empty">No approved copy channels.</p>}
           <ul className="copy-list">
-            {pack.copy.map((c, i) => (
-              <li key={`${c.channel_key}-${i}`}>
-                <strong>
-                  <ChannelName channelKey={c.channel_key} suggestedLabel={null} lookup={channelLookup} />
-                </strong>{' '}
-                <span className={`motion motion-${c.motion}`}>{c.motion}</span>
-                <p className="headline">{c.headline}</p>
-                <p>{c.body}</p>
-                <p className="cta">{c.cta}</p>
-              </li>
-            ))}
+            {pack.copy.map((c, i) => {
+              const link = pack.links.find((l) => l.channel === c.channel_key) ?? null
+              const allText = composeChannelCopy({
+                headline: c.headline,
+                body: c.body,
+                cta: c.cta,
+                linkUrl: link?.url ?? null,
+              })
+              return (
+                <li key={`${c.channel_key}-${i}`}>
+                  <div className="copy-list-head">
+                    <strong>
+                      <ChannelName channelKey={c.channel_key} suggestedLabel={null} lookup={channelLookup} />
+                    </strong>{' '}
+                    <span className={`motion motion-${c.motion}`}>{c.motion}</span>
+                    <PublishLink channelKey={c.channel_key} lookup={channelLookup} />
+                  </div>
+                  <p className="headline copy-field">
+                    <span>{c.headline}</span>
+                    <CopyButton text={c.headline} label="Copy headline" copied={copied} onCopy={copy} />
+                  </p>
+                  <p className="copy-field">
+                    <span>{c.body}</span>
+                    <CopyButton text={c.body} label="Copy body" copied={copied} onCopy={copy} />
+                  </p>
+                  <p className="cta copy-field">
+                    <span>{c.cta}</span>
+                    <CopyButton text={c.cta} label="Copy CTA" copied={copied} onCopy={copy} />
+                  </p>
+                  <div className="copy-actions">
+                    <CopyButton
+                      text={allText}
+                      label="Copy all for this channel"
+                      copiedLabel="Copied all"
+                      copied={copied}
+                      onCopy={copy}
+                      className="copy-all"
+                    />
+                  </div>
+                </li>
+              )
+            })}
           </ul>
 
           <PackLinks links={pack.links} copied={copied} onCopy={copy} />
