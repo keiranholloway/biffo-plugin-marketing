@@ -25,15 +25,14 @@ this module adds is the part that is genuinely paid-only:
    no historical spend or performance data to optimise against, so this is a
    declared, fixed starting-point heuristic — not a bidding model — and says
    so in its own ``basis`` field.
-4. **Spend, reported as explicitly unmeasurable.** ``lead_source_costs``
-   (``tabsii.lead_source_costs``, DDL module 049) is not reachable from this
-   plugin today — no ``/api/v1/internal/*`` route is registered for it, and
-   it sits behind tabsii-CRM RBAC codes unrelated to this plugin's own admin
-   identity (issue #31, the exact gap ``results_routes.py`` already reports
-   leads/conversions/cost against). This module does not invent a call to a
-   route that does not exist; it reuses ``results_routes.UnmeasuredMetric``
-   verbatim so "no data" reads the same way here as it does on the results
-   dashboard, rather than a bespoke ``0``.
+4. **Spend, reported as explicitly unmeasurable.** Issue #31 closed the gap
+   for ``results_routes.py``'s leads/conversions/cost — those now go through
+   the instance-configured leads source — but this route asks a different
+   question (spend for one campaign, inside a paid brief pack) that contract
+   was never wired to answer, and still isn't. This module does not invent a
+   call to a route that does not exist; it reuses
+   ``results_routes.UnmeasuredMetric`` verbatim so "no data" reads the same
+   way here as it does on the results dashboard, rather than a bespoke ``0``.
 
 ## What this module deliberately does NOT do
 
