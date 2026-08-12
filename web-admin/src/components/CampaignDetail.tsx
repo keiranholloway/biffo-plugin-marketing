@@ -50,7 +50,7 @@ export function CampaignDetail({
 
   return (
     <div className="campaign-detail">
-      <button type="button" className="back" onClick={onBack}>
+      <button type="button" className="back quiet" onClick={onBack}>
         &larr; Back to campaigns
       </button>
       <h2>{campaign.name}</h2>
