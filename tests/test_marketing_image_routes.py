@@ -166,10 +166,17 @@ class _FakeCampaignClient:
         exists: bool = True,
         fail_asset_creation: bool = False,
         asset_missing_id: bool = False,
+        network_error_on_placement: str | None = None,
     ) -> None:
         self.exists = exists
         self.fail_asset_creation = fail_asset_creation
         self.asset_missing_id = asset_missing_id
+        #: Raise a NETWORK-level error (not an HTTP one) when the asset row for
+        #: this placement is written. `principal_client._raw` calls
+        #: `raw_request` with no exception handling, so a timeout or reset
+        #: really does surface as a bare `httpx.HTTPError` here — which is
+        #: exactly the class `_store_placement_renders` used not to catch.
+        self.network_error_on_placement = network_error_on_placement
         self.created_assets: list[dict[str, Any]] = []
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -183,6 +190,11 @@ class _FakeCampaignClient:
         if path == f"{image_routes._INTERNAL_PREFIX}/assets":
             if self.fail_asset_creation:
                 raise BiffoAPIError(502, "asset service unavailable")
+            if (
+                self.network_error_on_placement is not None
+                and (json or {}).get("placement") == self.network_error_on_placement
+            ):
+                raise httpx.ConnectError("connection reset by peer")
             row = {**(json or {})}
             if not self.asset_missing_id:
                 row["id"] = f"asset-{len(self.created_assets) + 1}"
@@ -803,3 +815,63 @@ def test_a_failed_placement_upload_does_not_lose_the_source_or_fail_the_request(
     placements_written = {row["placement"] for row in campaign.created_assets if row["placement"]}
     assert placements_written == {"feed_1x1", "story_9x16"}
     assert "portrait_4x5" not in placements_written
+
+
+def test_a_network_failure_writing_a_placement_row_does_not_fail_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NETWORK-level failure on a placement's asset-row write must be
+    contained, exactly like an HTTP-level one.
+
+    This is the case the first version of `_store_placement_renders` missed:
+    it caught `(HTTPException, BiffoAPIError)` only, while
+    `principal_client._raw` calls `raw_request` with no exception handling of
+    its own — so a timeout or connection reset arrives as a bare
+    `httpx.HTTPError` and escaped the handler, propagating out of
+    `generate_still_route` as a 5xx.
+
+    Escaping there is worse than the failure it reports: the provider has
+    already been charged and the source row already stored, so the operator
+    sees a failed request over a generation that in fact succeeded, and a
+    reasonable retry pays the provider twice — the blind-retry-doubles-the-
+    charge failure issue #24 exists to prevent.
+
+    The `403` sibling test above does NOT cover this: a refused upload becomes
+    an `HTTPException`, which the narrow handler already caught, so it passed
+    both before and after the fix.
+    """
+    # The S3 uploads must succeed — this test is about the asset-row write, so
+    # the upload transport is mocked exactly as the sibling 403 test does.
+    # Without this the SOURCE upload makes a real network call and 502s before
+    # placement rendering is ever reached.
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+    real_async_client = httpx.AsyncClient
+
+    class _PatchedClient(real_async_client):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _PatchedClient)
+
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient(network_error_on_placement="story_9x16")
+    core = _FakeCoreClient()
+    client = TestClient(_app(provider=provider, core_client=core, campaign_client=campaign))
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    # Contained, not surfaced: an already-charged, already-stored generation
+    # still reports success.
+    assert resp.status_code == 201
+    assert resp.json()["asset"]["is_source"] is True
+
+    # The charge was ledgered exactly once — nothing here implies a re-charge.
+    assert len([c for c in core.calls if c[1] == image_routes._LEDGER_PATH]) == 1
+
+    # The source row survived, and only the one placement is missing.
+    placements = [a.get("placement") for a in campaign.created_assets]
+    assert None in placements, "the source row must survive a placement failure"
+    assert "story_9x16" not in placements
+    for other in ("feed_1x1", "portrait_4x5"):
+        assert other in placements, f"{other} should still have been stored"
