@@ -573,6 +573,54 @@ async def start_research(
     return chain_id, research_run_ids
 
 
+def _aggregate_research_annotations(
+    views: list[AgentRunView | None],
+) -> list[dict[str, Any]] | None:
+    """Aggregate ``annotations`` across the runs that actually performed
+    retrieval — the **research** runs, not the synthesis run (issue #90).
+
+    ``DEFAULT_RESEARCH_MODEL`` is ``:online``; ``DEFAULT_SYNTHESIS_MODEL`` is
+    not. The synthesis run fans in over the research runs' output and never
+    grounds itself, so its own ``.annotations`` can never be anything but the
+    "not a grounded run" state — reading it, as :func:`advance_research` used
+    to, makes the zero-citations guard structurally blind to what retrieval
+    actually found. The research runs named in ``research_run_ids`` are the
+    ones that retrieved, so they are the ones this aggregates over.
+
+    Three-way result, matching :class:`AgentRunView.annotations`'s own
+    tri-state so the guard's existing None/[]/non-empty branches keep their
+    meaning one level up:
+
+    - **Union, if any run has non-empty annotations.** A chain where one
+      research angle retrieved and the other found nothing is not treated as
+      a distinct case from one where both retrieved: either way, retrieval
+      demonstrably happened somewhere in the chain, so the guard's "retrieval
+      succeeded but wasn't transcribed" message is the right one, and its
+      wording already just reports a total count — it does not claim every
+      angle succeeded.
+    - **``None``, if no run has non-empty annotations and at least one is
+      unresolved** — either the view itself is missing (a vanished run) or
+      its ``annotations`` is ``None`` (predates the column, or somehow
+      wasn't a grounded run). The aggregate must not assert a proven
+      zero-URL retrieval when part of the chain's status is unknown.
+    - **``[]``, only when every run resolved and every one reported ``[]``.**
+      This is the one case where "retrieval genuinely found nothing" is true
+      of the whole chain, not just the run the guard used to look at.
+    """
+    saw_unknown = False
+    union: list[dict[str, Any]] = []
+    for view in views:
+        if view is None or view.annotations is None:
+            saw_unknown = True
+        elif view.annotations:
+            union.extend(view.annotations)
+    if union:
+        return union
+    if saw_unknown:
+        return None
+    return []
+
+
 async def advance_research(
     gateway: AgentGateway,
     *,
@@ -593,6 +641,12 @@ async def advance_research(
     result. ``synthesis_model`` is accepted for parity with the other stage
     starters even though this stage never *starts* a run — the engine does —
     so callers have one place to read every model this pipeline can use.
+
+    The citation guard is grounded in the **research** runs' annotations
+    (:func:`_aggregate_research_annotations`), not the synthesis run's own —
+    issue #90: the synthesis run is never a grounded (``:online``) run, so its
+    ``.annotations`` can never answer "did retrieval find anything"; the two
+    research runs named in ``research_run_ids`` are the ones that retrieved.
     """
     del synthesis_model  # the engine chooses the synthesis run's model, not us
 
@@ -604,8 +658,10 @@ async def advance_research(
             return None  # synthesis is running; nothing to do yet
         if not synthesis_run.succeeded:
             raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
+        research_views = [await gateway.get_agent_run(run_id=rid) for rid in research_run_ids]
         return extract_research_synthesis(
-            synthesis_run.messages, annotations=synthesis_run.annotations
+            synthesis_run.messages,
+            annotations=_aggregate_research_annotations(research_views),
         )
 
     # No synthesis run yet: either research is still in flight (the normal
