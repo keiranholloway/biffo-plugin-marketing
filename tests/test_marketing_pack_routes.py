@@ -816,3 +816,92 @@ def test_assets_route_includes_placement_renders(monkeypatch: pytest.MonkeyPatch
     body = resp.json()
     assert {a["placement"] for a in body["assets"] if a["placement"]} == set(PLACEMENTS)
     assert body["missing_placements"] == []
+
+
+# ── issue #94: link order must agree between mint and every later fetch ─────
+
+_ORDER_CHANNELS = [
+    {
+        "channel_key": "search_organic",
+        "motion": "organic",
+        "headline": "Free listing shows up before anyone pays for a click.",
+        "body": "Organic search brings in the operators already looking.",
+        "cta": "See how it ranks",
+        "sources": [{"url": "https://example.com/a", "note": "n"}],
+    },
+    {
+        "channel_key": "trade_press_paid",
+        "motion": "paid",
+        "headline": "Reach the operators who read the trade press.",
+        "body": "A placement in front of exactly the right audience.",
+        "cta": "Book a placement",
+        "sources": [{"url": "https://example.com/b", "note": "n"}],
+    },
+    {
+        "channel_key": "google_search_paid",
+        "motion": "paid",
+        "headline": "Show up for the exact searches that convert.",
+        "body": "Paid search alongside the organic listing above.",
+        "cta": "Start a campaign",
+        "sources": [{"url": "https://example.com/c", "note": "n"}],
+    },
+]
+
+
+def test_link_order_agrees_between_the_minting_call_and_a_later_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #94, the reported disagreement itself: the first call for a
+    campaign mints every link (`_ensure_links` used to append in `channels`
+    iteration order); every later call is all "existing" links, read back
+    from Core with no `ORDER BY`. Those two orderings had no reason to
+    agree, and in the field, did not — the same campaign's pack listed
+    `search_organic` first on mint and last on every refresh.
+
+    Reorders Core's own storage between the two calls, so a fix that merely
+    happens to preserve insertion order (and would still pass if `existing`
+    came back in a different sequence) is not enough to pass this — only a
+    fix that imposes the SAME order regardless of storage order can.
+    """
+    core = _FakeCore(copy_artefact=_copy_artefact(_ORDER_CHANNELS))
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    minted = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+    assert minted.status_code == 200
+    minted_order = [link["channel"] for link in minted.json()["links"]]
+    assert len(minted_order) == 3  # sanity: every channel actually minted
+
+    # Core's list route carries no ORDER BY — the second call must not
+    # depend on whatever order the rows happen to sit in storage.
+    core.links.reverse()
+
+    fetched = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+    assert fetched.status_code == 200
+    fetched_order = [link["channel"] for link in fetched.json()["links"]]
+
+    assert fetched_order == minted_order
+
+
+def test_link_order_is_organic_first_then_alphabetical_within_a_motion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the actual chosen key (`_link_sort_key`) rather than only its
+    self-consistency: organic before paid — the "reading order the pack
+    otherwise implies" the issue itself names, since copy and creative are
+    organic-first throughout the rest of this pack — then alphabetical by
+    `channel` within a motion."""
+    core = _FakeCore(copy_artefact=_copy_artefact(_ORDER_CHANNELS))
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 200
+    assert [link["channel"] for link in resp.json()["links"]] == [
+        "search_organic",
+        "google_search_paid",
+        "trade_press_paid",
+    ]

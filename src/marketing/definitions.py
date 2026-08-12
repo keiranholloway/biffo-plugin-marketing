@@ -12,6 +12,7 @@ converted at every boundary for no gain.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -394,6 +395,16 @@ Every finding must cite a real URL taken from the material you were given.
 Copy those URLs exactly; do not invent one, do not paraphrase one, and do not
 cite a page you were not shown.
 
+**Cite the page the evidence is actually on, not the site it lives on.** A
+claim is checkable only if a reader following your URL lands where the claim
+is: a price belongs to a pricing page, a complaint to the thread it was
+posted in, a feature comparison to the comparison page. If you were shown
+both a site's home page and a deeper page on the same site, cite the deeper
+one. Never attach a specific figure — a price, a percentage, a count, a plan
+name — to a bare home-page URL: if the only URL you have for that claim is a
+site root, either state the finding without the precision that URL cannot
+support, or leave the finding out.
+
 Do not pad the list: two well-evidenced findings beat five speculative ones.
 
 Return an empty findings list ONLY if the retrieved material genuinely
@@ -401,6 +412,29 @@ contains nothing relevant to your angle — not because you could not search,
 which you were not asked to do. If you were given sources and none supports a
 finding on your angle, say so by returning nothing; but if a source does
 support one, it must appear with its URL.
+"""
+
+#: What each research agent is told about the retrieval it was handed.
+#:
+#: The two angles used to be expressed ONLY in these instructions, which the
+#: provider never searches on: retrieval is derived from the run's input
+#: payload, and both agents were sent the identical payload
+#: (``{"campaign_id": ..., "brief": ...}``). So both searches resolved to the
+#: same query and returned the same pages — measured on campaign ``ed7c5bc2``
+#: (issue #101): 5 URLs each, **4 of them shared**, 6 distinct across the pair.
+#: The fan-out paid for two runs and bought one evidence pool.
+#:
+#: ``search_query`` (see :func:`research_search_query`) is now built per angle
+#: and sent as the *first* key of the payload, so the two agents genuinely
+#: search different things. This rule tells the model that, so it does not
+#: re-derive the other angle's ground from its own material.
+_RETRIEVAL_SCOPE_RULE = """\
+Your input begins with a `search_query`: the text the retrieval you were
+given was derived from. It is scoped to YOUR angle and deliberately differs
+from the other researcher's, so the pages in front of you are not the pages
+in front of them. Work your own angle from your own material — the other
+angle is covered by someone else, and restating the market's top-level facts
+duplicates their work instead of adding to it.
 """
 
 AUDIENCE_RESEARCH_INSTRUCTIONS = f"""\
@@ -416,6 +450,7 @@ Prioritise:
   reviews, social threads, Q&A sites.
 - Where they already are, so a later channel plan has somewhere to start.
 
+{_RETRIEVAL_SCOPE_RULE}
 {_EVIDENCE_RULE}
 {_UNTRUSTED_INPUT_RULE}
 Return your findings by calling the `{FINDINGS_TOOL_NAME}` tool exactly once.
@@ -434,6 +469,7 @@ Prioritise:
 - Anything a competitor has been criticised for, in reviews or public
   discussion — a gap this campaign should not repeat.
 
+{_RETRIEVAL_SCOPE_RULE}
 {_EVIDENCE_RULE}
 {_UNTRUSTED_INPUT_RULE}
 Return your findings by calling the `{FINDINGS_TOOL_NAME}` tool exactly once.
@@ -608,6 +644,111 @@ RESEARCH_INSTRUCTIONS: dict[str, str] = {
     RESEARCH_AUDIENCE_AGENT_NAME: AUDIENCE_RESEARCH_INSTRUCTIONS,
     RESEARCH_COMPETITIVE_AGENT_NAME: COMPETITIVE_RESEARCH_INSTRUCTIONS,
 }
+
+
+# ── What each angle actually searches for (issue #101) ───────────────────────
+#
+# An ``:online`` run's retrieval is derived from the run's *input*, not from
+# its instructions — the provider searches before the model is invoked and has
+# only the payload to search on. Every prompt difference between the two
+# research agents was therefore invisible to retrieval, and both were sent the
+# byte-identical payload. Measured on campaign ``ed7c5bc2``: 5 URLs each, 4
+# shared, **6 distinct across both agents, every one of them a site root**.
+#
+# So the angle has to live in what gets searched. Two things are encoded
+# below, and only these two — neither is a prompt tweak:
+#
+# 1. **Divergence.** The audience angle searches for where people TALK (forum
+#    threads, independent review pages, Q&A answers); the competitive angle
+#    searches for what vendors PUBLISH (pricing, plans, comparisons, case
+#    studies). Those retrieve from different corners of the web by
+#    construction, so the pool stops being one search paid for twice.
+# 2. **Depth.** Both framings name page *types* rather than vendors, and both
+#    say the specific page rather than the home page — a query for "pricing
+#    page" resolves to a pricing page far more often than a query naming a
+#    market does.
+#
+# What is NOT here, deliberately: the number of results per search. ``:online``
+# is a routing suffix that takes no parameters, and OpenRouter's per-request
+# ``plugins: [{"id": "web", "max_results": N}]`` form is not reachable from
+# this repo — the definition snapshot this plugin sends Core carries
+# ``instructions``/``model``/``tools``/``max_turns``/``output_tools``, and
+# widening the pool that way needs Core to pass web-plugin options through.
+# More searches, likewise, means more agent runs (one search per run), which
+# is a cost and a fan-in decision, not a prompt one — see this module's
+# ``RESEARCH_AGENT_NAMES`` and ``scripts/seed_fan_in_workflow.py``'s
+# ``expect_agents``, which must be re-seeded if that tuple ever changes.
+RESEARCH_SEARCH_FRAMING: dict[str, str] = {
+    RESEARCH_AUDIENCE_AGENT_NAME: (
+        "what buyers and users say about this in their own words — forum threads, "
+        "independent review-site pages, Q&A answers, community discussions and "
+        "complaint threads; the specific discussion or review page, not a vendor "
+        "home page"
+    ),
+    RESEARCH_COMPETITIVE_AGENT_NAME: (
+        "how competing vendors sell against this — pricing pages, plan and feature "
+        "comparison pages, product and case-study pages, and independent head-to-head "
+        "comparisons; the specific page carrying the claim, not a vendor home page"
+    ),
+}
+if set(RESEARCH_SEARCH_FRAMING) != set(RESEARCH_AGENT_NAMES):
+    raise RuntimeError(
+        "RESEARCH_SEARCH_FRAMING must cover exactly RESEARCH_AGENT_NAMES "
+        f"(got {sorted(RESEARCH_SEARCH_FRAMING)} against {sorted(RESEARCH_AGENT_NAMES)})"
+    )
+
+#: How much of the campaign brief rides in the searched query line.
+#:
+#: The whole brief still travels in the payload for the *model* to read — this
+#: bounds only the part retrieval derives a query from. A search query built
+#: from several hundred words of brief is a worse query than one built from
+#: its opening: the angle framing is what should dominate it, and it cannot if
+#: it is appended to an essay.
+SEARCH_QUERY_BRIEF_CHARS = 240
+
+
+def _brief_topic(brief: Mapping[str, Any] | None) -> str:
+    """The searchable topic inside a research ``brief`` payload, truncated on a
+    word boundary and stripped of newlines.
+
+    Tolerant by construction: the payload is assembled by
+    ``admin_app.start_research_route`` as ``{"campaign_id": ..., "brief":
+    <the campaign's brief text>}``, but a campaign's ``brief`` column is free
+    text a human wrote, so it may be empty, absent, or not a string at all.
+    None of those is worth failing a research run over — an empty topic simply
+    leaves the angle framing to stand on its own.
+    """
+    if not isinstance(brief, Mapping):
+        return ""
+    text = brief.get("brief")
+    if not isinstance(text, str):
+        return ""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= SEARCH_QUERY_BRIEF_CHARS:
+        return collapsed
+    head = collapsed[:SEARCH_QUERY_BRIEF_CHARS]
+    cut = head.rfind(" ")
+    return head[:cut] if cut > 0 else head
+
+
+def research_search_query(*, agent_name: str, brief: Mapping[str, Any] | None) -> str:
+    """The text THIS angle's retrieval is derived from.
+
+    Sent as the first key of the research run's ``input_payload`` (see
+    ``marketing.pipeline.start_research``) so that the provider's pre-invocation
+    search sees the angle before it sees anything else. Two agents, two
+    different strings — which is the whole point: identical payloads produced
+    a 4-of-5 overlap between the two angles (issue #101).
+
+    Raises ``KeyError`` for an unknown ``agent_name``, exactly as
+    ``RESEARCH_INSTRUCTIONS[agent_name]`` already does one line up in
+    ``start_research``: a research agent with no framing would silently fall
+    back to searching the brief alone, which is the defect this exists to fix.
+    """
+    framing = RESEARCH_SEARCH_FRAMING[agent_name]
+    topic = _brief_topic(brief)
+    return f"{topic} — {framing}" if topic else framing
+
 
 #: Every stage runs on the Claude 5 family (issue #62). The tier is chosen per
 #: stage rather than uniformly: research is the fan-out, reading-heavy leg and

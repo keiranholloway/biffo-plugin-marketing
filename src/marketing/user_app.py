@@ -119,7 +119,6 @@ version the admin surface builds.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
@@ -296,8 +295,7 @@ async def get_pack_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No approved copy for this campaign yet.",
         )
-    raw_body = copy_artefact.get("body")
-    copy_body = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+    copy_body = admin_app._parse_artefact_body(copy_artefact.get("body"))
     channels = copy_body.get("channels") or []
 
     asset_rows = await _list_all(

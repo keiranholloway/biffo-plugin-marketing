@@ -93,11 +93,7 @@ async def start_copy_route(
             detail="The channel-plan artefact must be approved before this can proceed.",
         )
 
-    def _body(artefact: dict[str, Any]) -> dict[str, Any]:
-        raw = artefact.get("body")
-        return json.loads(raw) if isinstance(raw, str) else (raw or {})
-
-    channel_plan_body = _body(approved_channel_plan)
+    channel_plan_body = admin_app._parse_artefact_body(approved_channel_plan.get("body"))
     # `{channel_key: motion}` for the plan's real entries (#76 increment 2) —
     # excludes any suggested_label-only proposal, since it is not a real
     # channel yet. Stored on the pending artefact below and re-read at
@@ -132,7 +128,7 @@ async def start_copy_route(
 
     causation_id, run_id = await pipeline.start_copy(
         gateway,
-        positioning_body=_body(approved_positioning),
+        positioning_body=admin_app._parse_artefact_body(approved_positioning.get("body")),
         channel_plan_body=channel_plan_body,
     )
 

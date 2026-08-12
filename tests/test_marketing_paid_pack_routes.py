@@ -539,6 +539,36 @@ def test_does_not_remint_a_paid_link_for_a_channel_that_already_has_one(
     assert core.links == [core.links[0]]
 
 
+def test_paid_pack_link_order_agrees_between_the_minting_call_and_a_later_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #94, over this route: `paid_pack_routes.get_paid_pack_route`
+    reuses `pack_routes._ensure_links` verbatim, so it inherits the same
+    mint-vs-fetch ordering fix rather than needing its own. Reorders Core's
+    own storage between the two calls, same as the organic-pack version of
+    this test."""
+    core = _FakeCore(
+        copy_artefact=_copy_artefact([_PAID_CHANNEL_META, _PAID_CHANNEL_GOOGLE]),
+        positioning_artefact=_positioning_artefact(_SEGMENTS),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    minted = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
+    assert minted.status_code == 200
+    minted_order = [link["channel"] for link in minted.json()["links"]]
+    assert len(minted_order) == 2
+
+    core.links.reverse()
+
+    fetched = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack")
+    assert fetched.status_code == 200
+    fetched_order = [link["channel"] for link in fetched.json()["links"]]
+
+    assert fetched_order == minted_order
+
+
 # ── pure-function unit tests ─────────────────────────────────────────────────
 
 

@@ -823,6 +823,24 @@ details.mint-toggle[open] > .mint {
   font-style: italic;
 }
 
+/* A measured figure reads as a figure — upright and in the body colour, so a
+ * real number is never mistaken for the italic, muted "not measurable" line
+ * sitting next to it (issue #114). */
+.measured {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+/* The standing excluded-clicks denominator. Always rendered, including at
+ * zero: "nothing was excluded" is a claim worth making explicitly. */
+.excluded {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+}
+
 .trimmed {
   color: var(--warning-text);
   font-style: italic;
