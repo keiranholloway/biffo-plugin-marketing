@@ -103,7 +103,7 @@ describe('PaidPack', () => {
       }),
     )
 
-    render(<PaidPack campaignId={CAMPAIGN} channelLookup={makeLookup([FACEBOOK_PAID])} />)
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([FACEBOOK_PAID])} />)
     await user.click(screen.getByRole('button', { name: /load paid pack/i }))
 
     expect(await screen.findByText(/missing renders for: feed_1x1/i)).toBeInTheDocument()
@@ -155,7 +155,7 @@ describe('PaidPack', () => {
       }),
     )
 
-    render(<PaidPack campaignId={CAMPAIGN} channelLookup={makeLookup([])} />)
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
     await user.click(screen.getByRole('button', { name: /load paid pack/i }))
 
     expect(await screen.findByText(/no copy artefact for this campaign yet/i)).toBeInTheDocument()
@@ -174,7 +174,7 @@ describe('PaidPack', () => {
       }),
     )
 
-    render(<PaidPack campaignId={CAMPAIGN} channelLookup={makeLookup([])} />)
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
     await user.click(screen.getByRole('button', { name: /load paid pack/i }))
 
     expect(await screen.findByText(/^campaign not found\./i)).toBeInTheDocument()
@@ -195,11 +195,70 @@ describe('PaidPack', () => {
       }),
     )
 
-    render(<PaidPack campaignId={CAMPAIGN} channelLookup={makeLookup([])} />)
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
     await user.click(screen.getByRole('button', { name: /load paid pack/i }))
 
     expect(await screen.findByText(/copy artefact must be approved before this can proceed/i)).toBeInTheDocument()
     expect(screen.queryByText(/^could not load the paid pack \(409\)$/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/"detail"/)).not.toBeInTheDocument()
+  })
+
+  // #117: the same `PackAssets` the organic pack renders, so the download
+  // affordance has to arrive in both packs at once, not one and possibly
+  // not the other (`PackParts.tsx`'s own module docstring).
+  it('offers the same download affordance the organic pack does', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          campaign_id: CAMPAIGN,
+          ad_copy: [],
+          assets: [
+            {
+              id: 'as1',
+              campaign_id: CAMPAIGN,
+              media_kind: 'image',
+              placement: 'story_9x16',
+              media_id: 'm1',
+              is_source: false,
+              url: 'https://bucket.s3.amazonaws.com/plugins/marketing/4c8a.png?X-Amz-Signature=c',
+            },
+          ],
+          missing_placements: [],
+          targeting: [],
+          budget: {
+            currency: 'USD',
+            channel_count: 0,
+            per_channel_daily: 0,
+            total_daily: 0,
+            test_window_days: 7,
+            total_test_budget: 0,
+            basis: 'A fixed starting-point heuristic.',
+          },
+          links: [],
+          guidance: '',
+          spend: { measurable: false, denominator: null, reason: 'Nothing exposes this yet.' },
+        }),
+      }),
+    )
+
+    render(
+      <PaidPack
+        campaignId={CAMPAIGN}
+        campaignName="Spring Launch"
+        channelLookup={makeLookup([])}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    const link = await screen.findByRole('link', { name: /download story_9x16 creative/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://bucket.s3.amazonaws.com/plugins/marketing/4c8a.png?X-Amz-Signature=c',
+    )
+    expect(link).toHaveAttribute('download', 'spring-launch-story-9x16.png')
   })
 })

@@ -28,9 +28,13 @@ import { PublishLink } from './PublishLink'
  */
 export function PaidPack({
   campaignId,
+  campaignName,
   channelLookup,
 }: {
   campaignId: string
+  /** Only used to name a downloaded creative (#117) — see
+   * `DistributionPack`'s own copy of this prop. */
+  campaignName: string
   channelLookup: ChannelLookup
 }) {
   const [pack, setPack] = useState<PaidPackData | null>(null)
@@ -169,7 +173,7 @@ export function PaidPack({
           <h4>Spend</h4>
           <p className="unmeasurable">Not measurable — {pack.spend.reason}</p>
 
-          <PackAssets assets={pack.assets} />
+          <PackAssets assets={pack.assets} campaignName={campaignName} />
 
           <PackLinks links={pack.links} copied={copied} onCopy={copy} />
 
