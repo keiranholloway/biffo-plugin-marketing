@@ -1,14 +1,26 @@
 """The campaign studio's franchise-unit-facing ASGI app (ADR-0021 ``user_ingress``).
 
-Mounted by the shared plugin host at ``/api/v1/plugins/marketing``, gated on the
-``founder`` Cognito group before this app sees a request (ADR-0011 —
-authorization is a core concern, never plugin code). ``founder`` is the
-estate's existing name for "an approved, ordinary product user" — both
-``idea-scout`` and ``ideation`` gate their own ``user_ingress`` on it, and
-``modules/cloud/aws/auth/main.tf`` describes the group itself as "Approved
-product user (e.g. an invited founder). Access to user-facing modules." This
-plugin reuses that convention rather than inventing a Tabsii-specific group
-name for a capability the plugin contract already generalises over — see
+Mounted by the shared plugin host at ``/api/v1/plugins/marketing``, gated on a
+Cognito group before this app sees a request (ADR-0011 — authorization is a
+core concern, never plugin code).
+
+**Which group is an instance decision, not this plugin's (issue #46).** The
+name lives in exactly one place — ``ingress.USER_INGRESS_GROUP``, read through
+``ingress.user_ingress_group()`` — and ``biffo.plugin.json`` declares the need
+for it in its ``config`` block so an instance can supply its own once
+keiranholloway/biffo-template#1517 lands. Read ``ingress.py``'s module
+docstring before touching any of this; in particular it records **why
+``admin`` is deliberately still a bare literal** and must not be given the same
+treatment. What that file does not do, and this one must not either, is guess
+#1517's runtime accessor: the value below is still the declared literal.
+
+The declared value today is the estate's existing name for "an approved,
+ordinary product user" — both ``idea-scout`` and ``ideation`` gate their own
+``user_ingress`` on the same group, and ``modules/cloud/aws/auth/main.tf``
+describes it generically as "Approved product user. Access to user-facing
+modules." That convention is fine on the platform that has the group and is
+exactly the problem on the platform that does not, which is what #46 records
+and what the indirection above exists to make survivable — see
 ``admin_app.py``'s own module docstring for why one manifest can serve both
 Biffo-marketing-Biffo and Tabsii-marketing-Tabsii through the SAME two ingress
 keys.
@@ -52,7 +64,7 @@ Every route here reads ``marketing_campaign``, ``marketing_artefact`` (the
 docstring has the full mechanism) — Core's own per-table ``required_role``
 governs who can pass, regardless of which plugin surface forwarded the call.
 Those tables' ``list``/``read`` permissions were ``["admin"]`` only; a
-``founder``-group caller would 403 there even with a perfectly-formed
+user-ingress-group caller would 403 there even with a perfectly-formed
 signed-and-forwarded request, because the host's group gate and Core's own
 table permission are two independent checks (``forward.py``'s own docstring:
 "Authorization for these routes is the table's own ADR-0004 permissions...
@@ -70,15 +82,15 @@ a bespoke choice: idea-scout's own ``idea_scout_build_types``/
 reason.
 
 **A real, accepted limitation this creates, broader than just this
-surface.** The routes in *this file* run behind ``require_founder``, but the
+surface.** The routes in *this file* run behind ``require_user_ingress``, but the
 table permission itself does not know that — Core's manifest-declared
 ``api_routes`` (``GET /api/v1/plugins/marketing/campaigns`` etc.) are
 forwarded by the shared host **outside any group gate at all**
 (``plugin_host/forward.py``'s own docstring: placed there deliberately so an
-admin isn't rejected by a founder-only ``user_ingress`` gate). So opening
+admin isn't rejected by the ``user_ingress`` group gate). So opening
 these four tables' ``list``/``read`` makes them reachable by **any
-authenticated tenant caller** — admin, editor, viewer or founder alike — via
-that generic CRUD path directly, not only by a ``founder``-group request
+authenticated tenant caller** — whatever groups that platform defines — via
+that generic CRUD path directly, not only by a user-ingress-group request
 routed through this file. For ``marketing_artefact`` specifically that also
 means every ``kind`` is reachable that way, not just the ``copy`` kind this
 file's own routes request — a caller could read the internal
@@ -93,8 +105,8 @@ this repo's issue #40.
 A campaign is available to a unit once its ``status`` is ``ready`` or
 ``live``. The generic list route has no server-side filter for "one of a set
 of values" (mirrors ``results_routes.py``'s own full-pagination-then-filter
-precedent), so this fetches every campaign a founder can see and filters in
-memory. There is no per-unit or per-locality scoping — every founder-group
+precedent), so this fetches every campaign the caller can see and filters in
+memory. There is no per-unit or per-locality scoping — every user-ingress-group
 caller sees every published campaign in the tenant, which matches ADR-0001's
 current single-tenant reality and campaign-studio.md §2's own "Actors: one"
 ->"many, each with their own locality" line marking that as iteration 2's
@@ -125,11 +137,21 @@ from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 
-from . import admin_app, pipeline, principal_client
+from . import admin_app, ingress, pipeline, principal_client
 from .config import public_base_url_for
 from .links import tracked_url
 
-require_founder = require_group("founder")
+#: The user surface's group gate. The group NAME comes from `ingress`, which is
+#: the only place in this plugin's source that spells it out (#46) — never a
+#: literal here. Contrast `admin_app.require_admin`/`image_routes.require_admin`,
+#: which stay bare `require_group("admin")` on purpose; `ingress.py`'s module
+#: docstring has the full reasoning for why the two are treated differently.
+#:
+#: Built once at import time, as it always was. If keiranholloway/biffo-template#1517
+#: resolves settings per request rather than per process, this line has to move
+#: inside a dependency — noted in `ingress.user_ingress_group`'s docstring too,
+#: since that is the assumption most likely to be wrong.
+require_user_ingress = require_group(ingress.user_ingress_group())
 
 #: Every `_core`-shaped call site below must carry this literal prefix — see
 #: `tests/test_marketing_core_paths_guard.py`'s module docstring for why it
@@ -154,7 +176,7 @@ _LIST_PAGE_SIZE = 200
 #: never see `draft`/`researching`/`planned`/`generating` work in progress.
 _AVAILABLE_STATUSES = frozenset({"ready", "live"})
 
-router = APIRouter(dependencies=[Depends(require_founder)])
+router = APIRouter(dependencies=[Depends(require_user_ingress)])
 
 
 def get_core_client() -> BiffoAPIClient:
@@ -166,13 +188,13 @@ def get_core_client() -> BiffoAPIClient:
 
 
 def get_campaign_client(
-    founder: Any = Depends(require_founder),
+    user: Any = Depends(require_user_ingress),
 ) -> principal_client.PrincipalCoreClient:
     """Dual-auth client for this plugin's own generated-CRUD tables, carrying
-    THIS founder's own forwarded token — same mechanism as `admin_app._core`
+    THIS caller's own forwarded token — same mechanism as `admin_app._core`
     and `image_routes.get_campaign_client` (issue #27's fix), just built from
-    the founder gate instead of the admin one."""
-    return principal_client.PrincipalCoreClient(founder.token)
+    the user-ingress gate instead of the admin one."""
+    return principal_client.PrincipalCoreClient(user.token)
 
 
 def _core_error(exc: BiffoAPIError) -> HTTPException:
@@ -223,7 +245,7 @@ def _campaign_summary(row: dict[str, Any]) -> dict[str, Any]:
 async def list_campaigns_route(
     client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
 ) -> list[dict[str, Any]]:
-    """Every campaign this founder can promote right now — `ready` or `live`
+    """Every campaign this caller can promote right now — `ready` or `live`
     only. See the module docstring for why draft/in-flight work never
     appears here."""
     rows = await _list_all(client, f"{_INTERNAL_PREFIX}/campaigns", {})
@@ -254,7 +276,7 @@ async def get_pack_route(
     request: Request,
     core_client: BiffoAPIClient = Depends(get_core_client),
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
-    founder: Any = Depends(require_founder),
+    user: Any = Depends(require_user_ingress),
 ) -> dict[str, Any]:
     """The material a unit needs to actually publish this campaign: its
     guidance text, the latest **approved** copy, every existing asset
@@ -268,7 +290,7 @@ async def get_pack_route(
     campaign_id = admin_app._validated_campaign_id(campaign_id)
 
     campaign_resp = await admin_app._core(
-        "GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", founder.token
+        "GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", user.token
     )
     if campaign_resp.status_code == status.HTTP_404_NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
@@ -285,10 +307,10 @@ async def get_pack_route(
     # serving fine start 404ing the moment an admin starts an edit — the
     # previously-approved copy is still sitting one row back and this is
     # exactly what a unit should still be served.
-    copy_artefact = await admin_app._latest_approved_artefact(campaign_id, "copy", founder.token)
+    copy_artefact = await admin_app._latest_approved_artefact(campaign_id, "copy", user.token)
     if copy_artefact is None:
         # Collapsed to one outcome rather than admin_app's 409-for-proposed:
-        # a founder cannot approve anything, so "exists but not approved yet"
+        # this surface cannot approve anything, so "exists but not approved yet"
         # and "does not exist yet" carry the same actionable information —
         # none — and 409 would surface internal pipeline state for nothing.
         raise HTTPException(
@@ -333,7 +355,7 @@ async def get_pack_route(
 
 
 def build_app() -> FastAPI:
-    """The user (founder) ASGI app — JSON only, no static mount. See the
+    """The user-ingress ASGI app — JSON only, no static mount. See the
     module docstring's "No built UI in this surface" section for why."""
     app = FastAPI(title="Marketing — campaign studio (unit)")
     app.include_router(router)

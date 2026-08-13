@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from marketing import ingress
+
 _MANIFEST = Path(__file__).resolve().parents[1] / "biffo.plugin.json"
 
 #: Column types Core actually resolves into SQLAlchemy. There is NO JSON type —
@@ -59,26 +61,37 @@ def test_the_admin_surface_is_declared_and_points_at_a_real_app() -> None:
 
 def test_the_user_surface_is_declared_and_points_at_a_real_app() -> None:
     """Surface B (franchise units) — mirrors
-    `test_the_admin_surface_is_declared_and_points_at_a_real_app` exactly.
+    `test_the_admin_surface_is_declared_and_points_at_a_real_app` exactly."""
+    declared = _raw().get("user_ingress")
+    assert declared, "user_ingress is absent — the unit surface would never mount"
+    assert declared["app"] == "marketing.user_app:app"
 
-    `required_group` is `founder`, not a bespoke name: both `idea-scout` and
-    `ideation` gate their own `user_ingress` on the same group, and
-    `modules/cloud/aws/auth/main.tf` describes it as "Approved product user"
-    generically, not as anything Idea-Scout-specific.
+
+def test_the_user_surface_gates_on_the_one_declared_group() -> None:
+    """The manifest's copy and the code's copy must agree.
+
+    The shared plugin host reads the gate from the manifest; `user_app.py`
+    builds its FastAPI dependency from `ingress.user_ingress_group()`. Those
+    are two different readers of one decision, and #46 is what happens when
+    they are two independent literals instead — the same "adopted at some call
+    sites, not all" shape as this repo's #119.
+
+    So `ingress.py` holds the name and this reconciles the manifest against it.
+    Once keiranholloway/biffo-template#1517 lands, the instance supplies the
+    value for the `user_ingress_group` setting declared below and this
+    assertion is what tells whoever makes that change that the manifest key has
+    to move too.
     """
-    ingress = _raw().get("user_ingress")
-    assert ingress, "user_ingress is absent — the unit surface would never mount"
-    assert ingress["required_group"] == "founder"
-    assert ingress["app"] == "marketing.user_app:app"
+    assert _raw()["user_ingress"]["required_group"] == ingress.USER_INGRESS_GROUP
 
 
-def test_founder_readable_tables_stay_read_only_for_founders() -> None:
+def test_user_surface_readable_tables_stay_read_only() -> None:
     """`marketing_campaign`/`marketing_artefact`/`marketing_asset`/
     `marketing_link` open `list`/`read` to any authenticated caller (`[]`) so
     `user_app.py` can read them — but `create`/`update`/`delete` must stay
     `admin`-only on every one of them, and `marketing_click` must stay
     admin-only on every operation (see `user_app.py`'s module docstring for
-    why). A regression here would let a `founder`-group caller write through
+    why). A regression here would let a user-ingress-group caller write through
     the generic CRUD path directly, which no route in `user_app.py` needs or
     should have."""
     tables = {t["name"]: t for t in _raw()["tables"]}
