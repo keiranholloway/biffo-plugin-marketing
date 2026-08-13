@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { CampaignDetail } from './components/CampaignDetail'
 import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
+import { destinationSuggestions } from './lib/destinationSuggestions'
 import { useChannelTaxonomy } from './lib/useChannelTaxonomy'
 
 /** The campaign studio's admin surface.
@@ -72,6 +73,12 @@ export default function App() {
 
   const canSubmit = name.trim() !== '' && destination.trim() !== '' && !saving
 
+  // Distinct destination URLs this tenant has already used, most-used first
+  // (#129) — derived from `campaigns`, the same fetch the table below
+  // already renders from. See `destinationSuggestions`'s own doc for why
+  // this is frequency, not recency, and why it needs no new route.
+  const suggestions = destinationSuggestions(campaigns ?? [])
+
   return (
     <main>
       <h1>Campaign studio</h1>
@@ -93,7 +100,19 @@ export default function App() {
           value={destination}
           onChange={(e) => setDestination(e.target.value)}
           placeholder="https://dev.tabsii.com/intake/demo"
+          list="destination-suggestions"
         />
+        {/* A <datalist> keeps the field free text — nothing here restricts
+            what can be typed or submitted — while suggesting what this
+            tenant has already used, so a repeat endpoint is one pick rather
+            than a retyped URL a typo can silently corrupt (#129). Empty
+            when no campaign has a destination_url yet; an empty <datalist>
+            offers nothing, which is the correct empty state. */}
+        <datalist id="destination-suggestions">
+          {suggestions.map((url) => (
+            <option key={url} value={url} />
+          ))}
+        </datalist>
         <p className="hint">
           Where tracked links send people. Every minted link carries this URL with the
           campaign&rsquo;s own id as <code>utm_campaign</code>.
