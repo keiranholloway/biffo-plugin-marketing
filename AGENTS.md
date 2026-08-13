@@ -48,8 +48,22 @@ This file is distributed by the template and kept in step by
 **Before starting work on an issue, run:**
 
 ```bash
-sh scripts/biffo.sh claim <issue-number> [-R owner/repo]   # 0 free · 1 taken · 2 cannot tell
+sh scripts/biffo.sh claim <issue-number> --as <token> [-R owner/repo]  # 0 free · 1 taken · 2 cannot tell
+sh scripts/biffo.sh claim <issue-number> --release <token>             # only the holder may clear it
 ```
+
+**`--as <token>` is required, and there is no untokened form** (biffo-template#1562).
+The token is opaque, identifies a **session** rather than a person, and is not a
+secret — it appears in a public comment. Shape it `<what>-<MMDD>-<unique>`, e.g.
+`tpl-groom-0813-9f2a`; anything with two `-`-separated parts and 6+ characters
+is accepted, and a role word every session would share (`agent`, `bot`, `me`) is
+refused. Omit the flag and the refusal prints a ready-made token derived from
+your branch, so the fix is one line to copy.
+
+Every session on a workstation claims under the same GitHub actor, so a claim
+with no token cannot be told from a stranger's — and the rule you correctly
+follow is _never steal a fresh claim_. Give the same token to every agent you
+dispatch onto the issue.
 
 Several agent sessions run against this estate at once. The script asks four
 questions, because the answer lives in more than one place: does the issue carry
@@ -72,8 +86,9 @@ every other machine; the pushed branch is the only signal they can see. The
 window between starting and pushing is where collisions actually happen — one of
 that morning's issues went from branch to **merged in three minutes**.
 
-**Release what you claim.** Remove the label when the PR merges, when you close
-the issue, or when you stop — including when you stop because someone else got
+**Release what you claim** — `claim <issue-number> --release <token>`, which
+refuses to clear anybody else's. Release when the PR merges, when you close the
+issue, or when you stop — including when you stop because someone else got
 there first. A claim you never release is worse than no claim, because the next
 session believes it. Before skipping something because it is claimed, check how
 old the claim is: no activity for over an hour probably means abandoned. Steal
