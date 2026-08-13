@@ -20,23 +20,34 @@ import { resolveCoreIdentity } from './identity'
 // The pool is built lazily and memoised: a missing identity resolves to null →
 // "signed out", never a hard crash.
 
-let userPool: CognitoUserPool | null = null
+let poolPromise: Promise<CognitoUserPool | null> | null = null
 
-async function getUserPool(): Promise<CognitoUserPool | null> {
-  if (userPool) return userPool
-  const identity = await resolveCoreIdentity()
-  if (!identity) return null
-  // Once per page load, and only with a resolved client id: drop credentials
-  // left behind by pools this deployment no longer uses (biffo-template#834).
-  // The portal and the sibling skeleton do the same; this origin is shared, so
-  // whichever app loads first does the cleaning.
-  pruneForeignCognitoCredentials(identity.clientId)
-  const poolData: ICognitoUserPoolData = {
-    UserPoolId: identity.userPoolId,
-    ClientId: identity.clientId,
-  }
-  userPool = new CognitoUserPool(poolData)
-  return userPool
+// Memoises the IN-FLIGHT promise, not the settled value (biffo-plugin-marketing#55).
+// `poolPromise ??=` assigns synchronously, before the first `await` inside the IIFE
+// runs, so every caller that arrives before the first resolution completes shares
+// that SAME promise instead of each re-running resolveCoreIdentity() and
+// pruneForeignCognitoCredentials()'s localStorage scan-and-delete independently.
+// A rejection clears the memo (`.catch` below) so one transient failure does not
+// poison every later call for the rest of the page's life.
+function getUserPool(): Promise<CognitoUserPool | null> {
+  poolPromise ??= (async () => {
+    const identity = await resolveCoreIdentity()
+    if (!identity) return null
+    // Once per page load, and only with a resolved client id: drop credentials
+    // left behind by pools this deployment no longer uses (biffo-template#834).
+    // The portal and the sibling skeleton do the same; this origin is shared, so
+    // whichever app loads first does the cleaning.
+    pruneForeignCognitoCredentials(identity.clientId)
+    const poolData: ICognitoUserPoolData = {
+      UserPoolId: identity.userPoolId,
+      ClientId: identity.clientId,
+    }
+    return new CognitoUserPool(poolData)
+  })().catch((err: unknown) => {
+    poolPromise = null
+    throw err
+  })
+  return poolPromise
 }
 
 /** The shared portal session, or null if there isn't a valid one (→ redirect to login). */
@@ -78,5 +89,5 @@ export async function getFreshIdToken(): Promise<string | null> {
 
 /** Test-only: reset the memoised pool. */
 export function __resetUserPoolForTests(): void {
-  userPool = null
+  poolPromise = null
 }
