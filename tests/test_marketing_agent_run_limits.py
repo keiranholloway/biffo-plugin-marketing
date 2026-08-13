@@ -21,11 +21,11 @@ the disagreement was invisible until it cost a research angle in production.
 from __future__ import annotations
 
 from marketing.definitions import (
+    AGENT_TIMEOUT_SECONDS,
     CHANNEL_PLAN_MAX_TURNS,
     COPY_MAX_TURNS,
     POSITIONING_MAX_TURNS,
     RESEARCH_MAX_TURNS,
-    RESEARCH_TIMEOUT_SECONDS,
     SYNTHESIS_MAX_TURNS,
     channel_plan_definition,
     copy_definition,
@@ -68,8 +68,8 @@ def test_researchs_wall_clock_is_not_silently_clamped_by_the_runtime() -> None:
     budget the run never has. Raising this past the ceiling is an instance
     change (`AGENT_RUNTIME_MAX_SECONDS` and the Lambda timeout), not a plugin
     one."""
-    assert RESEARCH_TIMEOUT_SECONDS <= _RUNTIME_TIMEOUT_CEILING, (
-        f"{RESEARCH_TIMEOUT_SECONDS}s exceeds the runtime ceiling "
+    assert AGENT_TIMEOUT_SECONDS <= _RUNTIME_TIMEOUT_CEILING, (
+        f"{AGENT_TIMEOUT_SECONDS}s exceeds the runtime ceiling "
         f"({_RUNTIME_TIMEOUT_CEILING}s) and would be clamped silently"
     )
 
@@ -90,32 +90,45 @@ def test_researchs_turn_budget_is_reachable_within_its_wall_clock() -> None:
     cannot happen.
     """
     observed_seconds_per_searching_turn = 40.0
-    reachable_turns = RESEARCH_TIMEOUT_SECONDS / observed_seconds_per_searching_turn
+    reachable_turns = AGENT_TIMEOUT_SECONDS / observed_seconds_per_searching_turn
     assert reachable_turns > 3, (
-        f"{RESEARCH_TIMEOUT_SECONDS}s buys about {reachable_turns:.1f} searching "
+        f"{AGENT_TIMEOUT_SECONDS}s buys about {reachable_turns:.1f} searching "
         f"turns, but RESEARCH_MAX_TURNS is {RESEARCH_MAX_TURNS} — the turn "
         "budget describes a run the wall clock forbids, which is #126"
     )
 
 
-def test_the_non_searching_agents_deliberately_keep_the_default() -> None:
-    """Not an oversight, and worth pinning so nobody 'fixes' it later.
+def test_no_agent_inherits_the_runtime_default_wall_clock() -> None:
+    """The invariant #130 replaced, and the reason it had to be replaced.
 
-    Synthesis, positioning, channel plan and copy do not search — they reason
-    over what they are handed — and all four completed comfortably inside 120s
-    on the same run that killed research. Raising every agent's wall clock on
-    principle would hide the next agent that genuinely needs more.
+    #126 raised the wall clock for the searching agents only, and this test
+    previously asserted the opposite of what it now does: that the
+    non-searching agents deliberately kept the 120s default, because they had
+    all finished well inside it.
+
+    That was measured on a run where the audience research angle had FAILED, so
+    synthesis had half the findings to reconcile. With both angles restored it
+    produced 8,546 output tokens and died on the same hard stop. The old
+    assertion pinned a belief that a single degraded run had made look true.
+
+    The axis is total work, not retrieval — every agent here emits a large
+    structured artefact — so the correct invariant is that none of them relies
+    on a default chosen for smaller calls.
     """
     for factory in (
+        research_definition,
         research_synthesis_definition,
         positioning_definition,
         channel_plan_definition,
         copy_definition,
     ):
-        assert "timeout_seconds" not in _definition(factory), (
-            f"{factory.__name__} does not search; it should inherit the "
-            "runtime default rather than declare a wall clock"
+        definition = _definition(factory)
+        assert "timeout_seconds" in definition, (
+            f"{factory.__name__} must declare its own wall clock — the "
+            f"runtime's {_RUNTIME_DEFAULT_TIMEOUT:g}s default is set for "
+            "smaller calls than this plugin makes (#130)"
         )
+        assert definition["timeout_seconds"] > _RUNTIME_DEFAULT_TIMEOUT
 
 
 def test_every_definition_still_declares_a_turn_budget() -> None:
