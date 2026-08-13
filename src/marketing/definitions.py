@@ -789,6 +789,34 @@ POSITIONING_MAX_TURNS = 3
 CHANNEL_PLAN_MAX_TURNS = 3
 COPY_MAX_TURNS = 3
 
+#: The wall clock a research run may spend, in seconds (issue #126).
+#:
+#: **Why this has to be stated rather than inherited.** `agent_runtime.loop`'s
+#: `DEFAULT_TIMEOUT_SECONDS` is 120, and `RunLimits.from_snapshot` only reads a
+#: per-agent value if the definition supplies one. `research_definition` set
+#: `max_turns` and nothing else, so `RESEARCH_MAX_TURNS = 8` above described a
+#: budget the wall clock forbade: once #120 gave each angle its own search,
+#: every turn carried a real retrieval and the agent died on turn 3.
+#:
+#: Measured, on the run that surfaced this: 225,298 input tokens, $0.63, and
+#: `"Turn 3 exceeded the run's remaining wall clock (120s total)"`. The same
+#: agent cost $0.0298 before #120. The pipeline then synthesised from one
+#: research angle instead of two — honestly disclosed to the operator, but
+#: half the evidence.
+#:
+#: **240s is the runtime ceiling, not an arbitrary bump.**
+#: `AGENT_RUNTIME_MAX_SECONDS` is 240 and the Lambda timeout is 300, so this
+#: takes the headroom that already exists without touching infrastructure;
+#: `from_snapshot` clamps to that ceiling anyway, so asking for more here would
+#: silently become 240 and read as a bigger budget than it is.
+#:
+#: **Cost is deliberately not the deciding factor.** Raising turns was called a
+#: cost decision above, and this is the same trade answered the other way: the
+#: cost of a campaign run on poor information dwarfs the tokens. If 240s proves
+#: tight, the next step is raising the runtime ceiling and the Lambda timeout
+#: together — an instance change, not a plugin one.
+RESEARCH_TIMEOUT_SECONDS = 240.0
+
 
 def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
     """One research agent's run definition.
@@ -804,6 +832,11 @@ def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
         "model": model,
         "tools": [],
         "max_turns": RESEARCH_MAX_TURNS,
+        # Only the searching agents need this. Synthesis, positioning, channel
+        # plan and copy all completed well inside 120s on the run that killed
+        # this one, so they keep the default rather than being raised on
+        # principle — see RESEARCH_TIMEOUT_SECONDS.
+        "timeout_seconds": RESEARCH_TIMEOUT_SECONDS,
     }
 
 
