@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { CampaignDetail } from './components/CampaignDetail'
 import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
+import { campaignUrl, readCampaignParam } from './lib/campaignLink'
 import { destinationSuggestions } from './lib/destinationSuggestions'
 import { useChannelTaxonomy } from './lib/useChannelTaxonomy'
 
@@ -19,6 +20,16 @@ export default function App() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Campaign | null>(null)
+  // The id the URL is asking for (#142). Tracked separately from `selected`
+  // because it exists BEFORE the campaigns are fetched — a shared link is
+  // read on mount, and can only be resolved to a campaign once the list
+  // arrives. Kept in state rather than read from `window` at render time so
+  // that browser back/forward, which fires `popstate` without re-mounting,
+  // actually re-renders.
+  const [linkedId, setLinkedId] = useState<string | null>(() =>
+    readCampaignParam(window.location.search),
+  )
+  const [linkError, setLinkError] = useState<string | null>(null)
 
   const [name, setName] = useState('')
   const [destination, setDestination] = useState('')
@@ -38,6 +49,55 @@ export default function App() {
 
   useEffect(load, [])
 
+  // Back/forward between the list and a campaign. `popstate` fires without a
+  // re-mount, so without this the address bar and the screen disagree — the
+  // reader presses Back, the URL changes, and the same campaign stays open.
+  useEffect(() => {
+    function onPopState() {
+      setLinkedId(readCampaignParam(window.location.search))
+      setLinkError(null)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  // Resolve the URL's campaign id against the fetched list.
+  //
+  // Resolved from `campaigns` rather than by fetching the id directly: the
+  // list is already tenant-scoped, so a link to another tenant's campaign —
+  // or to a deleted one — simply is not in it. That yields "you cannot see
+  // this" without this component needing to interpret a 403 or a 404, and
+  // without a second request.
+  useEffect(() => {
+    if (linkedId === null) {
+      setSelected(null)
+      return
+    }
+    if (campaigns === null) return // still loading; the link is not wrong yet
+    const match = campaigns.find((c) => c.id === linkedId) ?? null
+    setSelected(match)
+    setLinkError(
+      match === null
+        ? 'That campaign could not be opened. It may have been deleted, or belong to a tenant you do not have access to.'
+        : null,
+    )
+  }, [linkedId, campaigns])
+
+  /** Open or close a campaign, keeping the address bar in step (#142). */
+  function openCampaign(campaign: Campaign | null) {
+    const id = campaign?.id ?? null
+    setLinkedId(id)
+    setSelected(campaign)
+    setLinkError(null)
+    // `pushState`, not `replaceState`: opening a campaign is a navigation the
+    // reader should be able to reverse with Back.
+    window.history.pushState(
+      null,
+      '',
+      campaignUrl(id, window.location.pathname, window.location.search),
+    )
+  }
+
   function handleCampaignUpdated(updated: Campaign) {
     setSelected(updated)
     setCampaigns((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev)
@@ -48,7 +108,7 @@ export default function App() {
       <main>
         <CampaignDetail
           campaign={selected}
-          onBack={() => setSelected(null)}
+          onBack={() => openCampaign(null)}
           onCampaignUpdated={handleCampaignUpdated}
         />
       </main>
@@ -125,6 +185,7 @@ export default function App() {
         {saveError !== null && <p className="error">{saveError}</p>}
       </form>
 
+      {linkError !== null && <p className="error">{linkError}</p>}
       {error !== null && <p className="empty">Could not load campaigns: {error}</p>}
       {error === null && campaigns === null && <p className="empty">Loading…</p>}
 
@@ -162,7 +223,7 @@ export default function App() {
                   </details>
                 </td>
                 <td>
-                  <button type="button" onClick={() => setSelected(c)}>
+                  <button type="button" onClick={() => openCampaign(c)}>
                     Open
                   </button>
                 </td>
