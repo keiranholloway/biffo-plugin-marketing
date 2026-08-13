@@ -953,10 +953,43 @@ def research_search_query(*, agent_name: str, brief: Mapping[str, Any] | None) -
 #: Research also requires OpenRouter's ``:online`` suffix (live web results
 #: attached to the turn) for the same reason idea-scout's does — the search
 #: capability travels with the model id, so it cannot be silently
-#: half-configured by a missing Brave key. Sonnet 5 keeps `:online`; the suffix
-#: is a routing directive OpenRouter applies to any supported chat model, not a
-#: per-model capability that a tier change can drop.
-DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-5:online"
+#: half-configured by a missing Brave key.
+#:
+#: **Research stays on Sonnet 4 while the rest of the pipeline is Claude 5, and
+#: that is deliberate (issue #136).** The paragraph that used to sit here said
+#: "Sonnet 5 keeps ``:online``; the suffix is a routing directive OpenRouter
+#: applies to any supported chat model, not a per-model capability that a tier
+#: change can drop." That was reasonable and it is false. Measured on tabsii dev:
+#:
+#: =========================  ============  =========================================
+#: ``definition_snapshot``    annotations   findings on a query it cannot know
+#: =========================  ============  =========================================
+#: ``sonnet-4:online``        5             produced
+#: ``sonnet-5:online``        0             ``[]``
+#: =========================  ============  =========================================
+#:
+#: The second column is the run's own record of what retrieval returned. Every
+#: ``sonnet-5:online`` run since #108 reports **zero**, and a deliberate probe —
+#: asking for the current UK Bank Rate and the MPC decision date, which is
+#: trivially searchable and cannot be answered from weights — came back with no
+#: findings at all. Grounding is not happening on that route.
+#:
+#: **Why this was not obvious, and is worth stating.** The same model cheerfully
+#: cited nine deep, real-looking URLs on a *franchise software* brief — a topic
+#: it can answer from training. So the failure presents as good output on
+#: familiar subjects and honest emptiness on unfamiliar ones, which is the most
+#: expensive shape it could have: every count-based citation check passes, the
+#: artefact reads well, and the sources were never retrieved.
+#:
+#: To the model's credit it did **not** fabricate when it had nothing — it
+#: returned ``findings: []`` rather than inventing a Bank Rate. The problem is
+#: provenance, not honesty.
+#:
+#: Revisit when OpenRouter's web plugin demonstrably supports a Claude 5 route.
+#: The test is cheap and stated above: run research on a fact that post-dates
+#: training and read ``annotations``. Do not move this constant on the strength
+#: of a model being newer — that is exactly what #108 did.
+DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
 #: Neither synthesis, positioning nor channel planning searches — all three
 #: reason over what they are given — so none of them needs `:online`.
 DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-5"

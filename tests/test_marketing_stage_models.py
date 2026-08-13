@@ -41,12 +41,42 @@ _STAGE_MODELS = {
 }
 
 
+#: Research is deliberately NOT on Claude 5 — see issue #136 and
+#: `DEFAULT_RESEARCH_MODEL`'s docstring. Named here rather than special-cased
+#: inline so the exception is one reviewable fact, not a condition buried in an
+#: assertion.
+_GROUNDED_STAGE = "research"
+
+
 @pytest.mark.parametrize(("stage", "model"), sorted(_STAGE_MODELS.items()))
 def test_every_stage_runs_on_the_claude_5_family(stage: str, model: str) -> None:
-    """A stage left on an older generation bills and succeeds — assert it."""
+    """A stage left on an older generation bills and succeeds — assert it.
+
+    Research is exempt, and the exemption is the point rather than a
+    concession. #62 moved it to `sonnet-5:online` on the reasoning that
+    `:online` is a routing directive applied to any supported chat model. That
+    is false: measured on tabsii dev, every `sonnet-5:online` run reports
+    **zero** `annotations`, and a probe for a fact that post-dates training
+    (the current UK Bank Rate) returned `findings: []` — while the same model
+    cited nine plausible URLs on a topic it could answer from memory.
+    Grounding, not model recency, is what research is for.
+    """
     base = model.split(":", 1)[0]
 
     assert base.startswith("anthropic/claude-"), f"{stage} is not on an Anthropic slug: {model!r}"
+
+    if stage == _GROUNDED_STAGE:
+        # Asserted positively rather than skipped: research must stay on a
+        # route whose grounding has actually been observed, so silently
+        # drifting it forward again fails here rather than in production.
+        assert model == "anthropic/claude-sonnet-4:online", (
+            "research must stay on a model whose `:online` grounding has been "
+            f"verified live (#136); got {model!r}. If you are moving it, run "
+            "research against a fact that post-dates training and confirm "
+            "`annotations` comes back non-empty first."
+        )
+        return
+
     assert base.endswith("-5"), f"{stage} is not on the Claude 5 family: {model!r}"
 
 
