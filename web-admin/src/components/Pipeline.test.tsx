@@ -284,5 +284,68 @@ describe('Pipeline', () => {
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
       expect(within(research).queryByRole('button', { name: /^start research/i })).not.toBeInTheDocument()
     })
+
+    it('keeps the stage rendered WHILE a poll is in flight, not just after it (#147)', async () => {
+      // The flicker is a TRANSIENT state: `load()` set `loading: true` when
+      // the poll started and cleared it when the response landed, and
+      // `PipelineStage` renders `loading` by swapping out the WHOLE stage.
+      //
+      // So asserting after the response has been flushed proves nothing —
+      // the stage is back by then either way. This holds the poll's response
+      // OPEN and asserts the stage is still on screen mid-flight, which is
+      // the only moment the defect is observable. Verified fail-first: with
+      // the poll calling the non-quiet `load()`, this fails.
+      stubSession()
+      let releasePoll: (() => void) | null = null
+      let call = 0
+      const fetchMock = vi.fn(() => {
+        call += 1
+        const pendingBody = {
+          id: 'a-research',
+          campaign_id: CAMPAIGN,
+          kind: 'research',
+          status: 'pending',
+          body: '{}',
+          citations: null,
+          causation_id: null,
+          agent_run_id: null,
+        }
+        if (call === 1) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => pendingBody })
+        }
+        // Every later call is the poll: never resolves until released.
+        return new Promise((resolve) => {
+          releasePoll = () =>
+            resolve({ ok: true, status: 200, json: async () => pendingBody })
+        })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+
+      const research = await screen.findByTestId('stage-research')
+      expect(
+        within(research).getByRole('button', { name: /check for result/i }),
+      ).toBeInTheDocument()
+
+      vi.useFakeTimers()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+
+      // Mid-flight: the poll has fired and has NOT come back.
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(1)
+      // Scoped with `within`: other stages are legitimately still first-loading.
+      expect(within(research).queryByText('Loading…')).not.toBeInTheDocument()
+      expect(
+        within(research).getByRole('button', { name: /check for result/i }),
+      ).toBeInTheDocument()
+
+      await act(async () => {
+        releasePoll?.()
+      })
+      vi.useRealTimers()
+    })
+
   })
 })

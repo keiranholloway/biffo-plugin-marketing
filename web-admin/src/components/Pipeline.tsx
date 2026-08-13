@@ -155,13 +155,34 @@ export function Pipeline({
     setState((prev) => ({ ...prev, [kind]: { ...prev[kind], ...next } }))
   }
 
-  async function load(kind: ArtefactKind) {
-    patch(kind, { loading: true, error: null })
+  /** Read a stage's artefact.
+   *
+   * `quiet` is the difference between a read somebody ASKED for and one the
+   * page is doing on its own, and it exists because `loading` means two
+   * different things to the two files that use it (#147).
+   *
+   * `PipelineStage` renders `loading` as "there is nothing to show yet" — it
+   * swaps out the ENTIRE stage, badge, body and buttons, for `Loading…`.
+   * That is right on first load. This function had been treating `loading`
+   * as "a request is in flight", which was harmlessly the same thing while
+   * `load` was only called on mount and from the manual button. #144 made it
+   * the poll's read too, every 2s, and the two meanings stopped agreeing:
+   * the whole stage tore down and rebuilt on every tick, which is the
+   * reported flicker.
+   *
+   * So a background poll passes `quiet` and never touches `loading`. It
+   * still reports failures — #144 requires that, and `/artefacts/{kind}`
+   * 502s with a real sentence an operator needs — but it shows them BESIDE
+   * the stage rather than in place of it.
+   */
+  async function load(kind: ArtefactKind, { quiet = false }: { quiet?: boolean } = {}) {
+    if (!quiet) patch(kind, { loading: true, error: null })
     try {
       const artefact = await getArtefact(campaignId, kind)
-      patch(kind, { artefact, loading: false })
+      patch(kind, quiet ? { artefact } : { artefact, loading: false })
     } catch (e: unknown) {
-      patch(kind, { loading: false, error: e instanceof Error ? e.message : String(e) })
+      const message = e instanceof Error ? e.message : String(e)
+      patch(kind, quiet ? { error: message } : { loading: false, error: message })
     }
   }
 
@@ -209,7 +230,8 @@ export function Pipeline({
       return { kind: stage.kind, pending: s.artefact?.status === 'pending' && !s.busy }
     }),
     (kind) => {
-      load(kind)
+      // Quiet: this read is the page's own, not the operator's. See `load`.
+      void load(kind, { quiet: true })
     },
     (kind) => {
       patch(kind, {
