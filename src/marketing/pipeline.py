@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -62,6 +62,8 @@ from .definitions import (
     CHANNEL_PLAN_TOOL_NAME,
     COPY_AGENT_NAME,
     COPY_INSTRUCTIONS,
+    COPY_LENGTH_BUDGET,
+    COPY_LENGTH_CEILING_MULTIPLE,
     COPY_TOOL_NAME,
     DEFAULT_CHANNEL_PLAN_MODEL,
     DEFAULT_COPY_MODEL,
@@ -76,8 +78,10 @@ from .definitions import (
     RESEARCH_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_AGENT_NAME,
     RESEARCH_SYNTHESIS_TOOL_NAME,
+    ChannelCopy,
     ChannelPlan,
     CopySet,
+    LengthOverage,
     Positioning,
     ResearchFindingSet,
     ResearchSynthesis,
@@ -184,6 +188,92 @@ class StaleChannelPlanError(PipelineError):
     :class:`UnknownChannelError` (which fires when the *agent* invents a key)
     because the cause here is upstream data, not agent behaviour: the fix is
     re-running channel planning on this campaign, not retrying copy."""
+
+
+class CopyTooLongError(PipelineError):
+    """A copy run returned a field more than
+    :data:`~marketing.definitions.COPY_LENGTH_CEILING_MULTIPLE` times its
+    :data:`~marketing.definitions.COPY_LENGTH_BUDGET` (issue #128) — the copy
+    equivalent of :class:`UnknownChannelError`: not a judgement call about
+    style, but evidence the constraint was not applied at all.
+
+    Deliberately the *only* fatal half of the length rule, and deliberately
+    not a ``max_length`` on the model — see
+    :func:`measure_copy_length` for where the line is drawn and why."""
+
+
+# ── Length: measured, recorded, and only fatal at the far end (issue #128) ───
+
+
+def measure_copy_length(channels: Sequence[ChannelCopy]) -> None:
+    """Record every field over :data:`COPY_LENGTH_BUDGET` on its own
+    :class:`ChannelCopy`, and raise :class:`CopyTooLongError` for anything
+    past :data:`COPY_LENGTH_CEILING_MULTIPLE` times that budget. Mutates in
+    place, exactly as :func:`extract_copy`'s ``motion`` carry-over does.
+
+    ## Why over-budget is recorded rather than rejected
+
+    Issue #128 asks for brevity as a constraint rather than a preference, and
+    the obvious reading of that is a hard limit — a ``max_length`` on the
+    field, or this check raising on the first character over. Both are worse
+    than what they replace, for two separate reasons:
+
+    1. **Truncating a wordy headline gives you a wordy headline with the end
+       cut off.** The paid pack trims to platform limits (`_fit_to_limit`)
+       because an Ads Manager field genuinely cannot hold more; that is
+       fitting, not writing. Nothing equivalent is available here, because the
+       thing being asked for is a different sentence, not the same sentence
+       shortened.
+    2. **The run is expensive and the failure is cheap to survive.** One long
+       headline failing ``model_validate`` discards every other channel's copy
+       with it, from an agent already running close to its 240s ceiling
+       (#131), to fix something an operator can read and judge in seconds.
+
+    So the budget is enforced where a length problem is actually decidable:
+    the approval gate this artefact already has to pass. ``over_budget`` rides
+    into ``marketing_artefact.body`` and the admin UI renders it against the
+    offending line, so the operator approving the copy sees "94 characters,
+    budget 60" beside the headline itself. That is what stops it being
+    advisory — not that the model was asked nicely, but that its drift is
+    measured, attributed per field, and on screen at the moment someone
+    decides whether to ship it.
+
+    ## Why the ceiling is fatal anyway
+
+    Past ``COPY_LENGTH_CEILING_MULTIPLE`` there is nothing left to judge, so
+    handing it to an operator wastes their time instead of saving the run's.
+    An operator who hits this sees the :class:`CopyTooLongError` message —
+    which names the channel, the field, its length and its budget, and says to
+    run copy generation again — as the ``detail`` of a 502 from the advance
+    route, exactly like an uncited source or an unknown channel
+    (``admin_app._pipeline_error_to_http``, which maps the BASE class so a new
+    error type cannot fall through as a bare 500).
+    """
+    for channel_copy in channels:
+        overages: list[LengthOverage] = []
+        for field_name, budget in COPY_LENGTH_BUDGET.items():
+            length = len(getattr(channel_copy, field_name))
+            if length > budget:
+                overages.append(LengthOverage(field=field_name, length=length, budget=budget))
+        channel_copy.over_budget = overages
+
+    fatal = [
+        (channel_copy, overage)
+        for channel_copy in channels
+        for overage in channel_copy.over_budget
+        if overage.length > overage.budget * COPY_LENGTH_CEILING_MULTIPLE
+    ]
+    if fatal:
+        detail = "; ".join(
+            f"{channel_copy.channel_key} {overage.field} is {overage.length} characters "
+            f"(budget {overage.budget})"
+            for channel_copy, overage in fatal
+        )
+        raise CopyTooLongError(
+            f"The copy run returned copy more than {COPY_LENGTH_CEILING_MULTIPLE}x over its "
+            f"length budget, so it was not written to the brief at all: {detail}. Nothing "
+            "was produced — try running copy generation again."
+        )
 
 
 def _tool_call_arguments(messages: list[dict[str, Any]], tool_name: str) -> Any:
@@ -596,6 +686,12 @@ def extract_copy(
                 "approved channel plan did not include."
             )
         channel_copy.motion = channel_plan_channels[channel_copy.channel_key]  # derived
+    # Last, and after the citation guards on purpose: length is the least
+    # serious thing that can be wrong with a piece of copy, and a run that
+    # fabricated a source should be reported as having fabricated a source, not
+    # as having written a long headline. See :func:`measure_copy_length` for why
+    # only the far end of this is fatal (issue #128).
+    measure_copy_length(result.channels)
     return result
 
 

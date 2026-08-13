@@ -383,6 +383,16 @@ export interface ChannelPlanBody {
 /** #76 increment 2: `channel` → `channel_key`, always a real taxonomy key —
  * a proposal is never promoted into copy without operator acceptance, so
  * `ChannelCopy` (unlike `ChannelRecommendation`) has no `suggested_label`. */
+/** One copy field that came back longer than its length budget (#128).
+ * Derived server-side in `pipeline.measure_copy_length`, never written by the
+ * agent — and it carries its own `budget`, so this UI renders the finding
+ * without a second copy of numbers that live in `definitions.py`. */
+export interface LengthOverage {
+  field: 'headline' | 'body' | 'cta'
+  length: number
+  budget: number
+}
+
 export interface ChannelCopy {
   channel_key: string
   motion: 'organic' | 'paid'
@@ -390,6 +400,9 @@ export interface ChannelCopy {
   body: string
   cta: string
   sources: Source[]
+  /** Absent on any copy artefact proposed before #128 landed — every reader
+   * must treat it as optional rather than assume the server filled it. */
+  over_budget?: LengthOverage[]
 }
 
 export interface CopySetBody {

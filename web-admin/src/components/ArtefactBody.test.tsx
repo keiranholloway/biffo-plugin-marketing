@@ -386,4 +386,64 @@ describe('CopyArtefact', () => {
     expect(screen.getByText('Get your team live in under a day.')).toBeInTheDocument()
     expect(screen.getByText('Book a demo')).toBeInTheDocument()
   })
+
+  /** #128: the copy pipeline records a length overage rather than rejecting
+   * the run, on the argument that a wordy-but-grounded headline is decidable
+   * by the person at the approval gate and not by a validator. That argument
+   * only holds if the gate actually shows it — these two tests are what stops
+   * the server-side check from being advisory. */
+  it('badges each copy field that came back over its length budget', () => {
+    render(
+      <CopyArtefact
+        body={{
+          channels: [
+            {
+              channel_key: 'linkedin_organic',
+              motion: 'organic',
+              headline: 'Franchise management pricing you can see before you book a demo',
+              body: 'Get your team live in under a day.',
+              cta: 'See our per-location pricing up front — no demo required.',
+              sources: [{ url: 'https://example.com/copy', note: 'Copy grounding' }],
+              over_budget: [
+                { field: 'headline', length: 63, budget: 60 },
+                { field: 'cta', length: 57, budget: 40 },
+              ],
+            },
+          ],
+        }}
+        channelLookup={makeLookup([LINKEDIN, GOOGLE])}
+      />,
+    )
+    // The numbers come off the datum, not from constants duplicated here —
+    // `COPY_LENGTH_BUDGET` lives in definitions.py and must stay there.
+    expect(screen.getByText('63 chars · budget 60')).toBeInTheDocument()
+    expect(screen.getByText('57 chars · budget 40')).toBeInTheDocument()
+    // The body was inside its budget, so it carries no badge at all.
+    expect(screen.queryByText(/budget 200/)).not.toBeInTheDocument()
+  })
+
+  it('renders copy proposed before #128, which carries no over_budget at all', () => {
+    // Every artefact already in the database predates the field. Treating a
+    // missing `over_budget` as anything other than "nothing to say" would
+    // break the review gate for every campaign that already exists.
+    render(
+      <CopyArtefact
+        body={{
+          channels: [
+            {
+              channel_key: 'linkedin_organic',
+              motion: 'organic',
+              headline: 'Faster onboarding, starting today',
+              body: 'Get your team live in under a day.',
+              cta: 'Book a demo',
+              sources: [{ url: 'https://example.com/copy', note: 'Copy grounding' }],
+            },
+          ],
+        }}
+        channelLookup={makeLookup([LINKEDIN, GOOGLE])}
+      />,
+    )
+    expect(screen.getByText('Faster onboarding, starting today')).toBeInTheDocument()
+    expect(screen.queryByText(/budget/)).not.toBeInTheDocument()
+  })
 })

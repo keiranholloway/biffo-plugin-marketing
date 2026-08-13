@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import type {
   ChannelPlanBody as ChannelPlanBodyT,
   CopySetBody,
+  LengthOverage,
   PositioningBody as PositioningBodyT,
   ResearchSynthesisBody,
   Source,
@@ -283,6 +284,31 @@ export function ChannelPlanArtefact({
   )
 }
 
+/** The length budget a copy field blew, rendered beside the line that blew it
+ * (#128).
+ *
+ * This badge is the whole reason the server-side check can afford NOT to be
+ * fatal. `pipeline.measure_copy_length` records the overage instead of
+ * rejecting the run, on the argument that a length problem is decidable by the
+ * person at the approval gate and not by a validator — which is only true if
+ * that person is actually shown it. Rendering it in a summary elsewhere, or
+ * only as a count, would make the check advisory in the way #128 complains
+ * about; attached to the offending line, the operator cannot approve the copy
+ * without it being on screen next to the text it is about.
+ *
+ * Reads `budget` off the datum rather than knowing any numbers itself, so
+ * changing `COPY_LENGTH_BUDGET` in `definitions.py` never needs a matching
+ * edit here. */
+function OverBudget({ overages, field }: { overages: LengthOverage[] | undefined; field: LengthOverage['field'] }) {
+  const overage = overages?.find((o) => o.field === field)
+  if (overage === undefined) return null
+  return (
+    <span className="over-budget" title={`This ${field} is longer than the campaign studio's length budget.`}>
+      {overage.length} chars · budget {overage.budget}
+    </span>
+  )
+}
+
 export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; channelLookup: ChannelLookup }) {
   return (
     <div className="artefact-body">
@@ -297,9 +323,15 @@ export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; chann
           ),
           body: (
             <>
-              <p className="headline">{c.headline}</p>
-              <p>{c.body}</p>
-              <p className="cta">{c.cta}</p>
+              <p className="headline">
+                {c.headline} <OverBudget overages={c.over_budget} field="headline" />
+              </p>
+              <p>
+                {c.body} <OverBudget overages={c.over_budget} field="body" />
+              </p>
+              <p className="cta">
+                {c.cta} <OverBudget overages={c.over_budget} field="cta" />
+              </p>
             </>
           ),
           sources: c.sources,
