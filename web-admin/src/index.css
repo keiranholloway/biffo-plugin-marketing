@@ -721,6 +721,24 @@ details.mint-toggle[open] > .mint {
   color: var(--text-secondary);
 }
 
+/* A copy field over its length budget (#128), badged next to the line itself.
+   Deliberately quiet rather than alarming: this is a note that the copy is
+   wordier than the brief allows, sitting at an approval gate whose other
+   signals (an uncited source, an unknown channel) are hard failures that never
+   reach the screen at all. Loud styling here would compete with the copy it is
+   annotating, which is the thing the operator is actually there to read. */
+.artefact-body .over-budget {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  vertical-align: middle;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
 .motion {
   font-size: 0.7rem;
   font-weight: 700;

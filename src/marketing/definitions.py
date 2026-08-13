@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 #: What an operator can ask a campaign to produce.
 #:
@@ -313,6 +314,101 @@ class ChannelPlan(BaseModel):
     channels: list[ChannelRecommendation] = Field(default_factory=list)
 
 
+# ── How long a piece of copy is allowed to be (issue #128) ───────────────────
+#
+# Copy that is accurate, grounded and three sentences long is still bad copy:
+# it reads as competent explanation rather than persuasion. Issue #128 quotes a
+# real run (campaign ``fa6590f1``) whose organic-search entry led with a
+# rhetorical warm-up, spent two sentences arriving at its point, and closed with
+# a CTA that restated the headline instead of asking for anything.
+#
+# ## Why a number, and not only an instruction
+#
+# The prompt asks for brevity in `COPY_INSTRUCTIONS`; this is the number that
+# asking is measured against. The two are the SAME constant deliberately —
+# quoted into the instructions, quoted into the field descriptions the model
+# reads while filling each field, and read back by
+# ``pipeline.measure_copy_length`` when the output returns. A prompt that says
+# "keep it short" and a checker that decides what short means are two places for
+# the same rule to drift; there is one here.
+#
+# ## Where these numbers come from — NOT from `paid_pack_routes._PLATFORM_LIMITS`
+#
+# Those are ad-form limits: what Meta or Google will accept in a text input.
+# They answer "does this fit the box?". These answer a different question —
+# "was this written to be read in one glance?" — so they are derived from
+# reading behaviour rather than from any platform's API:
+#
+#   - ``headline`` 60 — the width at which a lead line is still taken in as one
+#     unit rather than read. It is also, not coincidentally, roughly where a
+#     search-result title and an email subject line get clipped: those products
+#     converged on the same number because they are solving the same problem.
+#   - ``body`` 200 — two sentences of plain English (~15-18 words each). This
+#     is issue #128's rule expressed as a length: *earn the second sentence or
+#     do not get one*. It sits below where the widest organic feeds clip a post
+#     and above the narrowest, on purpose: this artefact is the hook, not the
+#     whole post.
+#   - ``cta`` 40 — an imperative verb phrase and its object ("Book a 20-minute
+#     walkthrough" is 28). Past about six words a CTA stops instructing and
+#     starts being a second sentence, which is exactly the failure #128 reports.
+#
+# ## One number per field, not one per channel
+#
+# Tempting to size these per channel — an Instagram caption is not a LinkedIn
+# post. The blocker is structural, not aesthetic: at the point this is checked
+# (``pipeline.extract_copy``) the only channel fact available is the
+# ``{channel_key: motion}`` map, and deriving a channel's *shape* from its key
+# means matching substrings against it. `paid_pack_routes._platform_for_channel`
+# deleted exactly that guess in #76 increment 2 ("the keyword table itself is
+# deleted, not kept as an unreachable fallback"), and reintroducing it one
+# module over would be a worse version of the thing that was removed. Per-channel
+# ceilings need the taxonomy to carry a shape, which is a taxonomy change.
+#
+# That costs less than it looks like it does, because these are ceilings and not
+# targets. Tone still varies per channel — `COPY_INSTRUCTIONS` still says a
+# LinkedIn post and an Instagram caption must not read the same — and nothing
+# obliges any channel to spend its whole allowance.
+#
+# ## Paid channels are measured too
+#
+# One copy agent writes for both motions, and the budget and the platform limit
+# do not conflict because they ask different questions: a 100-character TikTok
+# headline fits the ad form and still is not written short, and a 45-character
+# CTA is inside this budget while Google's 30-character field will trim it. A
+# paid field that arrives inside the budget arrives with less to truncate, which
+# shows up as fewer `*_truncated` flags on the paid pack — a side benefit, not
+# the reason.
+#: The three fields a length budget applies to. Named once so the budget's
+#: keys, `LengthOverage.field` and every reader agree by construction rather
+#: than by three matching string literals.
+CopyField = Literal["headline", "body", "cta"]
+
+COPY_LENGTH_BUDGET: Mapping[CopyField, int] = {"headline": 60, "body": 200, "cta": 40}
+
+#: How far past its budget a field has to be before the copy set is rejected
+#: outright rather than flagged (``pipeline.CopyTooLongError``).
+#:
+#: Three times is not a second opinion about the right length. Between the
+#: budget and this ceiling sits copy that a person can still judge — the #128
+#: example is over budget on all three fields and nowhere near this ceiling, and
+#: rejecting that run would have thrown away copy an operator called "accurate,
+#: well-grounded and on-message". Past 3x, the constraint was not applied at all:
+#: a 180-character headline is not a headline, whatever channel it is for, so
+#: there is nothing for an operator to weigh up.
+COPY_LENGTH_CEILING_MULTIPLE: int = 3
+
+
+class LengthOverage(BaseModel):
+    """One copy field that came back longer than `COPY_LENGTH_BUDGET` allows —
+    what it was, how long it is and what it was allowed. Carries the budget
+    alongside the length so every reader of the artefact (including the admin
+    UI) can render the finding without a second copy of the numbers."""
+
+    field: CopyField
+    length: int
+    budget: int
+
+
 class ChannelCopy(BaseModel):
     """Publish-ready copy for one channel from the approved channel plan.
     Same citation discipline as every other stage output: `sources` has no
@@ -340,13 +436,57 @@ class ChannelCopy(BaseModel):
             "be overridden."
         ),
     )
-    headline: str = Field(description="The lead line, sized for this channel.")
-    body: str = Field(description="The body copy, sized for this channel.")
-    cta: str = Field(description="The call to action, drawn from the approved positioning.")
+    # The three lengths below are hard ceilings, quoted from
+    # `COPY_LENGTH_BUDGET` rather than written out, so the number the model is
+    # shown at the moment it fills the field is the same number
+    # `pipeline.measure_copy_length` measures it against. They are stated here
+    # AS WELL AS in `COPY_INSTRUCTIONS` on purpose: a length rule three
+    # paragraphs up a system prompt is a thing to remember, and a length rule in
+    # the field's own description is a thing to obey while typing it.
+    #
+    # Deliberately NOT `max_length`. A `max_length` here would be enforced by
+    # pydantic inside `_extract_cited_artefact`, so one long field would fail
+    # `model_validate`, surface as a `MalformedOutputError` carrying a raw
+    # pydantic traceback, and discard every other channel's copy along with it.
+    # Worse, it rewards the wrong behaviour: the cheapest way for a model to
+    # satisfy a hard `max_length` is to write the long sentence and stop typing,
+    # which is a wordy headline with the end cut off — the exact thing #128 says
+    # is not the same as copy written to be short.
+    headline: str = Field(
+        description=(
+            f"The lead line, sized for this channel. At most "
+            f"{COPY_LENGTH_BUDGET['headline']} characters — a ceiling, not a target to "
+            "fill. One idea, scanned in a glance, strongest claim first."
+        )
+    )
+    body: str = Field(
+        description=(
+            f"The body copy, sized for this channel. At most {COPY_LENGTH_BUDGET['body']} "
+            "characters — a ceiling, not a target to fill. One sentence; write a second "
+            "only if it carries a fact the first does not."
+        )
+    )
+    cta: str = Field(
+        description=(
+            "The call to action, drawn from the approved positioning. At most "
+            f"{COPY_LENGTH_BUDGET['cta']} characters — a ceiling, not a target to fill. "
+            "Ask for the action; do not restate the headline."
+        )
+    )
     sources: list[Source] = Field(
         min_length=1,
         description="Positioning sources (pillar/CTA) this copy was grounded in.",
     )
+    # Derived at extract time by `pipeline.measure_copy_length`, never supplied
+    # by the agent — and, unlike `motion` above, hidden from the tool schema
+    # entirely (`SkipJsonSchema`) rather than described as "will be overridden".
+    # `motion` is part of what the artefact says; this is a record of the agent
+    # having missed a rule, and showing the model the field it will be marked
+    # down in adds tokens to a prompt with no timeout headroom left (#131) while
+    # offering a place to assert compliance it has not achieved. It stays in
+    # `model_dump()`, which is what reaches `marketing_artefact.body` and the
+    # approval-gate UI.
+    over_budget: SkipJsonSchema[list[LengthOverage]] = Field(default_factory=list)
 
 
 class CopySet(BaseModel):
@@ -598,6 +738,15 @@ Return your answer by calling the `{CHANNEL_PLAN_TOOL_NAME}` tool exactly
 once. Do not answer in prose.
 """
 
+# Bound to short names purely so the length rules read as numbers inside
+# `COPY_INSTRUCTIONS`'s f-string. The values are `COPY_LENGTH_BUDGET`'s — the
+# prompt must never carry a second, hand-written copy of a number the checker
+# enforces, which is the drift this indirection exists to make impossible.
+_HEADLINE_BUDGET = COPY_LENGTH_BUDGET["headline"]
+_BODY_BUDGET = COPY_LENGTH_BUDGET["body"]
+_CTA_BUDGET = COPY_LENGTH_BUDGET["cta"]
+_CEILING_MULTIPLE = COPY_LENGTH_CEILING_MULTIPLE
+
 COPY_INSTRUCTIONS = f"""\
 You are the campaign studio's copywriter. You are given one **approved**
 positioning artefact (audience segments, message pillars and calls to
@@ -621,6 +770,43 @@ each channel:
    invented fresh.
 3. Ground every line in the positioning's segments, pillars and CTAs — never
    in generic marketing copy that could belong to any campaign.
+
+## Length is a constraint, not a preference
+
+These are hard ceilings. They are not targets to fill, and copy that reaches
+one is usually still too long:
+
+- **Headline: at most {_HEADLINE_BUDGET} characters.**
+- **Body: at most {_BODY_BUDGET} characters.**
+- **CTA: at most {_CTA_BUDGET} characters.**
+
+Your output is measured against these numbers after you return it. Every
+field over its ceiling is recorded on the artefact and shown to the operator
+who has to approve it, right next to the line that broke it. Copy more than
+{_CEILING_MULTIPLE}x over is rejected outright and the whole set is thrown away with it.
+Count the characters before you submit.
+
+Four rules decide what survives the cut:
+
+1. **Lead with the sharp end.** The first thing the reader sees is the
+   strongest, most specific claim you have. Do not set the scene, and do not
+   describe the reader's situation back to them before saying something they
+   could not have written themselves.
+2. **One idea, one action.** A second idea in the body is a second piece of
+   copy; write the first one properly instead.
+3. **The CTA asks for the click.** It names the action and stops. A CTA that
+   summarises the headline has spent the reader's last line saying something
+   they have already read.
+4. **Cut the throat-clearing.** Rhetorical opening questions, "Looking
+   for...", "Most companies...", and any clause whose removal changes nothing
+   are warm-up. The reader already knows why they are there.
+
+**Shorter must never mean vaguer.** The specific, checkable detail you took
+from the positioning — a number, a price, a named constraint, a stated
+limitation of the alternatives — is the part that persuades; the connective
+prose around it is what the ceiling is for. "Built for growth" is short and
+worth nothing. If the choice is between dropping a fact and dropping a
+clause, drop the clause.
 
 Every channel's copy must carry `sources`: copy the `url` of each relevant
 `Source` from the positioning pillar(s) or CTA(s) you drew from, exactly as
