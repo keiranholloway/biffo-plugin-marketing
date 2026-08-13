@@ -800,20 +800,34 @@ COPY_MAX_TURNS = 3
 #: nothing in this repo can (issue #132).
 RUNTIME_DEFAULT_TIMEOUT_SECONDS = 120.0
 
-#: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING` — the
-#: most any definition's `timeout_seconds` can ask for. Same caveat as
-#: `RUNTIME_DEFAULT_TIMEOUT_SECONDS` above: copied, not imported, not provable
-#: from here.
+#: This repo's belief about the most any definition's `timeout_seconds` can
+#: ask for before `RunLimits.from_snapshot` clamps it.
 #:
-#: **A factual correction, issue #132.** #126 and an earlier version of this
-#: comment both said `AGENT_RUNTIME_MAX_SECONDS` "is set to 240 on tabsii
-#: dev". That is false — grep the instance's `infra/` and there is no such
-#: variable anywhere. 240 is `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING`, the
-#: runtime's **code default**, not anything the instance configured. The
-#: number was right; the provenance claimed for it was not, and a confident
-#: wrong claim about where a limit comes from is worse than none — the next
-#: reader who goes looking for that env var to raise it will conclude the
-#: infrastructure is broken instead of finding out it was never set.
+#: **This is genuinely set on tabsii dev, and it is per-deployment
+#: configuration, not a Python code default (issue #132).** Verified directly
+#: against the deployed Lambda:
+#:
+#:     $ aws lambda get-function-configuration \
+#:         --function-name tabsii-platform-dev-plugin-agent-runtime
+#:     "AGENT_RUNTIME_MAX_SECONDS": "240"
+#:
+#: It reaches the Lambda through template-owned Terraform, not through
+#: `agent_runtime`'s Python source: `services/_plugins/agent-runtime/
+#: terraform/main.tf:108` sets
+#: ``AGENT_RUNTIME_MAX_SECONDS = tostring(var.run_timeout_seconds)`` — a
+#: Terraform **variable** that happens to default to 240, the same number
+#: `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING` uses in code for when the env
+#: var is entirely absent.
+#:
+#: The distinction is not academic: **`run_timeout_seconds` is per-deployment
+#: configuration.** An instance can lower it with a Terraform change alone —
+#: no edit to `agent_runtime`'s Python anywhere — and `RunLimits.from_snapshot`
+#: would clamp every agent's real wall clock to the new value **silently**.
+#: This constant would then claim a 240s budget no run actually gets, and
+#: every test in this file would stay green throughout, because none of them
+#: can see the deployed Terraform variable from inside this repo. That is the
+#: live version of the risk this constant's docstring used to describe as
+#: hypothetical — it is not hypothetical, it is one `terraform apply` away.
 RUNTIME_TIMEOUT_CEILING_SECONDS = 240.0
 
 #: The wall clock every agent in this plugin may spend, in seconds
@@ -836,14 +850,15 @@ RUNTIME_TIMEOUT_CEILING_SECONDS = 240.0
 #: **240s is the runtime ceiling, not a guess** — this deliberately equals
 #: `RUNTIME_TIMEOUT_CEILING_SECONDS` above rather than leaving headroom below
 #: it: every stage already needs the full 240s (that is what #130 measured),
-#: so trading budget away to guard against a hypothetical future ceiling cut
-#: would reintroduce the exact failure #126/#130 exist to fix, for a risk this
-#: repo cannot even observe (see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s
-#: docstring, and issue #132's "what this cannot catch"). `from_snapshot`
-#: clamps silently to the real ceiling, so asking for more than it would be
-#: silently reduced and this constant would claim a budget no run ever gets.
-#: Raising it further is an instance change — the real ceiling and the Lambda
-#: timeout together — not a plugin one.
+#: so trading budget away to guard against a ceiling cut would reintroduce the
+#: exact failure #126/#130 exist to fix. `from_snapshot` clamps silently to
+#: whatever `AGENT_RUNTIME_MAX_SECONDS` actually is, so asking for more would
+#: be silently reduced and this constant would claim a budget no run ever
+#: gets. Raising it further is an instance change (raising
+#: `run_timeout_seconds` in Terraform, and the Lambda timeout with it) — not a
+#: plugin one, and likewise **lowering** the ceiling is an instance change
+#: this file cannot see: see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s docstring for
+#: why that is a real, live risk rather than a hypothetical one.
 #:
 #: **Cost is deliberately not the deciding factor.** A campaign built on failed
 #: or half-completed research costs far more than the tokens.

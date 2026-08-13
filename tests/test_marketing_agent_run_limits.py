@@ -52,9 +52,11 @@ DEFINITION_FACTORIES = discover_definition_factories()
 #: (`_RUNTIME_DEFAULT_TIMEOUT = 120.0`, `_RUNTIME_TIMEOUT_CEILING = 240.0`),
 #: independently of `definitions.py`'s copy of the same belief — two places
 #: that were free to drift from EACH OTHER even though both live in this repo
-#: and neither can see the real upstream value. Importing collapses that to
-#: one place; it does not (and cannot, from this repo — see their docstrings)
-#: make either number provably correct against `agent_runtime` itself.
+#: and neither can see what is actually deployed (the ceiling in particular
+#: is a Terraform variable, `run_timeout_seconds`, not a Python constant —
+#: see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s docstring). Importing collapses
+#: that to one place; it does not (and cannot, from this repo) make either
+#: number provably correct against the deployed value.
 _RUNTIME_DEFAULT_TIMEOUT = RUNTIME_DEFAULT_TIMEOUT_SECONDS
 _RUNTIME_TIMEOUT_CEILING = RUNTIME_TIMEOUT_CEILING_SECONDS
 
@@ -77,19 +79,25 @@ def test_research_declares_its_own_wall_clock_rather_than_inheriting() -> None:
 def test_researchs_wall_clock_is_not_silently_clamped_by_the_runtime() -> None:
     """Asking for more than the ceiling is worse than asking for the ceiling:
     `from_snapshot` reduces it without complaint, so the source would claim a
-    budget the run never has. Raising this past the ceiling is an instance
-    change (setting `AGENT_RUNTIME_MAX_SECONDS` for the first time, or
-    changing the runtime's own default upstream), not a plugin one.
+    budget the run never has. `AGENT_RUNTIME_MAX_SECONDS` IS set on tabsii dev
+    (verified against the deployed Lambda — see `RUNTIME_TIMEOUT_CEILING_
+    SECONDS`'s docstring in `definitions.py`), via template-owned Terraform's
+    `run_timeout_seconds` variable, not a Python default. Raising this past
+    the ceiling is therefore an instance change — raising that Terraform
+    variable, and the Lambda timeout with it — not a plugin one.
 
     **What this assertion cannot catch (issue #132 hole 2).** Both sides here
-    are this repo's OWN copies of numbers that live in `agent_runtime`, which
-    is not a dependency of this plugin and so cannot be imported. If the real
-    ceiling is ever lowered, `_RUNTIME_TIMEOUT_CEILING` does not move with
-    it — nothing tells this test the number it is comparing against is stale
-    — so this proves internal self-consistency between two beliefs held in
-    this repo, never agreement with `agent_runtime` itself. That gap needs an
-    upstream contract test that can read both sides (biffo-template#1364) or
-    a loud clamp in `from_snapshot`; neither is buildable from here.
+    are this repo's OWN copies of numbers that are actually configured in a
+    DIFFERENT repo's Terraform, which is not a dependency of this plugin and
+    so cannot be imported or read from here. `run_timeout_seconds` is
+    per-deployment configuration: an instance CAN lower it with a Terraform
+    change alone, no code edit anywhere, and `_RUNTIME_TIMEOUT_CEILING` would
+    not move with it — nothing tells this test the number it is comparing
+    against has gone stale. So this proves internal self-consistency between
+    two beliefs held in this repo, never agreement with the deployed
+    Terraform variable. That gap needs an upstream contract test that can
+    read both sides (biffo-template#1364) or a loud clamp in `from_snapshot`
+    (today it clamps silently); neither is buildable from here.
     """
     assert AGENT_TIMEOUT_SECONDS <= _RUNTIME_TIMEOUT_CEILING, (
         f"{AGENT_TIMEOUT_SECONDS}s exceeds the runtime ceiling "
