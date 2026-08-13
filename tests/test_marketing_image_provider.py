@@ -16,7 +16,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 import marketing.image_provider as image_provider
-from marketing.image_provider import GeneratedImage, ImageProviderError, OpenAIImageProvider
+from marketing.image_provider import (
+    GeneratedImage,
+    ImageProviderError,
+    OpenAIImageProvider,
+    asset_filename,
+    slugify,
+)
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nnot a real png but bytes are bytes"
 _PNG_B64 = base64.b64encode(_PNG_BYTES).decode()
@@ -218,3 +224,88 @@ def test_the_real_ssm_wiring_reports_a_confirmed_absence(monkeypatch: pytest.Mon
 
     assert image_provider._api_key() == ""
     assert image_provider._cached_api_key == ""
+
+
+# ── issue #122: `slugify`/`asset_filename` mirror
+# `web-admin/src/lib/assetFilename.ts`'s own naming convention ──────────────
+#
+# Fixtures below are ported 1:1 from that file's own
+# `assetFilename.test.ts` (same inputs, same expected slugs) — see
+# `asset_filename`'s docstring in `image_provider.py` for why the two
+# implementations are separate code rather than one shared module, and what
+# does (and does not) catch the two drifting apart.
+
+
+def test_max_slug_matches_the_client_side_constant() -> None:
+    """`_MAX_SLUG` here and `MAX_SLUG` in `assetFilename.ts` must agree for
+    `slugify` to cap identically on both sides of the wire. There is no
+    shared constant, so this hardcodes the client's current value (60) and
+    fails loudly the moment just one side changes it — see `asset_filename`'s
+    docstring in `image_provider.py` for the full drift-detection story."""
+    assert image_provider._MAX_SLUG == 60
+
+
+def test_slugify_lowercases_strips_punctuation_and_collapses_separators() -> None:
+    assert slugify("Spring Launch — 2026!") == "spring-launch-2026"
+
+
+def test_slugify_turns_a_placement_key_into_readable_path_safe_words() -> None:
+    assert slugify("feed_1x1") == "feed-1x1"
+
+
+def test_slugify_is_empty_for_a_value_with_nothing_sluggable_in_it() -> None:
+    assert slugify("!!!") == ""
+    assert slugify("   ") == ""
+
+
+def test_slugify_caps_length_and_never_ends_on_a_separator_after_the_cap() -> None:
+    slug = slugify("a" * 58 + " bbbbbbbbbb")
+    assert len(slug) <= 60
+    assert not slug.endswith("-")
+
+
+def test_slugify_folds_accents_rather_than_dropping_them() -> None:
+    """`Café` -> `cafe`, not `caf` — a non-ASCII campaign name should still
+    produce something recognisable, matching `assetFilename.ts`'s own
+    NFKD-normalise-then-strip-combining-marks approach."""
+    assert slugify("Café") == "cafe"
+
+
+def test_asset_filename_names_a_placement_render_after_the_campaign_and_the_placement() -> None:
+    assert (
+        asset_filename(campaign_name="Spring Launch", part="feed_1x1", extension="png")
+        == "spring-launch-feed-1x1.png"
+    )
+
+
+def test_asset_filename_names_the_source_creative_source_not_a_storage_key() -> None:
+    assert (
+        asset_filename(campaign_name="Spring Launch", part="source", extension="png")
+        == "spring-launch-source.png"
+    )
+
+
+def test_asset_filename_keeps_whatever_extension_it_is_given() -> None:
+    """Unlike the client (`extensionFrom`, which has to infer an extension
+    from a presigned URL's path), this side already has the real one from
+    the provider/render step — no URL to parse, so no fallback logic to
+    test here beyond passing it straight through."""
+    assert (
+        asset_filename(campaign_name="Spring Launch", part="source", extension="jpeg")
+        == "spring-launch-source.jpeg"
+    )
+
+
+def test_asset_filename_falls_back_to_campaign_when_the_campaign_name_slugs_to_nothing() -> None:
+    result = asset_filename(campaign_name="   ", part="source", extension="png")
+    assert result == "campaign-source.png"
+
+
+def test_asset_filename_never_contains_a_uuid() -> None:
+    """The regression this whole issue is about, stated directly: nothing
+    about the composed filename is random — same campaign name and part
+    always produce the same filename, unlike the old
+    `f"{uuid.uuid4()}.png"`."""
+    first = asset_filename(campaign_name="Spring Launch", part="source", extension="png")
+    second = asset_filename(campaign_name="Spring Launch", part="source", extension="png")
+    assert first == second == "spring-launch-source.png"
