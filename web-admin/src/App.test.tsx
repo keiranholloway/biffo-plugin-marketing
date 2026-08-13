@@ -82,6 +82,94 @@ describe('creating a campaign', () => {
   })
 })
 
+describe('destination URL suggestions (#129)', () => {
+  // Distinct destination URLs from campaigns already on the page, offered
+  // through the field's own `list` attribute (a <datalist>) — the field
+  // stays free text (nothing here restricts what can be typed/submitted),
+  // it just now suggests what this tenant has used before rather than
+  // requiring every campaign to retype it from scratch.
+  it('offers previously-used destination URLs as suggestions, deduplicated', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (typeof url === 'string' && url.endsWith('/channels')) {
+          return Promise.resolve({ ok: true, json: async () => [] })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            { id: '1', name: 'Spring', status: 'draft', destination_url: 'https://x.test/a' },
+            { id: '2', name: 'Summer', status: 'draft', destination_url: 'https://x.test/b' },
+            { id: '3', name: 'Autumn', status: 'draft', destination_url: 'https://x.test/a' },
+          ],
+        })
+      }),
+    )
+    render(<App />)
+    await screen.findByText('Spring')
+
+    const input = screen.getByLabelText('Destination URL')
+    const listId = input.getAttribute('list')
+    expect(listId).not.toBeNull()
+
+    // A <datalist>'s <option>s are not exposed through any accessible-name
+    // query; reading them structurally is the only way to assert on them.
+    const datalist = document.getElementById(listId!)
+    expect(datalist).not.toBeNull()
+    const values = Array.from(datalist!.querySelectorAll('option')).map((o) => o.getAttribute('value'))
+    expect(values).toEqual(['https://x.test/a', 'https://x.test/b'])
+  })
+
+  it('offers nothing when no campaign has a destination URL yet', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (typeof url === 'string' && url.endsWith('/channels')) {
+          return Promise.resolve({ ok: true, json: async () => [] })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ id: '1', name: 'Spring', status: 'draft', destination_url: null }],
+        })
+      }),
+    )
+    render(<App />)
+    await screen.findByText('Spring')
+
+    const input = screen.getByLabelText('Destination URL')
+    const listId = input.getAttribute('list')
+    const datalist = listId !== null ? document.getElementById(listId) : null
+    expect(datalist?.querySelectorAll('option').length ?? 0).toBe(0)
+  })
+
+  it('still accepts free text outside the suggestion list', async () => {
+    let campaigns: unknown[] = [
+      { id: '1', name: 'Spring', status: 'draft', destination_url: 'https://x.test/a' },
+    ]
+    const user = userEvent.setup()
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (typeof url === 'string' && url.endsWith('/channels')) {
+        return Promise.resolve({ ok: true, json: async () => [] })
+      }
+      if (typeof url === 'string' && url.endsWith('/campaigns') && init?.method === 'POST') {
+        campaigns = [...campaigns, { id: '2', name: 'New', status: 'draft', destination_url: 'https://x.test/new' }]
+        return Promise.resolve({ ok: true, json: async () => ({ id: '2' }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => campaigns })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    await screen.findByText('Spring')
+
+    await user.type(screen.getByLabelText('Name'), 'New')
+    await user.type(screen.getByLabelText('Destination URL'), 'https://x.test/new')
+    await user.click(screen.getByRole('button', { name: /create campaign/i }))
+
+    expect(await screen.findByText('New')).toBeInTheDocument()
+  })
+})
+
 describe('opening a campaign studio', () => {
   it('switches to the campaign detail view, and back again', async () => {
     const fetchMock = vi.fn((url: string) => {

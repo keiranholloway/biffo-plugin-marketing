@@ -789,6 +789,33 @@ POSITIONING_MAX_TURNS = 3
 CHANNEL_PLAN_MAX_TURNS = 3
 COPY_MAX_TURNS = 3
 
+#: The wall clock every agent in this plugin may spend, in seconds
+#: (issues #126, #130).
+#:
+#: **Every agent, not only the searching ones.** #126 raised this for research
+#: alone, on the observation that synthesis, positioning, channel plan and copy
+#: all finished inside the runtime's 120s default. That observation was true and
+#: the inference was wrong: synthesis finished quickly only because the audience
+#: angle had failed, so it had half the findings to reconcile. With both angles
+#: restored it produced 8,546 output tokens and died on the same hard stop
+#: (#130) — the failure simply moved one stage downstream.
+#:
+#: The distinguishing factor is **total work**, not retrieval. Generating a
+#: large structured artefact is what exceeds the clock, and every agent here
+#: does exactly that. Raising them one at a time as each fails means richer
+#: research keeps pushing the failure to whichever stage is next; positioning,
+#: channel plan and copy all consume the research artefact and grow with it.
+#:
+#: **240s is the runtime ceiling, not a guess.** `AGENT_RUNTIME_MAX_SECONDS` is
+#: 240 and `RunLimits.from_snapshot` clamps to it, so asking for more would be
+#: silently reduced and this constant would claim a budget no run ever gets.
+#: Raising it further is an instance change — the ceiling and the Lambda
+#: timeout together — not a plugin one.
+#:
+#: **Cost is deliberately not the deciding factor.** A campaign built on failed
+#: or half-completed research costs far more than the tokens.
+AGENT_TIMEOUT_SECONDS = 240.0
+
 
 def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
     """One research agent's run definition.
@@ -804,6 +831,7 @@ def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
         "model": model,
         "tools": [],
         "max_turns": RESEARCH_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
     }
 
 
@@ -815,6 +843,7 @@ def research_synthesis_definition(*, model: str, instructions: str) -> dict[str,
         "model": model,
         "tools": [],
         "max_turns": SYNTHESIS_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
     }
 
 
@@ -826,6 +855,7 @@ def positioning_definition(*, model: str, instructions: str) -> dict[str, Any]:
         "model": model,
         "tools": [],
         "max_turns": POSITIONING_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
     }
 
 
@@ -837,6 +867,7 @@ def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
         "model": model,
         "tools": [],
         "max_turns": CHANNEL_PLAN_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
     }
 
 
@@ -849,6 +880,7 @@ def copy_definition(*, model: str, instructions: str) -> dict[str, Any]:
         "model": model,
         "tools": [],
         "max_turns": COPY_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
     }
 
 
