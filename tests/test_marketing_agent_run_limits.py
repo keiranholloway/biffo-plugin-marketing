@@ -26,25 +26,39 @@ from marketing.definitions import (
     COPY_MAX_TURNS,
     POSITIONING_MAX_TURNS,
     RESEARCH_MAX_TURNS,
+    RUNTIME_DEFAULT_TIMEOUT_SECONDS,
+    RUNTIME_TIMEOUT_CEILING_SECONDS,
     SYNTHESIS_MAX_TURNS,
     channel_plan_definition,
     copy_definition,
+    discover_definition_factories,
     positioning_definition,
     research_definition,
     research_synthesis_definition,
 )
 
-#: `agent_runtime.loop.DEFAULT_TIMEOUT_SECONDS`. Duplicated deliberately rather
-#: than imported: the runtime is a separate deployable this plugin does not
-#: depend on, and the number that matters here is the one the plugin will
-#: actually inherit if it stays silent.
-_RUNTIME_DEFAULT_TIMEOUT = 120.0
+#: Derived here, in this test module, rather than imported as a
+#: pre-computed constant from `definitions.py` — deliberately: see
+#: `discover_definition_factories`'s docstring for why a snapshot taken
+#: DURING that module's own import can silently miss a factory depending on
+#: where in the file it is added. By the time the `from marketing.definitions
+#: import ...` above returns, that whole module has finished executing, so
+#: calling the discovery function here sees its complete, final namespace
+#: regardless of factory placement.
+DEFINITION_FACTORIES = discover_definition_factories()
 
-#: `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING`, and the value
-#: `AGENT_RUNTIME_MAX_SECONDS` is set to on tabsii dev. `from_snapshot` clamps
-#: to this, so a definition asking for more is silently reduced — which would
-#: read in the source as a bigger budget than the run actually gets.
-_RUNTIME_TIMEOUT_CEILING = 240.0
+#: `RUNTIME_DEFAULT_TIMEOUT_SECONDS`/`RUNTIME_TIMEOUT_CEILING_SECONDS` (issue
+#: #132 hole 2) used to be re-typed here as this file's OWN literals
+#: (`_RUNTIME_DEFAULT_TIMEOUT = 120.0`, `_RUNTIME_TIMEOUT_CEILING = 240.0`),
+#: independently of `definitions.py`'s copy of the same belief — two places
+#: that were free to drift from EACH OTHER even though both live in this repo
+#: and neither can see what is actually deployed (the ceiling in particular
+#: is a Terraform variable, `run_timeout_seconds`, not a Python constant —
+#: see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s docstring). Importing collapses
+#: that to one place; it does not (and cannot, from this repo) make either
+#: number provably correct against the deployed value.
+_RUNTIME_DEFAULT_TIMEOUT = RUNTIME_DEFAULT_TIMEOUT_SECONDS
+_RUNTIME_TIMEOUT_CEILING = RUNTIME_TIMEOUT_CEILING_SECONDS
 
 
 def _definition(factory):
@@ -65,9 +79,26 @@ def test_research_declares_its_own_wall_clock_rather_than_inheriting() -> None:
 def test_researchs_wall_clock_is_not_silently_clamped_by_the_runtime() -> None:
     """Asking for more than the ceiling is worse than asking for the ceiling:
     `from_snapshot` reduces it without complaint, so the source would claim a
-    budget the run never has. Raising this past the ceiling is an instance
-    change (`AGENT_RUNTIME_MAX_SECONDS` and the Lambda timeout), not a plugin
-    one."""
+    budget the run never has. `AGENT_RUNTIME_MAX_SECONDS` IS set on tabsii dev
+    (verified against the deployed Lambda — see `RUNTIME_TIMEOUT_CEILING_
+    SECONDS`'s docstring in `definitions.py`), via template-owned Terraform's
+    `run_timeout_seconds` variable, not a Python default. Raising this past
+    the ceiling is therefore an instance change — raising that Terraform
+    variable, and the Lambda timeout with it — not a plugin one.
+
+    **What this assertion cannot catch (issue #132 hole 2).** Both sides here
+    are this repo's OWN copies of numbers that are actually configured in a
+    DIFFERENT repo's Terraform, which is not a dependency of this plugin and
+    so cannot be imported or read from here. `run_timeout_seconds` is
+    per-deployment configuration: an instance CAN lower it with a Terraform
+    change alone, no code edit anywhere, and `_RUNTIME_TIMEOUT_CEILING` would
+    not move with it — nothing tells this test the number it is comparing
+    against has gone stale. So this proves internal self-consistency between
+    two beliefs held in this repo, never agreement with the deployed
+    Terraform variable. That gap needs an upstream contract test that can
+    read both sides (biffo-template#1364) or a loud clamp in `from_snapshot`
+    (today it clamps silently); neither is buildable from here.
+    """
     assert AGENT_TIMEOUT_SECONDS <= _RUNTIME_TIMEOUT_CEILING, (
         f"{AGENT_TIMEOUT_SECONDS}s exceeds the runtime ceiling "
         f"({_RUNTIME_TIMEOUT_CEILING}s) and would be clamped silently"
@@ -114,14 +145,17 @@ def test_no_agent_inherits_the_runtime_default_wall_clock() -> None:
     The axis is total work, not retrieval — every agent here emits a large
     structured artefact — so the correct invariant is that none of them relies
     on a default chosen for smaller calls.
+
+    Sweeps `DEFINITION_FACTORIES` rather than a hand-listed tuple (issue #132
+    hole 1): that tuple is derived from `definitions.py` itself via
+    `discover_definition_factories()`, which raises if the count disagrees
+    with what it expects — see that function's docstring for why the
+    discovery is a function called here rather than a constant computed
+    inside `definitions.py`. Either way, a sixth factory added tomorrow is
+    swept here automatically rather than needing this test remembered and
+    updated.
     """
-    for factory in (
-        research_definition,
-        research_synthesis_definition,
-        positioning_definition,
-        channel_plan_definition,
-        copy_definition,
-    ):
+    for factory in DEFINITION_FACTORIES:
         definition = _definition(factory)
         assert "timeout_seconds" in definition, (
             f"{factory.__name__} must declare its own wall clock — the "
@@ -133,7 +167,15 @@ def test_no_agent_inherits_the_runtime_default_wall_clock() -> None:
 
 def test_every_definition_still_declares_a_turn_budget() -> None:
     """Guards the other half: `from_snapshot` defaults `max_turns` to 1, so a
-    definition that stopped declaring one would quietly become single-turn."""
+    definition that stopped declaring one would quietly become single-turn.
+
+    The exact turns-per-stage mapping below cannot itself be derived — there
+    is no naming convention tying e.g. `research_synthesis_definition` to
+    `SYNTHESIS_MAX_TURNS` — but the same coverage-assert shape as
+    `definitions.py:694` still applies to what CAN be checked mechanically:
+    that this hand-written mapping has not quietly fallen out of step with
+    `DEFINITION_FACTORIES` itself (issue #132 hole 1, same shape as the sweep
+    above)."""
     expected = {
         research_definition: RESEARCH_MAX_TURNS,
         research_synthesis_definition: SYNTHESIS_MAX_TURNS,
@@ -141,5 +183,11 @@ def test_every_definition_still_declares_a_turn_budget() -> None:
         channel_plan_definition: CHANNEL_PLAN_MAX_TURNS,
         copy_definition: COPY_MAX_TURNS,
     }
+    assert set(expected) == set(DEFINITION_FACTORIES), (
+        "expected must cover exactly DEFINITION_FACTORIES — a *_definition "
+        f"factory was added, removed or renamed without updating this "
+        f"mapping (expected covers {sorted(f.__name__ for f in expected)}, "
+        f"DEFINITION_FACTORIES has {sorted(f.__name__ for f in DEFINITION_FACTORIES)})"
+    )
     for factory, turns in expected.items():
         assert _definition(factory)["max_turns"] == turns
