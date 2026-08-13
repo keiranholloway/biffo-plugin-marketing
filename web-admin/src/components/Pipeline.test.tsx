@@ -284,5 +284,89 @@ describe('Pipeline', () => {
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
       expect(within(research).queryByRole('button', { name: /^start research/i })).not.toBeInTheDocument()
     })
+
+    it('keeps the stage rendered WHILE a poll is in flight, not just after it (#147)', async () => {
+      // The flicker is a TRANSIENT state: `load()` set `loading: true` when
+      // the poll started and cleared it when the response landed, and
+      // `PipelineStage` renders `loading` by swapping out the WHOLE stage.
+      // Asserting after the response has flushed proves nothing — the stage
+      // is back by then either way. So this holds the poll's response OPEN
+      // and asserts mid-flight, the only moment the defect exists.
+      //
+      // Fake timers are installed BEFORE render, deliberately: the polling
+      // interval is created by an effect during mount, so installing them
+      // afterwards leaves a real-timer interval that `advanceTimersByTime`
+      // cannot drive — the poll then never fires and the test passes against
+      // the bug. That is exactly how an earlier version of this test was
+      // vacuous.
+      vi.useFakeTimers()
+      stubSession()
+
+      let releasePoll: (() => void) | null = null
+      const pendingBody = {
+        id: 'a-research',
+        campaign_id: CAMPAIGN,
+        kind: 'research',
+        status: 'pending',
+        body: null,
+        citations: null,
+        causation_id: null,
+        agent_run_id: null,
+      }
+      // Routed by URL and method like `pollingFetchStub`: a bare call counter
+      // is wrong because every stage fetches on mount, so "the second call"
+      // is another stage's first load, not research's poll.
+      let researchReads = 0
+      const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+        if (url.endsWith('/artefacts/research') && (!init || init.method === undefined)) {
+          researchReads += 1
+          if (researchReads === 1) {
+            return Promise.resolve({ ok: true, json: async () => pendingBody })
+          }
+          return new Promise((resolve) => {
+            releasePoll = () => resolve({ ok: true, json: async () => pendingBody })
+          })
+        }
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+
+      // Let mount's fetches settle under fake timers.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      const research = screen.getByTestId('stage-research')
+      expect(
+        within(research).getByRole('button', { name: /check for result/i }),
+      ).toBeInTheDocument()
+
+      // The 2s fast-window tick. The poll fires and does NOT come back.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+
+      const researchCalls = fetchMock.mock.calls.filter(
+        ([u, init]) =>
+          typeof u === 'string' &&
+          u.endsWith('/artefacts/research') &&
+          (!init || (init as RequestInit).method === undefined),
+      )
+      expect(researchCalls.length).toBeGreaterThan(1)
+
+      // Scoped with `within`: other stages are legitimately first-loading.
+      expect(within(research).queryByText('Loading…')).not.toBeInTheDocument()
+      expect(
+        within(research).getByRole('button', { name: /check for result/i }),
+      ).toBeInTheDocument()
+
+      await act(async () => {
+        releasePoll?.()
+      })
+      vi.useRealTimers()
+    })
+
   })
 })
