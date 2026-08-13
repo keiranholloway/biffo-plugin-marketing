@@ -75,6 +75,7 @@ include line the boundary asks for.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from typing import Any
 
@@ -91,6 +92,7 @@ from .image_provider import (
     GeneratedImage,
     ImageProvider,
     ImageProviderError,
+    asset_filename,
     create_image_provider,
 )
 
@@ -368,7 +370,9 @@ async def _upload(core_client: BiffoAPIClient, image: GeneratedImage) -> dict[st
         raise _core_error(exc) from exc
 
 
-def _placement_variant(image: GeneratedImage, placement: str, rendered: bytes) -> GeneratedImage:
+def _placement_variant(
+    image: GeneratedImage, placement: str, rendered: bytes, *, campaign_name: str
+) -> GeneratedImage:
     """`rendered` packaged the way `_upload` needs, for one placement.
 
     `render.render` returns the original bytes UNCHANGED (never re-encoded)
@@ -384,6 +388,12 @@ def _placement_variant(image: GeneratedImage, placement: str, rendered: bytes) -
     carried over for context only — `_upload` reads none of them — and
     `units`/`cost_usd` are zero/`None` because this render is not billable:
     no provider was called to produce it.
+
+    **The filename is `asset_filename(campaign_name=..., part=placement,
+    ...)`** — issue #122 — never a uuid: `_upload` sends this straight
+    through to Core's presign/upload, and Core signs it verbatim into
+    `Content-Disposition` on every later download, so this is what an
+    operator's browser actually names the saved file.
     """
     is_noop = rendered == image.content
     content_type = image.content_type if is_noop else "image/png"
@@ -394,7 +404,7 @@ def _placement_variant(image: GeneratedImage, placement: str, rendered: bytes) -
     return GeneratedImage(
         content=rendered,
         content_type=content_type,
-        filename=f"{placement}-{uuid.uuid4()}.{extension}",
+        filename=asset_filename(campaign_name=campaign_name, part=placement, extension=extension),
         provider=image.provider,
         model=image.model,
         units=0.0,
@@ -408,6 +418,7 @@ async def _store_placement_renders(
     core_client: BiffoAPIClient,
     campaign_client: principal_client.PrincipalCoreClient,
     campaign_id: str,
+    campaign_name: str,
     image: GeneratedImage,
 ) -> None:
     """Render every `PLACEMENTS` entry from `image.content` — the provider's
@@ -439,7 +450,7 @@ async def _store_placement_renders(
             )
             continue
 
-        variant = _placement_variant(image, placement, rendered)
+        variant = _placement_variant(image, placement, rendered, campaign_name=campaign_name)
         try:
             media = await _upload(core_client, variant)
             media_id = _required_field(media, "id", context="Storage confirm")
@@ -529,14 +540,35 @@ async def generate_still_route(
     campaign_id = _validated_campaign_id(campaign_id)
 
     try:
-        await campaign_client.get(f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}")
+        campaign = await campaign_client.get(f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}")
     except BiffoAPIError as exc:
         raise _core_error(exc, not_found="Campaign not found.") from exc
+    # `.get("name")` rather than a required-field read: an unnamed campaign
+    # must not block generation over a purely cosmetic value —
+    # `asset_filename` already falls back to `"campaign"` for an empty or
+    # missing name, matching `results_routes.py`'s own `campaign.get("name")
+    # or ""` pattern for the same field.
+    campaign_name = campaign.get("name") if isinstance(campaign, dict) else None
 
     try:
         image = await provider.generate_still(prompt=body.prompt)
     except ImageProviderError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    # Issue #122: name the upload meaningfully — campaign + "source" — rather
+    # than keeping whatever placeholder the provider returned
+    # (`image_provider.py`'s own `generate_still` no longer even tries,
+    # since it has no campaign to name the file after). This is what Core
+    # signs into `Content-Disposition` on every later presigned download, so
+    # it is the name an operator's browser actually saves the file under.
+    image = dataclasses.replace(
+        image,
+        filename=asset_filename(
+            campaign_name=campaign_name or "",
+            part="source",
+            extension=image.filename.rsplit(".", 1)[-1] if "." in image.filename else "png",
+        ),
+    )
 
     # The provider has now been paid. Ledger it before anything else — see
     # the docstring above for why this cannot wait until after upload/asset
@@ -632,6 +664,7 @@ async def generate_still_route(
         core_client=core_client,
         campaign_client=campaign_client,
         campaign_id=campaign_id,
+        campaign_name=campaign_name or "",
         image=image,
     )
 

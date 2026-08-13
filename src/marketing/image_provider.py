@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import base64
 import os
-import uuid
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -134,6 +135,77 @@ _EXTENSION_BY_CONTENT_TYPE = {
     "image/webp": "webp",
     "image/svg+xml": "svg",
 }
+
+#: Cap on the campaign portion of a filename, matching
+#: `web-admin/src/lib/assetFilename.ts`'s own `MAX_SLUG` exactly — long enough
+#: to stay recognisable, short enough that the whole name survives a mobile
+#: filesystem and a share sheet. Kept in step with the client constant by the
+#: guard in `tests/test_marketing_image_provider.py` that asserts the two
+#: values agree (see this module's `asset_filename` docstring for why the two
+#: implementations exist at all).
+_MAX_SLUG = 60
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(value: str) -> str:
+    """A lowercase, path-safe, hyphen-separated form of ``value`` — ``""`` if
+    there is nothing sluggable in it, so a caller can fall back rather than
+    emit a filename beginning with a stray separator.
+
+    A line-for-line port of `web-admin/src/lib/assetFilename.ts`'s own
+    `slugify` (NFKD-normalise, fold combining marks rather than dropping them
+    — ``Café`` -> ``cafe``, not ``caf`` — lowercase, collapse every non-
+    alphanumeric run to one hyphen, trim, cap at `_MAX_SLUG`). See
+    `asset_filename` below for why this exists as a second implementation
+    rather than one shared module.
+    """
+    normalised = unicodedata.normalize("NFKD", value)
+    folded = "".join(ch for ch in normalised if not unicodedata.combining(ch))
+    hyphenated = _NON_ALNUM.sub("-", folded.lower()).strip("-")
+    return hyphenated[:_MAX_SLUG].rstrip("-")
+
+
+def asset_filename(*, campaign_name: str, part: str, extension: str) -> str:
+    """``<campaign>-<part>.<extension>`` — the upload filename Core signs
+    into ``Content-Disposition`` on every presigned GET, and therefore the
+    name an operator's browser actually saves a still under (issue #122:
+    ``download`` is ignored cross-origin, and a presigned storage URL always
+    is).
+
+    **Mirrors, rather than shares, `web-admin/src/lib/assetFilename.ts`'s**
+    `assetFilename()`, which composes this exact same
+    ``<campaign>-<placement|source>.<ext>`` convention client-side for the
+    pack's `download` attribute. The two cannot literally share code — one
+    runs in this Lambda over a plugin-generated still with the real
+    extension already known, the other runs in the browser over a
+    `PackAsset` and has to *infer* an extension from a signed URL's path
+    (`extensionFrom`, working around the query string a naive
+    last-dot-split would misread as part of the SigV4 signature). This
+    module's `slugify` is a deliberate line-for-line port of that file's own
+    `slugify` so the two never disagree on what one campaign name reduces
+    to — see that function's docstring.
+
+    **What catches drift if the two disagree:** nothing automatic today.
+    `tests/test_marketing_image_provider.py` asserts `slugify`'s behaviour
+    against the same fixtures `web-admin`'s own `assetFilename.test.ts`
+    uses (accents, empty input, the `_MAX_SLUG` cap), so a change to either
+    file's slugging rule shows up as a failing assertion in that test rather
+    than a silent divergence — but a human still has to notice the other
+    side needs the matching edit; there is no shared fixture or generated
+    constant enforcing it. This is the same drift class issue #119 already
+    tracks for this repo's other client/server convention pairs.
+
+    ``part`` is always a definite value at every call site in this repo —
+    ``"source"`` for the one approved creative, or a `definitions.PLACEMENTS`
+    entry otherwise — never the empty-string case `assetFilename.ts` guards
+    with its own ``'creative'`` fallback, but `slugify` is still applied to
+    it here (turning ``feed_1x1`` into ``feed-1x1``) so the convention reads
+    identically on both sides of the wire.
+    """
+    campaign = slugify(campaign_name) or "campaign"
+    slug_part = slugify(part) or "asset"
+    return f"{campaign}-{slug_part}.{extension}"
 
 
 def _openrouter_model() -> str:
@@ -289,7 +361,17 @@ class OpenAIImageProvider:
         return GeneratedImage(
             content=content,
             content_type="image/png",
-            filename=f"{uuid.uuid4()}.png",
+            # A placeholder, deliberately not random: `image_routes.py`
+            # always overwrites this with `asset_filename()` before upload,
+            # once it knows the campaign and whether this is the source or a
+            # placement (neither is available at this layer — see that
+            # function's docstring). Nothing here needs to be unique: Core's
+            # own `plugin_storage.build_key` already inserts its own
+            # `uuid4()` path segment ahead of whatever filename a plugin
+            # sends (`plugins/<plugin>/<tenant>/<uuid4>/<filename>`), so the
+            # uuid this line used to mint was never load-bearing for
+            # collision-avoidance — that guarantee lives in Core, not here.
+            filename="still.png",
             provider="openai",
             model=_OPENAI_MODEL,
             units=1.0,
@@ -386,7 +468,12 @@ class OpenRouterImageProvider:
         return GeneratedImage(
             content=content,
             content_type=content_type,
-            filename=f"{uuid.uuid4()}.{extension}",
+            # See `OpenAIImageProvider.generate_still`'s identical comment:
+            # a non-random placeholder is enough here too, for the same
+            # reason — `image_routes.py` always replaces it with a real
+            # `asset_filename()` result, and Core's own `build_key` already
+            # owns collision-avoidance via its own `uuid4()` path segment.
+            filename=f"still.{extension}",
             provider="openrouter",
             model=model,
             units=units,

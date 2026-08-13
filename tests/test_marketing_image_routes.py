@@ -24,6 +24,7 @@ imported ahead of it there.
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 import httpx
@@ -167,6 +168,12 @@ class _FakeCampaignClient:
         fail_asset_creation: bool = False,
         asset_missing_id: bool = False,
         network_error_on_placement: str | None = None,
+        #: The campaign's own display name, as Core's campaign-detail GET
+        #: would return it — non-empty by default so every test exercises
+        #: the real issue #122 naming path (a `""`/missing name masking a
+        #: bug behind the `"campaign"` fallback) unless a test opts in to
+        #: that fallback explicitly.
+        name: str = "Spring Launch",
     ) -> None:
         self.exists = exists
         self.fail_asset_creation = fail_asset_creation
@@ -177,13 +184,14 @@ class _FakeCampaignClient:
         #: really does surface as a bare `httpx.HTTPError` here — which is
         #: exactly the class `_store_placement_renders` used not to catch.
         self.network_error_on_placement = network_error_on_placement
+        self.name = name
         self.created_assets: list[dict[str, Any]] = []
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         if path == f"{image_routes._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}":
             if not self.exists:
                 raise BiffoAPIError(404, "not found")
-            return {"id": _CAMPAIGN}
+            return {"id": _CAMPAIGN, "name": self.name}
         raise AssertionError(f"unexpected GET {path}")
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
@@ -659,12 +667,25 @@ def test_rejects_an_empty_prompt() -> None:
 # bytes, never fetched back from storage — see `_store_placement_renders` ──
 
 
+def _uploaded_filename(request: httpx.Request) -> str:
+    """The exact filename S3 sees for one multipart upload's `file` field —
+    parsed straight out of the raw multipart body's own `Content-Disposition`
+    header, the same bytes S3 itself would read, rather than reconstructing
+    what `_upload` was *supposed* to send. Used by the issue #122 tests below
+    to assert the WHOLE filename, not just a fragment of it."""
+    match = re.search(rb'name="file"; filename="([^"]+)"', request.content)
+    assert match is not None, f"no file field in multipart body: {request.content!r}"
+    return match.group(1).decode()
+
+
 def _find_upload(calls: list[httpx.Request], *, name_contains: str) -> httpx.Request:
     """The one raw S3 upload whose multipart filename contains
     `name_contains` — `_placement_variant` names every rendered file
-    `f"{placement}-{uuid}.{ext}"`, so the placement name in the multipart
-    body is enough to tell the source upload and each placement's upload
-    apart without threading anything extra through the fakes."""
+    `asset_filename(campaign_name=..., part=placement, ...)`, i.e.
+    `<campaign>-<slugified-placement>.<ext>` (issue #122), so the SLUGIFIED
+    placement name (hyphens, not the underscored `PLACEMENTS` value) in the
+    multipart body is enough to tell the source upload and each placement's
+    upload apart without threading anything extra through the fakes."""
     for call in calls:
         if name_contains.encode() in call.content:
             return call
@@ -752,13 +773,14 @@ def test_a_source_already_matching_a_placements_ratio_is_not_re_encoded(_s3_uplo
     resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
     assert resp.status_code == 201
 
-    feed_call = _find_upload(_s3_upload_ok, name_contains="feed_1x1")
+    feed_call = _find_upload(_s3_upload_ok, name_contains="feed-1x1")
     assert _SQUARE_SOURCE in feed_call.content
 
     # The other two placements DO need a crop — their upload must NOT carry
     # the untouched source bytes (a no-op there would mean the crop never
-    # actually ran).
-    for placement in ("portrait_4x5", "story_9x16"):
+    # actually ran). Slugified form (hyphens), matching what `asset_filename`
+    # actually emits — see `_find_upload`'s docstring.
+    for placement in ("portrait-4x5", "story-9x16"):
         cropped_call = _find_upload(_s3_upload_ok, name_contains=placement)
         assert _SQUARE_SOURCE not in cropped_call.content
 
@@ -779,7 +801,9 @@ def test_a_failed_placement_upload_does_not_lose_the_source_or_fail_the_request(
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if b"portrait_4x5" in request.content:
+        # Slugified form (hyphens) — the multipart filename is now
+        # `asset_filename(...)`'s output, not the raw `PLACEMENTS` value.
+        if b"portrait-4x5" in request.content:
             return httpx.Response(403, text="access denied")
         return httpx.Response(204)
 
@@ -875,3 +899,82 @@ def test_a_network_failure_writing_a_placement_row_does_not_fail_the_request(
     assert "story_9x16" not in placements
     for other in ("feed_1x1", "portrait_4x5"):
         assert other in placements, f"{other} should still have been stored"
+
+
+# ── issue #122: the upload filename must be meaningful, not a bare uuid ─────
+#
+# Core signs whatever filename the plugin sends into `Content-Disposition:
+# attachment` on every presigned GET (`plugin_storage.presign_download`), and
+# `<a download>` is ignored cross-origin — a presigned storage URL always is
+# — so this filename, not the client's `download` attribute, is what an
+# operator's browser actually saves the file as. These tests read the exact
+# filename S3 received (`_uploaded_filename`) rather than a substring, so
+# they fail against the pre-fix code for the reason the issue names: the old
+# filename was `f"{uuid.uuid4()}.png"` for the source and
+# `f"{placement}-{uuid.uuid4()}.{ext}"` for a placement — neither equals the
+# `<campaign>-<part>.<ext>` convention asserted below, uuid or no uuid.
+
+
+def test_the_source_upload_is_named_campaign_and_source_not_a_uuid(_s3_upload_ok) -> None:
+    """The ONE approved creative (`is_source=True`) must upload as
+    `<campaign-slug>-source.<ext>` — `image_provider.asset_filename`'s
+    convention, mirroring `web-admin/src/lib/assetFilename.ts`'s own
+    `<campaign>-<placement|source>.<ext>` (issue #122)."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient(name="Spring Launch")
+    client = TestClient(
+        _app(provider=provider, core_client=_FakeCoreClient(), campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+    assert resp.status_code == 201
+
+    source_call = next(
+        call for call in _s3_upload_ok if _uploaded_filename(call).endswith("-source.png")
+    )
+    assert _uploaded_filename(source_call) == "spring-launch-source.png"
+
+
+def test_placement_uploads_are_named_campaign_and_placement_not_a_uuid(_s3_upload_ok) -> None:
+    """Every rendered placement (issue #36) must upload as
+    `<campaign-slug>-<placement-slug>.<ext>` too, not
+    `f"{placement}-{uuid4()}.{ext}"` — a placement name alone is not enough
+    for an operator with several campaigns using the same placement set."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient(name="Spring Launch")
+    client = TestClient(
+        _app(provider=provider, core_client=_FakeCoreClient(), campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+    assert resp.status_code == 201
+
+    uploaded_names = {_uploaded_filename(call) for call in _s3_upload_ok}
+    assert uploaded_names == {
+        "spring-launch-source.png",
+        "spring-launch-feed-1x1.png",
+        "spring-launch-portrait-4x5.png",
+        "spring-launch-story-9x16.png",
+    }
+
+
+def test_an_unnamed_campaign_falls_back_to_a_readable_default_not_a_blank_prefix(
+    _s3_upload_ok,
+) -> None:
+    """A campaign with no readable name must not produce a filename starting
+    with a stray hyphen (`-source.png`) or block generation — `asset_filename`
+    falls back to the literal word `"campaign"`, matching
+    `assetFilename.ts`'s own `slugify(campaignName) || 'campaign'` fallback."""
+    provider = _FakeImageProvider(content=_SQUARE_SOURCE)
+    campaign = _FakeCampaignClient(name="")
+    client = TestClient(
+        _app(provider=provider, core_client=_FakeCoreClient(), campaign_client=campaign)
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+    assert resp.status_code == 201
+
+    source_call = next(
+        call for call in _s3_upload_ok if _uploaded_filename(call).endswith("-source.png")
+    )
+    assert _uploaded_filename(source_call) == "campaign-source.png"
