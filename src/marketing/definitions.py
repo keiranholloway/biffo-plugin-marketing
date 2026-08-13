@@ -12,7 +12,9 @@ converted at every boundary for no gain.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import inspect
+import sys
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -789,6 +791,31 @@ POSITIONING_MAX_TURNS = 3
 CHANNEL_PLAN_MAX_TURNS = 3
 COPY_MAX_TURNS = 3
 
+#: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_SECONDS` — the
+#: wall clock a run definition inherits when it declares no `timeout_seconds`
+#: of its own. `agent_runtime` is not a dependency of this plugin (checked
+#: `pyproject.toml`), so this cannot be imported — it is a manually-copied
+#: belief about another repo's constant, not an authority on it. If the real
+#: value ever moves, only `agent_runtime/loop.py` or a live run can prove it;
+#: nothing in this repo can (issue #132).
+RUNTIME_DEFAULT_TIMEOUT_SECONDS = 120.0
+
+#: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING` — the
+#: most any definition's `timeout_seconds` can ask for. Same caveat as
+#: `RUNTIME_DEFAULT_TIMEOUT_SECONDS` above: copied, not imported, not provable
+#: from here.
+#:
+#: **A factual correction, issue #132.** #126 and an earlier version of this
+#: comment both said `AGENT_RUNTIME_MAX_SECONDS` "is set to 240 on tabsii
+#: dev". That is false — grep the instance's `infra/` and there is no such
+#: variable anywhere. 240 is `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING`, the
+#: runtime's **code default**, not anything the instance configured. The
+#: number was right; the provenance claimed for it was not, and a confident
+#: wrong claim about where a limit comes from is worse than none — the next
+#: reader who goes looking for that env var to raise it will conclude the
+#: infrastructure is broken instead of finding out it was never set.
+RUNTIME_TIMEOUT_CEILING_SECONDS = 240.0
+
 #: The wall clock every agent in this plugin may spend, in seconds
 #: (issues #126, #130).
 #:
@@ -806,10 +833,16 @@ COPY_MAX_TURNS = 3
 #: research keeps pushing the failure to whichever stage is next; positioning,
 #: channel plan and copy all consume the research artefact and grow with it.
 #:
-#: **240s is the runtime ceiling, not a guess.** `AGENT_RUNTIME_MAX_SECONDS` is
-#: 240 and `RunLimits.from_snapshot` clamps to it, so asking for more would be
+#: **240s is the runtime ceiling, not a guess** — this deliberately equals
+#: `RUNTIME_TIMEOUT_CEILING_SECONDS` above rather than leaving headroom below
+#: it: every stage already needs the full 240s (that is what #130 measured),
+#: so trading budget away to guard against a hypothetical future ceiling cut
+#: would reintroduce the exact failure #126/#130 exist to fix, for a risk this
+#: repo cannot even observe (see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s
+#: docstring, and issue #132's "what this cannot catch"). `from_snapshot`
+#: clamps silently to the real ceiling, so asking for more than it would be
 #: silently reduced and this constant would claim a budget no run ever gets.
-#: Raising it further is an instance change — the ceiling and the Lambda
+#: Raising it further is an instance change — the real ceiling and the Lambda
 #: timeout together — not a plugin one.
 #:
 #: **Cost is deliberately not the deciding factor.** A campaign built on failed
@@ -947,3 +980,84 @@ def copy_tool_schema() -> dict[str, Any]:
             "parameters": CopySet.model_json_schema(),
         },
     }
+
+
+# ── Definition-factory registry (issue #132 hole 1) ──────────────────────────
+#
+# ``tests/test_marketing_agent_run_limits.py`` used to enumerate the five
+# ``*_definition`` factories as a literal tuple. ``definitions.py`` had no
+# registry, so a sixth factory landing tomorrow would sit silently outside the
+# sweep, with the sweep still reporting green — the same "gate reports green
+# over a denominator it never printed" shape as biffo-template#1363, and the
+# same fix as this module's own ``RESEARCH_SEARCH_FRAMING``/
+# ``RESEARCH_AGENT_NAMES`` coverage assert far above (``definitions.py:694``),
+# which raises as a plain module-level expression rather than a function.
+#
+# **This is deliberately a function, not a module-level constant, and that is
+# not the same shape as the ``RESEARCH_SEARCH_FRAMING`` check.** A first draft
+# used a module-level tuple computed by inspecting ``vars(sys.modules[...])``
+# at the point it ran — which only sees names bound *before* that point in the
+# file executes. Placing that block right after ``copy_definition`` missed a
+# fail-first factory added below it, nearer the bottom of the file; moving the
+# block to the literal end of the file then missed a factory *appended after
+# it* — which is exactly where a contributor following the existing pattern of
+# "add the next stage's function near the others" would put one. There is no
+# placement of a module-level constant that is not order-dependent, because a
+# module-level statement can only see names already bound when it runs.
+#
+# A function sidesteps this rather than working around it: called from test
+# code, it runs strictly *after* this whole module has finished importing —
+# Python does not return control to an ``import`` statement until the entire
+# module body has executed — so ``vars(module)`` at call time is the complete,
+# final namespace regardless of where in this file the caller or any factory
+# physically sits.
+#
+# The membership rule — a public, module-level function whose name ends in
+# ``_definition`` — is deliberately precise, not merely convenient: grep this
+# file and nothing else matches that suffix, so this cannot accidentally
+# sweep in a helper. ``obj.__module__ == __name__`` additionally excludes
+# anything merely imported into this namespace.
+#
+# A naming convention alone can still drift silently the OTHER way — a
+# factory renamed to drop the suffix would vanish from the tuple with no
+# error, exactly the failure this exists to prevent — so the count is
+# asserted too. Bump ``_EXPECTED_DEFINITION_FACTORY_COUNT`` deliberately
+# whenever a factory is added, removed or renamed; that is a one-line, loud,
+# reviewable diff, not silent drift.
+_EXPECTED_DEFINITION_FACTORY_COUNT = 5
+
+
+def discover_definition_factories() -> tuple[Callable[..., dict[str, Any]], ...]:
+    """Every ``*_definition`` factory in this module, derived rather than
+    hand-listed. Call this — do not cache its result at import time — see
+    this section's comment for why a snapshot taken during import can miss a
+    factory that a purely order-dependent one silently would.
+
+    Raises ``RuntimeError`` if the derived count disagrees with
+    ``_EXPECTED_DEFINITION_FACTORY_COUNT``, so a factory added, removed or
+    renamed without updating that constant fails loudly rather than the
+    sweep quietly covering fewer (or differently-named) factories than it
+    did yesterday.
+    """
+    module = sys.modules[__name__]
+    factories = tuple(
+        sorted(
+            (
+                obj
+                for name, obj in vars(module).items()
+                if inspect.isfunction(obj)
+                and obj.__module__ == __name__
+                and name.endswith("_definition")
+            ),
+            key=lambda factory: factory.__name__,
+        )
+    )
+    if len(factories) != _EXPECTED_DEFINITION_FACTORY_COUNT:
+        raise RuntimeError(
+            "discover_definition_factories() drifted from the expected "
+            "count — a *_definition factory was added, removed or renamed "
+            "without updating _EXPECTED_DEFINITION_FACTORY_COUNT (found "
+            f"{[f.__name__ for f in factories]}, expected "
+            f"{_EXPECTED_DEFINITION_FACTORY_COUNT})"
+        )
+    return factories
