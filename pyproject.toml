@@ -44,6 +44,12 @@ dev = [
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.2",
   "pytest-cov>=6.0.0",
+  # Dev/test-only — used solely by
+  # tests/test_marketing_ci_coverage_sweep.py to parse .github/workflows/*.yml
+  # structurally (#115), rather than grepping raw workflow text, which would
+  # match a directory name sitting in a comment and prove nothing. Never
+  # imported by src/marketing, so it does not ship in the Lambda bundle.
+  "pyyaml>=6.0",
   "ruff>=0.8.0",
   "pyright>=1.1.0",
   "jsonschema>=4.23.0",
