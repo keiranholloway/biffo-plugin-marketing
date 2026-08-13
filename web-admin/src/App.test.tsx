@@ -230,3 +230,85 @@ describe('minting a tracked link from the campaign list', () => {
     expect(screen.getByLabelText('Channel')).toBeVisible()
   })
 })
+
+describe('deep linking to a campaign (#142)', () => {
+  const ID = '5380e9cf-457f-4932-a7ff-c1c6986524e5'
+
+  /** Campaigns fetch, with `/channels` routed separately — see the note on
+   *  'lists campaigns it receives' for why a blanket response is wrong. */
+  function stubFetch(campaigns: unknown[]) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        typeof url === 'string' && url.endsWith('/channels')
+          ? Promise.resolve({ ok: true, json: async () => [] })
+          : Promise.resolve({ ok: true, json: async () => campaigns }),
+      ),
+    )
+  }
+
+  /** Put the browser on a URL asking for `campaign`, as a shared link would. */
+  function locationAsking(campaign: string | null) {
+    const search = campaign === null ? '' : `?campaign=${campaign}`
+    window.history.replaceState(null, '', `/api/v1/plugins/marketing/admin${search}`)
+  }
+
+  afterEach(() => locationAsking(null))
+
+  it('opens the campaign a shared link names, without anyone clicking', async () => {
+    // The whole point: a colleague pastes the URL and lands on the campaign.
+    locationAsking(ID)
+    stubFetch([{ id: ID, name: 'Shared campaign', status: 'draft', destination_url: null }])
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Shared campaign' })).toBeInTheDocument()
+  })
+
+  it('says why when the link names a campaign this reader cannot see', async () => {
+    // Deleted, or another tenant's: it is simply absent from the tenant-scoped
+    // list. Rendering an empty studio would be the wrong answer.
+    locationAsking(ID)
+    stubFetch([{ id: 'another-id', name: 'Not the one', status: 'draft', destination_url: null }])
+
+    render(<App />)
+
+    expect(await screen.findByText(/could not be opened/i)).toBeInTheDocument()
+  })
+
+  it('ignores a junk id and shows the list rather than an error page', async () => {
+    window.history.replaceState(null, '', '/api/v1/plugins/marketing/admin?campaign=nonsense')
+    stubFetch([{ id: ID, name: 'Spring demo push', status: 'draft', destination_url: null }])
+
+    render(<App />)
+
+    expect(await screen.findByText('Spring demo push')).toBeInTheDocument()
+    expect(screen.queryByText(/could not be opened/i)).not.toBeInTheDocument()
+  })
+
+  it('puts the campaign in the address bar when one is opened', async () => {
+    stubFetch([{ id: ID, name: 'Spring demo push', status: 'draft', destination_url: null }])
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Open' }))
+
+    expect(window.location.search).toBe(`?campaign=${ID}`)
+  })
+
+  it('takes it back out when the campaign is closed', async () => {
+    // A stale `?campaign=` on the list view would make the address bar
+    // disagree with the screen.
+    stubFetch([{ id: ID, name: 'Spring demo push', status: 'draft', destination_url: null }])
+    render(<App />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Open' }))
+    // Asserted before closing so this cannot pass vacuously: without the
+    // feature the search string is empty at BOTH points, and a test that only
+    // checked the end state would report success against no implementation.
+    expect(window.location.search).toBe(`?campaign=${ID}`)
+
+    await userEvent.click(await screen.findByRole('button', { name: /Back to campaigns/i }))
+
+    expect(window.location.search).toBe('')
+  })
+})
