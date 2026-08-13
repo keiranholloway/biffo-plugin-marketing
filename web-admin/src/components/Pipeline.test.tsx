@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,6 +9,10 @@ import { Pipeline } from './Pipeline'
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  // A no-op when real timers are already active — belt-and-braces so a
+  // test that enables fake timers (the polling tests below) can never leak
+  // them into a later test if it fails before its own cleanup runs.
+  vi.useRealTimers()
 })
 
 function stubSession(jwt = 'test-jwt') {
@@ -177,5 +181,108 @@ describe('Pipeline', () => {
     const copy = await screen.findByTestId('stage-copy')
     expect(await within(copy).findByText(/approve the channel plan stage first/i)).toBeInTheDocument()
     expect(within(copy).queryByText(/positioning/i)).not.toBeInTheDocument()
+  })
+
+  // #144: a pending stage now updates itself instead of only responding to
+  // "Check for result" — these two exercise the real wiring in `Pipeline`
+  // (`usePendingPolling` itself is unit-tested in `usePendingPolling.test.ts`
+  // for the timing, backoff, unmount-cleanup and ceiling behaviour these two
+  // build on).
+  describe('auto-updating a pending stage', () => {
+    /** Every `/artefacts/research` GET after the first `answersAfterFirst`
+     * poll returns `laterResponse` — models a research run that is still
+     * `pending` on the page's initial load, then resolves (or fails) on a
+     * subsequent poll. */
+    function pollingFetchStub(laterResponse: { ok: true; body: unknown } | { ok: false; status: number; body: unknown }) {
+      let calls = 0
+      return vi.fn((url: string, init?: RequestInit) => {
+        if (url.endsWith('/artefacts/research') && (!init || init.method === undefined)) {
+          calls += 1
+          if (calls === 1) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({
+                id: 'a-research',
+                campaign_id: CAMPAIGN,
+                kind: 'research',
+                status: 'pending',
+                body: null,
+                citations: null,
+                causation_id: null,
+                agent_run_id: null,
+              }),
+            })
+          }
+          return Promise.resolve(
+            laterResponse.ok
+              ? { ok: true, json: async () => laterResponse.body }
+              : { ok: false, status: laterResponse.status, json: async () => laterResponse.body },
+          )
+        }
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+      })
+    }
+
+    it('picks up a finished run on its own, with no click on "Check for result"', async () => {
+      stubSession()
+      const fetchMock = pollingFetchStub({
+        ok: true,
+        body: {
+          id: 'a-research',
+          campaign_id: CAMPAIGN,
+          kind: 'research',
+          status: 'proposed',
+          body: JSON.stringify({ summary: 'The market wants faster onboarding.', findings: [] }),
+          citations: null,
+          causation_id: null,
+          agent_run_id: null,
+        },
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+
+      const research = await screen.findByTestId('stage-research')
+      expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+
+      vi.useFakeTimers()
+      // The fast-window cadence is 2s — nobody clicked anything.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+
+      // Not `findByText` — that falls back to a real `setTimeout`-driven
+      // `waitFor`, which never wakes once fake timers are active. `act`'s
+      // `await` above already flushed the resolved fetch and its resulting
+      // re-render, so a synchronous query is both correct and sufficient.
+      expect(within(research).getByText('The market wants faster onboarding.')).toBeInTheDocument()
+      expect(within(research).queryByRole('button', { name: /check for result/i })).not.toBeInTheDocument()
+    })
+
+    it('surfaces a failed run\'s own reason instead of returning the stage to startable', async () => {
+      stubSession()
+      const fetchMock = pollingFetchStub({
+        ok: false,
+        status: 502,
+        body: { detail: 'The research-synthesis run did not complete successfully.' },
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+
+      const research = await screen.findByTestId('stage-research')
+      expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+
+      vi.useFakeTimers()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+
+      expect(within(research).getByText(/did not complete successfully/i)).toBeInTheDocument()
+      // Still pending, not silently reset to a startable stage — the manual
+      // escape hatch is exactly what is still offered.
+      expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+      expect(within(research).queryByRole('button', { name: /^start research/i })).not.toBeInTheDocument()
+    })
   })
 })

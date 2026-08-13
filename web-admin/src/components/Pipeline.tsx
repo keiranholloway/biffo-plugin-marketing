@@ -17,6 +17,7 @@ import {
   type ResearchSynthesisBody,
 } from '../lib/api'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
+import { POLL_CEILING_MS, usePendingPolling } from '../lib/usePendingPolling'
 import { ChannelPlanArtefact, CopyArtefact, PositioningArtefact, ResearchArtefact } from './ArtefactBody'
 import { PipelineStage } from './PipelineStage'
 
@@ -190,6 +191,35 @@ export function Pipeline({
     positioning: state.positioning.artefact?.status === 'approved',
     channel_plan: state.channel_plan.artefact?.status === 'approved',
   }
+
+  // #144: a `pending` stage otherwise only ever updates when someone presses
+  // "Check for result" — a research/synthesis run is measured at 2-4 minutes
+  // and everything after at 30-90s, so that is minutes of clicking a button.
+  // `load(kind)` (not `runMutation`) is deliberate: it is the same read this
+  // component already does on mount and via the manual button, so a poll
+  // that lands on a real failure (`getArtefact` throwing on a non-404,
+  // non-ok response — `/artefacts/{kind}`'s 502 with a real sentence, per
+  // #144) surfaces through the exact `error` plumbing the button already
+  // has, without a second failure path to keep in step with it. Excluding a
+  // stage whose manual refresh is already in flight (`s.busy`) avoids two
+  // requests racing for the same stage.
+  usePendingPolling(
+    STAGES.map((stage) => {
+      const s = state[stage.kind]
+      return { kind: stage.kind, pending: s.artefact?.status === 'pending' && !s.busy }
+    }),
+    (kind) => {
+      load(kind)
+    },
+    (kind) => {
+      patch(kind, {
+        error:
+          `Still pending after ${Math.round(POLL_CEILING_MS / 60_000)} minutes — longer than the ` +
+          "agent's own timeout, so this run will not complete on its own. Press \"Check for result\" " +
+          'to confirm, or check CloudWatch for what happened.',
+      })
+    },
+  )
 
   return (
     <div className="pipeline">
