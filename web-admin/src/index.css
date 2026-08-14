@@ -514,6 +514,46 @@ details.mint-toggle[open] > .mint {
   margin-top: 1rem;
 }
 
+/* ── Motion and target channels (#67) ─────────────────────────────────────
+ *
+ * A radio group and a grouped checkbox list. Both need the same override the
+ * mint panel's own checkbox already needs: the global `input` rule sets
+ * `width: 100%` and a bottom margin, which is right for a text field and
+ * wrong for a control that sits inline with its label. Grouped by category
+ * because the taxonomy is deliberately broad (digital AND offline/field), so
+ * an ungrouped list of 30+ boxes is a wall rather than a choice.
+ */
+
+.targeting fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 1rem 0.25rem;
+  margin: 0 0 1rem;
+}
+
+.targeting legend {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: 0 0.35rem;
+}
+
+.targeting label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 400;
+  margin: 0 1.25rem 0.6rem 0;
+}
+
+.targeting input[type='radio'],
+.targeting input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
 /* ── The pipeline (a sequence, not a stack) ───────────────────────────────
  *
  * Numbered, connected stage cards — a CSS counter and a connector line, no

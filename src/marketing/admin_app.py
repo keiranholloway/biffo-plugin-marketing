@@ -632,10 +632,20 @@ async def _advance_artefact(
         # increment 2). See `pipeline.extract_channel_plan` for why it must
         # be what the run was shown, not a fresh fetch.
         taxonomy = pending.get("channel_taxonomy") or {}
+        # `allowed_motions` is the campaign's motion as it stood when this run
+        # started (#67), carried the same way and for the same reason.
+        # Absent — a run started before #67 shipped — reads as `None`, i.e.
+        # "this run was never motion-constrained", which skips the check
+        # rather than failing an in-flight artefact for a rule it was never
+        # shown. Exactly the distinction `allowed_source_urls` draws above;
+        # `or None` rather than `or []` because an empty list would read as
+        # "no motion is allowed" and reject everything.
+        allowed_motions = pending.get("allowed_motions") or None
         result = await pipeline.advance_channel_plan(
             gateway,
             run_id=_require_run_id(),
             taxonomy=taxonomy,
+            allowed_motions=allowed_motions,
             allowed_source_urls=allowed_source_urls,
         )
     elif kind == "copy":

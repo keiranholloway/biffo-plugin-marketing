@@ -49,7 +49,19 @@ class _FakeCore:
     ]
 
     def __init__(self, *, brief: str | None = "Reach multi-location operators.") -> None:
-        self.campaign = {"id": _CAMPAIGN, "brief": brief}
+        # `motion` and `target_channel_keys` (#67) are the operator's two
+        # pre-plan decisions, and `start_channel_plan_route` refuses without
+        # them. Defaulted here to "both, everything seeded" — the widest
+        # possible targeting — so every test in this module keeps exercising
+        # the behaviour it was written for rather than the new gate. The gate
+        # itself, and what narrower targeting does to the run's input, is
+        # `tests/test_marketing_campaign_targeting.py`.
+        self.campaign = {
+            "id": _CAMPAIGN,
+            "brief": brief,
+            "motion": "both",
+            "target_channel_keys": ",".join(c["key"] for c in self.DEFAULT_CHANNELS),
+        }
         self.artefacts: dict[str, dict[str, Any]] = {}
         self.channels: list[dict[str, Any]] = [dict(c) for c in self.DEFAULT_CHANNELS]
         self._next_id = 0

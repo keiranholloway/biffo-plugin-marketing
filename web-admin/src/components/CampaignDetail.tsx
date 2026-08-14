@@ -1,7 +1,9 @@
 import { useState } from 'react'
 
 import { updateCampaign, type Campaign } from '../lib/api'
+import { hasTargeting } from '../lib/campaignTargeting'
 import { useChannelTaxonomy } from '../lib/useChannelTaxonomy'
+import { CampaignTargeting } from './CampaignTargeting'
 import { DistributionPack } from './DistributionPack'
 import { ImageGenerator } from './ImageGenerator'
 import { PaidPack } from './PaidPack'
@@ -77,8 +79,22 @@ export function CampaignDetail({
         </form>
       </section>
 
+      {/* Before the pipeline, deliberately: motion and target channels are
+          decisions the channel-plan stage reads, so they belong upstream of
+          it on the page as well as in the flow (#67). */}
+      <CampaignTargeting
+        campaign={campaign}
+        channelLookup={channelLookup}
+        onCampaignUpdated={onCampaignUpdated}
+      />
+
       <h3>Pipeline</h3>
-      <Pipeline campaignId={campaign.id} hasBrief={hasBrief} channelLookup={channelLookup} />
+      <Pipeline
+        campaignId={campaign.id}
+        hasBrief={hasBrief}
+        hasTargets={hasTargeting(campaign)}
+        channelLookup={channelLookup}
+      />
 
       <h3>Images</h3>
       <ImageGenerator campaignId={campaign.id} />
