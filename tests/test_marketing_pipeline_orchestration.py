@@ -701,7 +701,7 @@ async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body
     taxonomy = [{"channel_key": "instagram_organic", "label": "Instagram", "motion": "organic"}]
 
     causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body=positioning_body, taxonomy=taxonomy
+        gateway, positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
     )
 
     assert len(gateway.requested) == 1
@@ -711,6 +711,10 @@ async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body
     assert requested.input_payload == {
         "positioning": positioning_body,
         "channel_taxonomy": taxonomy,
+        # #67: told the campaign's motion as well as shown a taxonomy already
+        # narrowed to it — see `start_channel_plan` for why the telling is an
+        # efficiency and the narrowing is the enforcement.
+        "campaign_motion": "both",
     }
     assert run_id  # a real id was returned
 
@@ -719,7 +723,7 @@ async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body
 async def test_advance_channel_plan_returns_none_while_running() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body={}, taxonomy=[]
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
 
     result = await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
@@ -731,7 +735,7 @@ async def test_advance_channel_plan_returns_none_while_running() -> None:
 async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body={}, taxonomy=[]
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(
         run_id,
@@ -772,7 +776,7 @@ async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
 async def test_advance_channel_plan_raises_when_the_run_failed() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body={}, taxonomy=[]
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, status="failed")
 
@@ -787,7 +791,7 @@ async def test_advance_channel_plan_propagates_null_annotations_into_the_error()
     retrieval — proven through `advance_channel_plan`."""
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body={}, taxonomy=[]
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(
         run_id,

@@ -31,6 +31,10 @@ import { createRequest } from './api-core'
  * and choose again" — a stale id cannot be retried into success. */
 export class StaleArtefactError extends Error {}
 
+/** How a campaign reaches people (#67). Wider than a channel's own motion:
+ * a channel is organic OR paid, a campaign may run `both`. */
+export type CampaignMotion = 'organic' | 'paid' | 'both'
+
 export interface Campaign {
   id: string
   name: string
@@ -38,6 +42,15 @@ export interface Campaign {
   destination_url: string | null
   brief?: string | null
   guidance?: string | null
+  /** #67. `null`/absent on every campaign created before targeting existed —
+   * the channel-plan stage refuses to start until it is set, rather than
+   * defaulting to `both` and deciding for the operator. */
+  motion?: CampaignMotion | null
+  /** Comma-separated `marketing_channel.key` values — the channels this
+   * campaign may plan against (#67). Stored as one string on the campaign,
+   * the same shape `media_kinds` uses; parse with
+   * `lib/campaignTargeting`'s `targetChannelKeys`. */
+  target_channel_keys?: string | null
 }
 
 const BASE = '/api/v1/plugins/marketing'
@@ -343,7 +356,12 @@ async function throwForResponse(response: Response, context: string): Promise<ne
  * pipeline's first stage can never start. */
 export async function updateCampaign(
   campaignId: string,
-  patch: Partial<Pick<Campaign, 'name' | 'destination_url' | 'brief' | 'guidance'>>,
+  patch: Partial<
+    Pick<
+      Campaign,
+      'name' | 'destination_url' | 'brief' | 'guidance' | 'motion' | 'target_channel_keys'
+    >
+  >,
 ): Promise<Campaign> {
   return request<Campaign>('PATCH', `/campaigns/${campaignId}`, patch, BASE, 'update the campaign')
 }

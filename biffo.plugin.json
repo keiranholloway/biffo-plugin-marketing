@@ -40,6 +40,18 @@
           "description": "Comma-separated: copy,image,video,audio. Which media the operator asked for \u2014 drives which agents run, how long it takes and what it costs."
         },
         {
+          "name": "motion",
+          "type": "String(16)",
+          "nullable": true,
+          "description": "organic | paid | both (#67). The operator's campaign-level position on how this campaign reaches people, set alongside the brief and editable the same way. On the CAMPAIGN rather than per run, because copy, the distribution pack and the paid pack all need one consistent answer downstream and a per-run choice would leave the campaign with no recorded position for them to read. It is a HARD constraint, not a preference: `start_channel_plan_route` filters the taxonomy the agent is shown down to this motion's channels, and `pipeline.extract_channel_plan` re-checks the returned plan against it \u2014 a constraint the model is merely asked to respect is not a constraint (#128). Nullable because every campaign that existed before #67 has none; the channel-plan stage refuses to start until it is set, rather than defaulting to `both` and silently deciding for the operator. Plain String \u2014 plugin tables have no enum type, and the service layer validates against `definitions.CAMPAIGN_MOTIONS`."
+        },
+        {
+          "name": "target_channel_keys",
+          "type": "Text",
+          "nullable": true,
+          "description": "Comma-separated `marketing_channel.key` values \u2014 the channels the operator selected for this campaign before the plan runs (#67). Same comma-separated shape as `media_kinds` above, which is this plugin's existing pattern for per-campaign multi-value state, and `Text` rather than `String(255)` because the seeded taxonomy alone is 30+ keys of up to 64 characters and is designed to grow. Deliberately NOT a join table: plugin tables declare no foreign keys (see the manifest tests), so a join table would buy no referential integrity, only a second table, a second set of CRUD routes and a multi-row write that generic CRUD cannot make atomic \u2014 while this selection is only ever read and written wholesale, with the campaign. Keys that are no longer in the taxonomy are simply skipped when the plan starts; the selection is a filter over the taxonomy, never a source of channels in its own right."
+        },
+        {
           "name": "starts_at",
           "type": "DateTime",
           "nullable": true

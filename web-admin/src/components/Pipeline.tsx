@@ -71,7 +71,18 @@ interface StageConfig {
    * which is the one place that actually knows how to draw a checkbox next
    * to each of ITS shape's elements. */
   renderBody: (artefact: Artefact, channelLookup: ChannelLookup, selection: ElementSelection) => ReactNode
-  gate: (approved: Approved, hasBrief: boolean) => Gate
+  gate: (approved: Approved, ready: Readiness) => Gate
+}
+
+/** The campaign-level facts a gate reads that are not another stage's
+ * approval — both of them decisions the operator has to have taken before
+ * the stage's own route will accept a start. */
+interface Readiness {
+  hasBrief: boolean
+  /** #67: the campaign has a motion AND at least one target channel.
+   * `start_channel_plan_route` 422s without them, so offering the button
+   * would only ever produce that error. */
+  hasTargets: boolean
 }
 
 /** Everything that varies per stage, in one place — a fifth stage is one new
@@ -90,8 +101,11 @@ const STAGES: StageConfig[] = [
         <p className="empty">No content to show.</p>
       )
     },
-    gate: (_approved, hasBrief) =>
-      reason(hasBrief, 'This campaign has no brief yet — add one above before starting research.'),
+    gate: (_approved, ready) =>
+      reason(
+        ready.hasBrief,
+        'This campaign has no brief yet — add one above before starting research.',
+      ),
   },
   {
     kind: 'positioning',
@@ -119,7 +133,17 @@ const STAGES: StageConfig[] = [
         <p className="empty">No content to show.</p>
       )
     },
-    gate: (approved) => reason(approved.positioning, 'Approve the positioning stage first.'),
+    gate: (approved, ready) => {
+      // Targeting is named FIRST when both are outstanding: it is the one
+      // the operator can act on right now, without waiting for a run.
+      if (!ready.hasTargets) {
+        return reason(
+          false,
+          'Choose this campaign\u2019s motion and target channels above before planning.',
+        )
+      }
+      return reason(approved.positioning, 'Approve the positioning stage first.')
+    },
   },
   {
     kind: 'copy',
@@ -173,10 +197,12 @@ function initialState(): Record<ArtefactKind, StageState> {
 export function Pipeline({
   campaignId,
   hasBrief,
+  hasTargets,
   channelLookup,
 }: {
   campaignId: string
   hasBrief: boolean
+  hasTargets: boolean
   channelLookup: ChannelLookup
 }) {
   const [state, setState] = useState<Record<ArtefactKind, StageState>>(initialState)
@@ -319,7 +345,7 @@ export function Pipeline({
     <div className="pipeline">
       {STAGES.map((stage) => {
         const s = state[stage.kind]
-        const gate = stage.gate(approved, hasBrief)
+        const gate = stage.gate(approved, { hasBrief, hasTargets })
         // Every operator-selectable element in this stage's CURRENT
         // artefact (issue #145) — `[]` while there is nothing proposed yet,
         // computed fresh every render rather than cached in state, since it

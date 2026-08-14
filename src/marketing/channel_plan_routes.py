@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from . import admin_app, pipeline
+from . import admin_app, definitions, pipeline
 
 router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 
@@ -36,6 +36,53 @@ router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 _INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 
 
+async def _targeting(campaign_id: str, token: str) -> tuple[str, list[str]]:
+    """This campaign's motion and selected channel keys (#67), or a 4xx
+    naming the decision that has not been taken yet.
+
+    Both are operator decisions the channel-plan stage cannot make for
+    itself, and both are refused rather than defaulted. A default motion of
+    `both` and a default selection of "the whole taxonomy" would each be a
+    silent decision taken on the operator's behalf, which is exactly the
+    state #67 exists to end — the agent choosing the channel set with the
+    operator's first involvement being approve-or-reject on a finished plan.
+    So a campaign that predates this feature stops here with a sentence
+    saying what to set, rather than quietly running as it used to.
+    """
+    campaign = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", token)
+    if campaign.status_code == status.HTTP_404_NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
+    campaign.raise_for_status()
+    row = campaign.json() or {}
+
+    motion = (row.get("motion") or "").strip()
+    if motion not in definitions.CAMPAIGN_MOTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "This campaign has no motion set. Choose organic, paid or both before "
+                "planning channels."
+            ),
+        )
+
+    # Order preserved, duplicates dropped — the operator's selection is a set,
+    # but a stable order keeps the taxonomy the agent is shown (and every
+    # test asserting on it) deterministic.
+    selected = list(
+        dict.fromkeys(key.strip() for key in (row.get("target_channel_keys") or "").split(","))
+    )
+    selected = [key for key in selected if key]
+    if not selected:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "This campaign has no target channels selected. Choose the channels it "
+                "should run on before planning."
+            ),
+        )
+    return motion, selected
+
+
 @router.post("/campaigns/{campaign_id}/channel-plan", status_code=status.HTTP_201_CREATED)
 async def start_channel_plan_route(
     campaign_id: str,
@@ -47,6 +94,11 @@ async def start_channel_plan_route(
     exactly: `proposed` positioning must not be usable here, or the approval
     step for positioning is decorative."""
     campaign_id = admin_app._validated_campaign_id(campaign_id)
+
+    # The operator's two pre-plan decisions (#67), read BEFORE the approval
+    # gate work below so a campaign missing either is told which decision is
+    # missing rather than having an agent run started for it.
+    campaign_motion, selected_keys = await _targeting(campaign_id, admin.token)
 
     positioning = await admin_app._latest_artefact(campaign_id, "positioning", admin.token)
     if positioning is None:
@@ -97,12 +149,46 @@ async def start_channel_plan_route(
     channels_resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin.token)
     channels_resp.raise_for_status()
     channel_rows = channels_resp.json() or []
+
+    # The operator's two decisions, applied to the agent's INPUT (#67).
+    #
+    # This is what makes them constraints rather than requests. A channel the
+    # operator did not select, or whose motion this campaign does not run, is
+    # simply not in the list the agent is given — and `extract_channel_plan`
+    # rejects any `channel_key` outside exactly this snapshot (#76 increment
+    # 2), so there is no path by which one reaches the plan. Nothing here
+    # relies on the model choosing to comply; #128 is this estate's evidence
+    # that a constraint the model is merely asked to respect is not one.
+    #
+    # A selected key that is no longer in the taxonomy is skipped rather than
+    # rejected: the selection is a filter over the taxonomy, never a source of
+    # channels of its own, and an admin deleting a channel must not brick
+    # every campaign that had selected it.
+    allowed_motions = definitions.motions_allowed_by(campaign_motion)
+    selected = set(selected_keys)
+    channel_rows = [
+        row for row in channel_rows if row["key"] in selected and row["motion"] in allowed_motions
+    ]
+    if not channel_rows:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"None of this campaign's selected channels are {campaign_motion} channels "
+                "this platform still offers. Adjust its motion or its channel selection "
+                "before planning."
+            ),
+        )
+
     # What the agent is shown, and what it is later validated against
     # (#76 increment 2) — the SAME set, stored on the pending artefact below
     # rather than re-fetched at advance time, so a channel added to the
     # taxonomy between start and advance cannot retroactively legalise (or a
     # deleted one retroactively invalidate) a key this run was actually
-    # shown. See `pipeline.start_channel_plan`'s own docstring.
+    # shown. See `pipeline.start_channel_plan`'s own docstring. Since #67 the
+    # campaign's motion is stashed the same way and for the same reason: an
+    # operator widening a campaign from organic to both while a run is in
+    # flight must not retroactively legalise a paid channel that run was
+    # never allowed to pick.
     taxonomy = [
         {
             "channel_key": row["key"],
@@ -115,7 +201,10 @@ async def start_channel_plan_route(
     taxonomy_motions = {row["key"]: row["motion"] for row in channel_rows}
 
     causation_id, run_id = await pipeline.start_channel_plan(
-        gateway, positioning_body=positioning_body, taxonomy=taxonomy
+        gateway,
+        positioning_body=positioning_body,
+        taxonomy=taxonomy,
+        campaign_motion=campaign_motion,
     )
 
     created = await admin_app._core(
@@ -135,6 +224,7 @@ async def start_channel_plan_route(
                 pipeline.with_element_ids(
                     {
                         "channel_taxonomy": taxonomy_motions,
+                        "allowed_motions": sorted(allowed_motions),
                         "allowed_source_urls": allowed_source_urls,
                     }
                 )

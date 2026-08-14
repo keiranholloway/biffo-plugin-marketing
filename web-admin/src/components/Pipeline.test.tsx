@@ -63,7 +63,7 @@ describe('Pipeline', () => {
     stubSession()
     vi.stubGlobal('fetch', fetchStub())
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
     expect(await screen.findByRole('button', { name: /start research/i })).toBeEnabled()
 
@@ -78,11 +78,53 @@ describe('Pipeline', () => {
     stubSession()
     vi.stubGlobal('fetch', fetchStub())
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={false} channelLookup={EMPTY_LOOKUP} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={false} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
     const research = await screen.findByTestId('stage-research')
     expect(within(research).getByRole('button', { name: /start research/i })).toBeDisabled()
     expect(within(research).getByText(/no brief yet/i)).toBeInTheDocument()
+  })
+
+  it('blocks the channel plan until the campaign has a motion and target channels (#67)', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      fetchStub({
+        research: { status: 'approved', body: JSON.stringify({ summary: 's', findings: [] }) },
+        positioning: {
+          status: 'approved',
+          body: JSON.stringify({ segments: [], pillars: [], ctas: [] }),
+        },
+      }),
+    )
+
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={false} channelLookup={EMPTY_LOOKUP} />)
+
+    const plan = await screen.findByTestId('stage-channel_plan')
+    // Approved positioning is no longer enough on its own — the operator's
+    // own two decisions come first, and `start_channel_plan_route` 422s
+    // without them, so the button must not offer to make that call.
+    expect(within(plan).getByRole('button', { name: /start channel plan/i })).toBeDisabled()
+    expect(within(plan).getByText(/motion and target channels/i)).toBeInTheDocument()
+  })
+
+  it('unlocks the channel plan once positioning is approved and targeting is set', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      fetchStub({
+        research: { status: 'approved', body: JSON.stringify({ summary: 's', findings: [] }) },
+        positioning: {
+          status: 'approved',
+          body: JSON.stringify({ segments: [], pillars: [], ctas: [] }),
+        },
+      }),
+    )
+
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
+
+    const plan = await screen.findByTestId('stage-channel_plan')
+    expect(within(plan).getByRole('button', { name: /start channel plan/i })).toBeEnabled()
   })
 
   it('unlocks positioning once research is approved, and renders its findings', async () => {
@@ -106,7 +148,7 @@ describe('Pipeline', () => {
       }),
     )
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
     expect(await screen.findByText('The market wants faster onboarding.')).toBeInTheDocument()
 
@@ -152,7 +194,7 @@ describe('Pipeline', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const user = userEvent.setup()
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
     const research = await screen.findByTestId('stage-research')
     await user.click(within(research).getByRole('button', { name: /^approve$/i }))
@@ -176,7 +218,7 @@ describe('Pipeline', () => {
       }),
     )
 
-    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+    render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
     const copy = await screen.findByTestId('stage-copy')
     expect(await within(copy).findByText(/approve the channel plan stage first/i)).toBeInTheDocument()
@@ -240,7 +282,7 @@ describe('Pipeline', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
       const research = await screen.findByTestId('stage-research')
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
@@ -268,7 +310,7 @@ describe('Pipeline', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
       const research = await screen.findByTestId('stage-research')
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
@@ -331,7 +373,7 @@ describe('Pipeline', () => {
       })
       vi.stubGlobal('fetch', fetchMock)
 
-      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} channelLookup={EMPTY_LOOKUP} />)
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
       // Let mount's fetches settle under fake timers.
       await act(async () => {

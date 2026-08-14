@@ -180,6 +180,27 @@ class UnknownChannelError(PipelineError):
     """
 
 
+class MotionNotAllowedError(PipelineError):
+    """A channel-plan run returned a recommendation whose motion is outside
+    the campaign's own motion (#67) — an organic campaign being handed a paid
+    channel, or the reverse.
+
+    Distinct from :class:`UnknownChannelError` because the two say different
+    things to an operator: that one means the agent invented a key, this one
+    means it ignored a decision the operator had already taken. Fatal to the
+    whole plan for the same reason that one is: this pipeline's artefacts are
+    all-or-nothing, and dropping the offending entry silently would leave an
+    approved plan that is missing something nobody can see was ever there.
+
+    Structurally, this fires only for a ``suggested_label`` proposal — the one
+    place the agent still asserts a motion of its own — plus a defence-in-depth
+    check on the taxonomy snapshot itself. A ``channel_key`` cannot reach here
+    with the wrong motion: the taxonomy the run was shown was already narrowed
+    to the campaign's motion before it started, and every key is checked against
+    that snapshot (:class:`UnknownChannelError`).
+    """
+
+
 class StaleChannelPlanError(PipelineError):
     """A copy run was started against an approved channel plan that predates
     the taxonomy migration (#76 increment 2) — every one of its entries is
@@ -581,6 +602,7 @@ def extract_channel_plan(
     messages: list[dict[str, Any]],
     *,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    allowed_motions: Collection[str] | None = None,
     allowed_source_urls: Collection[str] | None = None,
     annotations: list[dict[str, Any]] | None = None,
 ) -> ChannelPlan:
@@ -606,6 +628,27 @@ def extract_channel_plan(
     mangling a key) and has its ``motion`` **overwritten** from the taxonomy:
     the agent stops asserting motion independently for a real channel, full
     stop, regardless of what it put in the field.
+
+    ``allowed_motions`` is the campaign's own motion widened to channel
+    motions (#67) — ``{"organic"}``, ``{"paid"}`` or both, from
+    :func:`~marketing.definitions.motions_allowed_by`, stashed on the pending
+    artefact at start time for exactly the reason ``taxonomy`` is. Anything
+    outside it raises :class:`MotionNotAllowedError`. Two things are checked,
+    for two different reasons:
+
+    - a ``suggested_label`` proposal's own asserted motion — the ONE place
+      the model still decides a motion, and therefore the only place the
+      campaign's motion needs enforcing against the model at all;
+    - the motion the taxonomy snapshot gives a ``channel_key`` — defence in
+      depth against a caller that filtered its taxonomy wrongly, not against
+      the model.
+
+    ``None`` means "this run was not constrained", which is what every run
+    started before #67 shipped actually was. It is deliberately not treated as
+    "allow nothing" or defaulted to a motion: retro-fitting a rule onto a run
+    that was never shown it would reject artefacts for a constraint that did
+    not exist when they were produced — the same distinction
+    ``allowed_source_urls=None`` already carries for #22.
     """
     plan = _extract_cited_artefact(
         messages,
@@ -622,15 +665,31 @@ def extract_channel_plan(
         ),
         retry_hint="channel planning",
     )
+    permitted = None if allowed_motions is None else frozenset(allowed_motions)
     for recommendation in plan.channels:
         if recommendation.channel_key is None:
-            continue  # a suggested_label proposal — motion is the agent's own, required already
+            # A `suggested_label` proposal. `motion` is the agent's own — the
+            # model validator already requires it — so this is where the
+            # campaign's motion has to be enforced against the model.
+            if permitted is not None and recommendation.motion not in permitted:
+                raise MotionNotAllowedError(
+                    f"The channel-plan run proposed {recommendation.suggested_label!r} as a "
+                    f"{recommendation.motion} channel, but this campaign runs "
+                    f"{'/'.join(sorted(permitted))} channels only."
+                )
+            continue
         if recommendation.channel_key not in taxonomy:
             raise UnknownChannelError(
                 f"The channel-plan run referenced channel_key {recommendation.channel_key!r}, "
                 "which was not in the taxonomy it was given."
             )
-        recommendation.motion = taxonomy[recommendation.channel_key]  # derived, not asserted
+        motion = taxonomy[recommendation.channel_key]
+        if permitted is not None and motion not in permitted:
+            raise MotionNotAllowedError(
+                f"The channel-plan run recommended {recommendation.channel_key!r}, a {motion} "
+                f"channel, but this campaign runs {'/'.join(sorted(permitted))} channels only."
+            )
+        recommendation.motion = motion  # derived, not asserted
     return plan
 
 
@@ -1366,21 +1425,34 @@ async def start_channel_plan(
     *,
     positioning_body: dict[str, Any],
     taxonomy: list[dict[str, Any]],
+    campaign_motion: str,
     channel_plan_model: str = DEFAULT_CHANNEL_PLAN_MODEL,
 ) -> tuple[str, str]:
     """Request the single channel-plan agent (M4), given the *approved*
-    positioning artefact's body AND the tenant's channel taxonomy as input.
+    positioning artefact's body AND the channels this campaign may plan
+    against as input.
 
     ``taxonomy`` (#76 increment 2) is a list of
     ``{channel_key, label, motion, category}`` dicts — the tenant's
     ``marketing_channel`` rows, fetched by the caller — so the agent can pick
     real, stable ids rather than inventing free text the copy stage and
-    ``marketing_link`` would then have to trust exactly (#75). The caller is
-    also responsible for keeping a ``{channel_key: motion}`` copy of this same
-    taxonomy to validate against later (:func:`extract_channel_plan`'s
-    ``taxonomy`` parameter) — passed here rather than re-derived, because it
-    must be exactly what THIS run was shown, not whatever the taxonomy has
-    grown to by the time the run completes.
+    ``marketing_link`` would then have to trust exactly (#75). Since #67 the
+    caller narrows those rows to the operator's own selection for this
+    campaign, intersected with the campaign's motion, BEFORE passing them
+    here: the selection and the motion are constraints on what the run may
+    produce, and the cheapest place to enforce a constraint on output is the
+    input, where the excluded options are simply not present to be chosen.
+    The caller is also responsible for keeping a ``{channel_key: motion}``
+    copy of this same narrowed taxonomy to validate against later
+    (:func:`extract_channel_plan`'s ``taxonomy`` parameter) — passed there
+    rather than re-derived, because it must be exactly what THIS run was
+    shown, not whatever the taxonomy or the selection has grown to by the
+    time the run completes.
+
+    ``campaign_motion`` is passed to the agent as well as applied to the
+    taxonomy, so it does not spend output on recommendations that would be
+    rejected. That is an efficiency, not the enforcement — see
+    :func:`extract_channel_plan` for where the motion is actually enforced.
 
     Mirrors :func:`start_positioning` otherwise, one stage further down the
     chain: a single-run chain, not fanned out, because nothing fans in on it.
@@ -1393,7 +1465,11 @@ async def start_channel_plan(
             instructions=CHANNEL_PLAN_INSTRUCTIONS,
         ),
         output_tool=channel_plan_tool_schema(),
-        input_payload={"positioning": positioning_body, "channel_taxonomy": taxonomy},
+        input_payload={
+            "positioning": positioning_body,
+            "channel_taxonomy": taxonomy,
+            "campaign_motion": campaign_motion,
+        },
         causation_id=causation_id,
     )
     return causation_id, run_id
@@ -1404,13 +1480,15 @@ async def advance_channel_plan(
     *,
     run_id: str,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    allowed_motions: Collection[str] | None = None,
     allowed_source_urls: Collection[str] | None = None,
 ) -> ChannelPlan | None:
     """Read the channel-plan run, advancing nothing else — mirrors
     :func:`advance_positioning`: a single run, not a chain, so there is no
     fan-in to discover. ``taxonomy`` is ``{channel_key: motion}`` for exactly
-    what :func:`start_channel_plan` gave this run — see
-    :func:`extract_channel_plan` for how it and ``allowed_source_urls`` are
+    what :func:`start_channel_plan` gave this run, and ``allowed_motions``
+    the campaign motion it was started under (#67) — see
+    :func:`extract_channel_plan` for how they and ``allowed_source_urls`` are
     used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
@@ -1420,6 +1498,7 @@ async def advance_channel_plan(
     return extract_channel_plan(
         view.messages,
         taxonomy=taxonomy,
+        allowed_motions=allowed_motions,
         allowed_source_urls=allowed_source_urls,
         annotations=view.annotations,
     )

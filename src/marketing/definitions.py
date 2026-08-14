@@ -234,6 +234,48 @@ class Positioning(BaseModel):
     ctas: list[CallToAction] = Field(default_factory=list)
 
 
+# ── Campaign motion (#67) ────────────────────────────────────────────────────
+#
+# The operator's campaign-level answer to "how does this campaign reach
+# people": organic, paid, or both. It is CAMPAIGN state (a column on
+# `marketing_campaign`, next to the brief), not a per-run parameter — copy,
+# the distribution pack and the paid pack all need one consistent answer, and
+# a per-run choice would leave the campaign with no recorded position for them
+# to read.
+#
+# Note the two vocabularies are deliberately different sizes: a CHANNEL is
+# `organic` or `paid` (it is one or the other — "Google Search ads" is
+# inherently paid), while a CAMPAIGN may be either or `both`.
+# `motions_allowed_by` is the only sanctioned translation between them, so the
+# widening never happens ad hoc at a call site.
+
+#: The closed set of campaign motions. Validated in the service layer —
+#: plugin tables have no enum type (`biffo.plugin.json`'s own note on
+#: `marketing_campaign.status`).
+CAMPAIGN_MOTIONS: tuple[str, ...] = ("organic", "paid", "both")
+
+
+def motions_allowed_by(campaign_motion: str) -> frozenset[str]:
+    """The `marketing_channel.motion` values a campaign of this motion may
+    use — the whole of #67's motion constraint, in one place.
+
+    Raises `ValueError` on anything outside :data:`CAMPAIGN_MOTIONS` rather
+    than falling back to "allow everything". A permissive default here would
+    turn a typo'd or absent motion into an unconstrained campaign, which is
+    precisely the failure this constraint exists to prevent: the caller must
+    decide what to do about a campaign with no motion (the channel-plan route
+    refuses to start one), not inherit a silent yes.
+    """
+    if campaign_motion == "both":
+        return frozenset({"organic", "paid"})
+    if campaign_motion in CAMPAIGN_MOTIONS:
+        return frozenset({campaign_motion})
+    raise ValueError(
+        f"{campaign_motion!r} is not a campaign motion — expected one of "
+        f"{', '.join(CAMPAIGN_MOTIONS)}."
+    )
+
+
 class ChannelRecommendation(BaseModel):
     """One recommended channel, organic or paid, grounded in the approved
     positioning. Same citation discipline as `Segment`/`MessagePillar`/
@@ -684,16 +726,27 @@ once. Do not answer in prose.
 CHANNEL_PLAN_INSTRUCTIONS = f"""\
 You are the campaign studio's channel strategist. You are given one
 **approved** positioning artefact — audience segments, message pillars and
-calls to action, each carrying the sources that support it — and one
-**channel taxonomy**: a list of `{{channel_key, label, motion, category}}`
-entries naming every channel this platform currently recognises. Nothing
-else. You do not have web access and must not claim to.
+calls to action, each carrying the sources that support it — a
+`campaign_motion` (`organic`, `paid` or `both`), and one **channel
+taxonomy**: a list of `{{channel_key, label, motion, category}}` entries.
+Nothing else. You do not have web access and must not claim to.
 
-Recommend channels for this campaign, covering BOTH motions:
+**The taxonomy you are given is not the whole taxonomy.** It is the set of
+channels the operator selected for this campaign, already narrowed to the
+campaign's motion. Channels the operator did not select, and channels whose
+motion this campaign does not run, are simply absent from it — that is a
+decision already taken, not an omission for you to correct.
+
+Recommend channels for this campaign, covering the motion(s) it runs:
 1. **Organic** channels — where this audience already spends attention,
    reachable without paid distribution.
 2. **Paid** channels — where paid distribution would reach this audience
    fastest or most precisely.
+
+An `organic` campaign wants organic recommendations only; a `paid` campaign,
+paid only; `both` wants both. This is enforced when your answer comes back,
+not merely requested here: a recommendation outside the campaign's motion is
+rejected and the whole plan fails with it.
 
 For EVERY recommendation, set exactly one of:
 - `channel_key` — copy it EXACTLY from the taxonomy you were given, when one
@@ -702,14 +755,16 @@ For EVERY recommendation, set exactly one of:
   not silently accepted. When you set `channel_key`, leave `motion` unset:
   it is derived from the taxonomy entry, not asserted by you.
 - `suggested_label` — free text, ONLY when the evidence strongly supports a
-  channel that genuinely is not in the taxonomy. This is a proposal, not a
-  plan entry: an operator must accept it before it becomes a real channel.
-  When you use `suggested_label`, you MUST also set `motion` yourself, since
-  there is no taxonomy entry to derive it from.
+  channel that genuinely is not in the taxonomy you were given. This is a
+  proposal, not a plan entry: an operator must accept it before it becomes a
+  real channel. When you use `suggested_label`, you MUST also set `motion`
+  yourself, since there is no taxonomy entry to derive it from — and that
+  motion must be one the campaign runs, or the plan is rejected.
 
 Prefer the taxonomy. Reach for `suggested_label` only when nothing in the
 taxonomy is a genuine fit for what the evidence supports — not as a shortcut
-around checking the list first.
+around checking the list first, and never to re-propose a channel the
+operator has already left out for a reason you cannot see.
 
 Rank the channels within each motion (1 = highest priority) and give each a
 rationale an operator can disagree with: name exactly which segment, pillar or
