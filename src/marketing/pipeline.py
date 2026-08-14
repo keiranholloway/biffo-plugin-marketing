@@ -1476,6 +1476,35 @@ async def advance_copy(
     )
 
 
+def channel_key_motions(
+    channel_plan_body: dict[str, Any],
+) -> dict[str, Literal["organic", "paid"]]:
+    """``{channel_key: motion}`` for the entries that carry a key. Never raises.
+
+    Split out of :func:`channel_plan_channel_map` for issue #152. That function
+    answers TWO questions at once — "is this plan stale?" and "what are its
+    keyed channels?" — and #145 made answering both from the same body wrong.
+
+    Staleness is a fact about the plan **as generated**: a pre-taxonomy plan
+    (#76) has entries and none carry a ``channel_key``. That was a sound proxy
+    while callers always passed the whole approved plan. Once an operator can
+    approve a SUBSET, a perfectly current plan narrowed to only a
+    ``suggested_label``-only proposal has exactly the same shape — entries, no
+    keys — and the operator was told their valid plan "predates channel
+    taxonomy ids" and to re-run it. Wrong advice, and no route to copy for the
+    entry they actually chose.
+
+    So callers ask the staleness question of the full body and take the mapping
+    from the narrowed one. This helper is the second half, with no opinion
+    about staleness.
+    """
+    return {
+        c["channel_key"]: c["motion"]
+        for c in (channel_plan_body.get("channels") or [])
+        if c.get("channel_key")
+    }
+
+
 def channel_plan_channel_map(
     channel_plan_body: dict[str, Any],
 ) -> dict[str, Literal["organic", "paid"]]:
@@ -1495,7 +1524,7 @@ def channel_plan_channel_map(
     recommend nothing yet — so it returns ``{}`` rather than raising.
     """
     channels = channel_plan_body.get("channels") or []
-    mapping = {c["channel_key"]: c["motion"] for c in channels if c.get("channel_key")}
+    mapping = channel_key_motions(channel_plan_body)
     if channels and not mapping:
         raise StaleChannelPlanError(
             "This campaign's approved channel plan predates channel taxonomy ids (#76) "
