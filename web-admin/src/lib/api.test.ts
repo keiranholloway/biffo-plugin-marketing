@@ -11,6 +11,7 @@ import {
   listChannels,
   mintLinks,
   parseArtefactBody,
+  StageRunFailedError,
   StaleArtefactError,
   startResearch,
   updateCampaign,
@@ -144,6 +145,43 @@ describe('pipeline artefacts', () => {
     stubSession()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }))
     await expect(getArtefact('c1', 'research')).resolves.toBeNull()
+  })
+
+  it('throws StageRunFailedError, not a plain Error, for the advance route\'s 502 (#159)', async () => {
+    // 502 is `admin_app._pipeline_error_to_http`'s one status for "an agent
+    // ran and what it produced cannot be turned into an artefact" — the
+    // failure another read can never clear, and therefore the only one the
+    // stage should offer to re-run.
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: async () => ({ detail: 'the channel-plan run produced no submit_channel_plan tool call' }),
+      }),
+    )
+    const failure = getArtefact('c1', 'channel_plan')
+    await expect(failure).rejects.toBeInstanceOf(StageRunFailedError)
+    // Same wording as before #159 — nothing that only renders `error` changes.
+    await expect(failure).rejects.toThrow(
+      'the channel-plan run produced no submit_channel_plan tool call (502)',
+    )
+  })
+
+  it('does NOT throw StageRunFailedError for a failure that is not the run\'s own', async () => {
+    stubSession()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ detail: 'Administrator access required' }),
+      }),
+    )
+    const failure = getArtefact('c1', 'channel_plan')
+    await expect(failure).rejects.toBeInstanceOf(Error)
+    await expect(failure).rejects.not.toBeInstanceOf(StageRunFailedError)
   })
 
   it('starts research at the admin-app route, not generated CRUD', async () => {

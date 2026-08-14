@@ -325,6 +325,11 @@ describe('Pipeline', () => {
       // escape hatch is exactly what is still offered.
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
       expect(within(research).queryByRole('button', { name: /^start research/i })).not.toBeInTheDocument()
+      // #159: "not startable" must not mean "not restartable". The stage keeps
+      // its badge and its reason; what it gains is an explicitly-labelled
+      // re-run, which is a different control from the plain "Start" this
+      // deliberately still withholds.
+      expect(within(research).getByRole('button', { name: /run research again/i })).toBeInTheDocument()
     })
 
     it('keeps the stage rendered WHILE a poll is in flight, not just after it (#147)', async () => {
@@ -410,5 +415,170 @@ describe('Pipeline', () => {
       vi.useRealTimers()
     })
 
+  })
+
+  /** Issue #159. On tabsii dev the channel-plan stage 502'd with "the
+   * channel-plan run produced no submit_channel_plan tool call", and then sat
+   * at `Running…` for ever: the reason was shown (#85/#86, correct) but the
+   * only control left was "Check for result", which re-reads the same dead
+   * run and returns the same 502 for as long as anyone keeps pressing it.
+   *
+   * The artefact is still `pending` because that is exactly what happened —
+   * the stage never produced anything to move it on — so no amount of
+   * re-reading changes it. What resolves it is starting a NEW run, and the
+   * route already allows that (a fresh `pending` artefact sorts ahead of this
+   * one, `admin_app._latest_artefact`). Only the UI was missing the button.
+   */
+  describe('a pending stage whose run has already failed (#159)', () => {
+    /** Positioning approved and targeting set, so the channel-plan gate is
+     * open; channel plan `pending` on first read and then answering every
+     * subsequent poll with `laterResponse`. */
+    function channelPlanFetchStub(laterResponse: { status: number; body: unknown }) {
+      let reads = 0
+      return vi.fn((url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/artefacts/channel_plan') && method === 'GET') {
+          reads += 1
+          if (reads === 1) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => ({
+                id: 'a-channel_plan',
+                campaign_id: CAMPAIGN,
+                kind: 'channel_plan',
+                status: 'pending',
+                body: null,
+                citations: null,
+                causation_id: null,
+                agent_run_id: 'run-1',
+              }),
+            })
+          }
+          return Promise.resolve({
+            ok: false,
+            status: laterResponse.status,
+            json: async () => laterResponse.body,
+          })
+        }
+        if (url.endsWith('/artefacts/positioning') && method === 'GET') {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              id: 'a-positioning',
+              campaign_id: CAMPAIGN,
+              kind: 'positioning',
+              status: 'approved',
+              body: JSON.stringify({ segments: [], pillars: [], ctas: [] }),
+              citations: null,
+              causation_id: null,
+              agent_run_id: null,
+            }),
+          })
+        }
+        if (url.endsWith('/channel-plan') && method === 'POST') {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              id: 'a-channel_plan-2',
+              campaign_id: CAMPAIGN,
+              kind: 'channel_plan',
+              status: 'pending',
+              body: null,
+              citations: null,
+              causation_id: null,
+              agent_run_id: 'run-2',
+            }),
+          })
+        }
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+      })
+    }
+
+    /** Renders with the channel-plan stage `pending`, then lets one poll land
+     * on `status`/`detail`.
+     *
+     * Fake timers are installed BEFORE render, for the reason the #147 test
+     * above spells out: the heartbeat is created by an effect, so installing
+     * them afterwards leaves a real-timer interval `advanceTimersByTime`
+     * cannot drive — the poll never fires and the assertions pass or fail on
+     * whichever real-time race won, which is how two of these were briefly
+     * green against no code at all. */
+    async function renderUntilChannelPlanFails(status: number, detail: string) {
+      vi.useFakeTimers()
+      stubSession()
+      const fetchMock = channelPlanFetchStub({ status, body: { detail } })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
+
+      // Mount's own reads settle first, so the stage is `pending` and the
+      // heartbeat is running before any tick is advanced.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      const stage = screen.getByTestId('stage-channel_plan')
+      expect(within(stage).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      return { stage, fetchMock }
+    }
+
+    it('offers a re-run when the run itself failed, so the operator is not stuck', async () => {
+      const { stage } = await renderUntilChannelPlanFails(
+        502,
+        'the channel-plan run produced no submit_channel_plan tool call',
+      )
+
+      // The reason stays visible — this does NOT revert to #86's silent
+      // "startable again", which is what hid the reason in the first place.
+      expect(within(stage).getByText(/produced no submit_channel_plan tool call/i)).toBeInTheDocument()
+      expect(within(stage).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+      expect(within(stage).getByRole('button', { name: /run channel plan again/i })).toBeEnabled()
+    })
+
+    it('actually starts a fresh run when that re-run is pressed', async () => {
+      // Driven entirely off the manual button rather than the poll, so this
+      // needs no fake timers to fight `userEvent` over — and it proves the
+      // other half of the same route: pressing "Check for result" on a dead
+      // run is what an operator does first, and it must be what reveals the
+      // re-run rather than something only the background poll can surface.
+      stubSession()
+      const fetchMock = channelPlanFetchStub({
+        status: 502,
+        body: { detail: 'the channel-plan run produced no submit_channel_plan tool call' },
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      const user = userEvent.setup()
+
+      render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
+      const stage = await screen.findByTestId('stage-channel_plan')
+
+      await user.click(await within(stage).findByRole('button', { name: /check for result/i }))
+      await user.click(await within(stage).findByRole('button', { name: /run channel plan again/i }))
+
+      const started = fetchMock.mock.calls.filter(
+        ([u, init]) =>
+          typeof u === 'string' && u.endsWith('/channel-plan') && (init as RequestInit)?.method === 'POST',
+      )
+      expect(started).toHaveLength(1)
+      // A fresh run, so the failure that belonged to the old one goes with it.
+      expect(within(stage).queryByText(/produced no submit_channel_plan tool call/i)).not.toBeInTheDocument()
+    })
+
+    it('does not offer a re-run for a failure that is not the run\'s own', async () => {
+      // A 403 is the operator's session, not the agent's output. Re-running
+      // would bill for a second run to fix a permissions problem — and the
+      // 502 is the one status that means "an agent ran, and what it produced
+      // is not something retrying the REQUEST fixes" (`admin_app.
+      // _pipeline_error_to_http`), which is precisely the condition a re-run
+      // is the answer to.
+      const { stage } = await renderUntilChannelPlanFails(403, 'Administrator access required')
+
+      expect(within(stage).getByText(/administrator access required/i)).toBeInTheDocument()
+      expect(within(stage).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+      expect(within(stage).queryByRole('button', { name: /run channel plan again/i })).not.toBeInTheDocument()
+    })
   })
 })

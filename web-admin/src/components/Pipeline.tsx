@@ -9,6 +9,7 @@ import {
   startCopy,
   startPositioning,
   startResearch,
+  StageRunFailedError,
   StaleArtefactError,
   type Artefact,
   type ArtefactKind,
@@ -31,6 +32,14 @@ interface StageState {
    * from `approveArtefact` (issue #145), never for any other failure this
    * stage can report. */
   stale: boolean
+  /** True only for a `StageRunFailedError` — the advance route's 502 (issue
+   * #159), meaning this stage's agent run reached a terminal state and what
+   * it produced cannot be turned into an artefact. Distinct from `error`,
+   * which is any failure at all: a stage can legitimately show an error
+   * (a 403, a network blip during a poll) while its run is still perfectly
+   * alive, and offering to re-run in that case would bill for a second agent
+   * run to fix something no agent caused. */
+  failed: boolean
   busy: boolean
   /** Element ids the operator has unchecked for this stage's current
    * `proposed` artefact (issue #145) — reset to empty the moment a NEW
@@ -179,6 +188,7 @@ function initialState(): Record<ArtefactKind, StageState> {
     loading: true,
     error: null,
     stale: false,
+    failed: false,
     busy: false,
     deselected: new Set<string>(),
   })
@@ -229,6 +239,10 @@ export function Pipeline({
           ...prev[kind],
           artefact,
           stale: false,
+          // A successful read is the resolution to a previous failure too
+          // (issue #159): whatever the last 502 said, this artefact is what
+          // the stage is now.
+          failed: false,
           ...(idChanged ? { deselected: new Set<string>() } : {}),
           ...extra,
         },
@@ -266,13 +280,25 @@ export function Pipeline({
    * the stage rather than in place of it.
    */
   async function load(kind: ArtefactKind, { quiet = false }: { quiet?: boolean } = {}) {
-    if (!quiet) patch(kind, { loading: true, error: null, stale: false })
+    if (!quiet) patch(kind, { loading: true, error: null, stale: false, failed: false })
     try {
       const artefact = await getArtefact(campaignId, kind)
       applyArtefact(kind, artefact, quiet ? {} : { loading: false })
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e)
-      patch(kind, quiet ? { error: message } : { loading: false, error: message, stale: false })
+      // `failed` (issue #159) is set from the error's TYPE, not from the fact
+      // that one happened — `StageRunFailedError` is the advance route's 502,
+      // the one failure another read can never clear. It is written on both
+      // the quiet and the loud path because the poll is how an operator
+      // actually finds out (#144); a failure only the manual button could
+      // reveal would leave the stage stuck for the two minutes nobody clicks.
+      const failed = e instanceof StageRunFailedError
+      patch(
+        kind,
+        quiet
+          ? { error: message, failed }
+          : { loading: false, error: message, stale: false, failed },
+      )
     }
   }
 
@@ -288,7 +314,7 @@ export function Pipeline({
   }, [campaignId])
 
   async function runMutation(kind: ArtefactKind, mutate: () => Promise<Artefact | null>) {
-    patch(kind, { busy: true, error: null, stale: false })
+    patch(kind, { busy: true, error: null, stale: false, failed: false })
     try {
       const artefact = await mutate()
       applyArtefact(kind, artefact, { busy: false })
@@ -301,6 +327,7 @@ export function Pipeline({
         busy: false,
         error: e instanceof Error ? e.message : String(e),
         stale: e instanceof StaleArtefactError,
+        failed: e instanceof StageRunFailedError,
       })
     }
   }
@@ -374,6 +401,7 @@ export function Pipeline({
             loading={s.loading}
             error={s.error}
             stale={s.stale}
+            failed={s.failed}
             canStart={gate.canStart}
             blockedReason={gate.blockedReason}
             busy={s.busy}

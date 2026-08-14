@@ -31,6 +31,30 @@ import { createRequest } from './api-core'
  * and choose again" — a stale id cannot be retried into success. */
 export class StaleArtefactError extends Error {}
 
+/** Thrown by {@link getArtefact} for the advance route's 502 (issue #159) —
+ * "an agent ran, and what it produced (or failed to produce) is not something
+ * retrying the *request* fixes; the operator re-runs the stage instead". That
+ * sentence is `admin_app._pipeline_error_to_http`'s own docstring, and 502 is
+ * the only status this route uses to say it: every `pipeline.PipelineError`
+ * maps here and nothing else does.
+ *
+ * Distinguished from every other failure a stage read can produce because it
+ * is the one that "Check for result" can never resolve. The artefact is still
+ * `pending` — nothing ever moved it on — so re-reading it re-runs the same
+ * extraction against the same dead run and returns the same 502 for as long
+ * as anyone keeps pressing. On tabsii dev, 2026-08-14, that left a campaign
+ * sitting at `Running…` with `the channel-plan run produced no
+ * submit_channel_plan tool call` and no route forward at all.
+ *
+ * A 401/403 (the operator's session) or a 5xx from Core itself is NOT this:
+ * re-running would bill for a fresh agent run to fix something no agent
+ * caused. Hence the narrow status match rather than "any failure while
+ * pending".
+ *
+ * Carries the same message the plain `Error` did, so nothing that only
+ * renders `error` changes wording — see `throwForResponse`. */
+export class StageRunFailedError extends Error {}
+
 /** How a campaign reaches people (#67). Wider than a channel's own motion:
  * a channel is organic OR paid, a campaign may run `both`. */
 export type CampaignMotion = 'organic' | 'paid' | 'both'
@@ -344,10 +368,14 @@ async function throwForResponse(response: Response, context: string): Promise<ne
   if (response.status === 403) {
     throw new Error(detail !== null ? `${detail} (403)` : `you need the admin role to ${context} (403)`)
   }
-  if (detail !== null) {
-    throw new Error(`${detail} (${response.status})`)
+  const message = detail !== null ? `${detail} (${response.status})` : `could not ${context} (${response.status})`
+  // Issue #159: the run itself failed, so the operator needs a re-run rather
+  // than another read. Same message, a different type — see
+  // {@link StageRunFailedError} for why 502 specifically.
+  if (response.status === 502) {
+    throw new StageRunFailedError(message)
   }
-  throw new Error(`could not ${context} (${response.status})`)
+  throw new Error(message)
 }
 
 /** Update a campaign's own fields directly — generated CRUD, not an admin-app

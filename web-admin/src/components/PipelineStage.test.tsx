@@ -86,6 +86,91 @@ describe('PipelineStage', () => {
     expect(screen.queryByRole('button', { name: /^approve$/i })).not.toBeInTheDocument()
   })
 
+  it('offers a re-run alongside "check for result" when the pending run has failed (#159)', async () => {
+    // `pending` + `failed` is the state a 502 from the advance route leaves
+    // behind: the run is over, the artefact never moved on, and no further
+    // read can change either fact. Without this the stage has exactly one
+    // control, and it is the one that cannot help.
+    const onStart = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <PipelineStage
+        kind="channel_plan"
+        title="Channel plan"
+        artefact={artefact('pending')}
+        loading={false}
+        error="the channel-plan run produced no submit_channel_plan tool call (502)"
+        failed={true}
+        canStart={true}
+        blockedReason={null}
+        busy={false}
+        onStart={onStart}
+        onRefresh={noop}
+        onApprove={noop}
+        onReject={noop}
+      />,
+    )
+
+    // The badge and the reason both survive — #85/#86's requirement, which a
+    // silent revert to "startable" is exactly what broke.
+    expect(screen.getByText('Running…')).toBeInTheDocument()
+    expect(screen.getByText(/produced no submit_channel_plan tool call/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /run channel plan again/i }))
+    expect(onStart).toHaveBeenCalledOnce()
+  })
+
+  it('does not offer a re-run for a pending stage that has merely errored', () => {
+    // An error is not a failed run. A 403 or a dropped connection during a
+    // poll says nothing about the agent, and re-running would bill for a
+    // second run to fix something the first one did not cause.
+    render(
+      <PipelineStage
+        kind="channel_plan"
+        title="Channel plan"
+        artefact={artefact('pending')}
+        loading={false}
+        error="you need the admin role to load the channel plan stage (403)"
+        failed={false}
+        canStart={true}
+        blockedReason={null}
+        busy={false}
+        onStart={noop}
+        onRefresh={noop}
+        onApprove={noop}
+        onReject={noop}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /check for result/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /run channel plan again/i })).not.toBeInTheDocument()
+  })
+
+  it('explains why a failed pending stage cannot be re-run, rather than a dead button', () => {
+    // The same courtesy the `null`/`rejected` branch has always had: an
+    // upstream approval withdrawn since this run started makes a re-run 422,
+    // and the operator needs to know which one.
+    render(
+      <PipelineStage
+        kind="channel_plan"
+        title="Channel plan"
+        artefact={artefact('pending')}
+        loading={false}
+        error="the channel-plan run produced no submit_channel_plan tool call (502)"
+        failed={true}
+        canStart={false}
+        blockedReason="Approve the positioning stage first."
+        busy={false}
+        onStart={noop}
+        onRefresh={noop}
+        onApprove={noop}
+        onReject={noop}
+      />,
+    )
+    expect(screen.getByText('Approve the positioning stage first.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /run channel plan again/i })).toBeDisabled()
+  })
+
   it('offers approve and reject once proposed, and renders the artefact body', async () => {
     const onApprove = vi.fn()
     const onReject = vi.fn()
