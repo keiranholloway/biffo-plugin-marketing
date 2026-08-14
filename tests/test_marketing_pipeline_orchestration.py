@@ -15,12 +15,24 @@ import pytest
 
 from marketing import pipeline
 from marketing.definitions import (
+    AGENT_TIMEOUT_SECONDS,
     CHANNEL_PLAN_AGENT_NAME,
     COPY_AGENT_NAME,
+    DEFAULT_SYNTHESIS_MODEL,
     POSITIONING_AGENT_NAME,
     RESEARCH_AGENT_NAMES,
     RESEARCH_SYNTHESIS_AGENT_NAME,
+    RESEARCH_SYNTHESIS_INSTRUCTIONS,
+    research_synthesis_definition,
 )
+
+
+def _in_step_snapshot() -> dict[str, Any]:
+    """The definition snapshot a *freshly re-seeded* workflow would produce —
+    what the engine ran the synthesis agent with when nothing has drifted."""
+    return research_synthesis_definition(
+        model=DEFAULT_SYNTHESIS_MODEL, instructions=RESEARCH_SYNTHESIS_INSTRUCTIONS
+    )
 
 
 @dataclass
@@ -92,12 +104,26 @@ class _FakeGateway:
         status: str = "completed",
         messages: list | None = None,
         annotations: list[dict[str, Any]] | None = None,
+        definition_snapshot: dict[str, Any] | None = None,
     ) -> str:
-        """Simulate the engine's `agent_fan_in` firing a joining agent."""
+        """Simulate the engine's `agent_fan_in` firing a joining agent.
+
+        `definition_snapshot` is what the engine ran it with — a copy of this
+        plugin's definition frozen into the seeded workflow, which is a
+        different document from `definitions.py` and drifted from it for two
+        days (#160). Defaults to the frozen copy being *in step*; the drift
+        tests pass a stale one explicitly.
+        """
         self._next_id += 1
         run_id = f"run-{self._next_id}"
         self._runs[run_id] = pipeline.AgentRunView(
-            id=run_id, status=status, messages=messages or [], annotations=annotations
+            id=run_id,
+            status=status,
+            messages=messages or [],
+            annotations=annotations,
+            definition_snapshot=(
+                _in_step_snapshot() if definition_snapshot is None else definition_snapshot
+            ),
         )
         self._chain_runs[(chain_id, agent_name)] = run_id
         return run_id
@@ -950,3 +976,175 @@ def test_require_approved_passes_on_approved() -> None:
 def test_require_approved_raises_on_anything_else(status: str) -> None:
     with pytest.raises(pipeline.ArtefactNotApprovedError):
         pipeline.require_approved(status, what="Research")
+
+
+# ── The frozen synthesis config, and the run that reveals it (issue #160) ─────
+#
+# The synthesis stage is the ONE stage this plugin does not start. The engine
+# fires it from a copy of `research_synthesis_definition` that
+# `scripts/seed_fan_in_workflow.py` froze into the workflow's `action_config`,
+# and nothing in a deploy updates that copy. On 2026-08-14 it was still running
+# `claude-opus-4.8` on 120s, two days after every other stage moved to Claude 5
+# on 240s — and nothing anywhere reported it. Someone found it by reading a
+# table in the portal while diagnosing something else.
+#
+# These tests read the run's OWN `definition_snapshot` — what Core recorded and
+# the runtime billed — rather than `definitions.py`, because a guard that reads
+# `definitions.py` and asserts something about `definitions.py` would have been
+# green throughout (biffo-template#1362's class).
+
+DRIFT_PREFIX = "The seeded fan-in workflow is STALE"
+
+
+#: What the engine really ran on tabsii dev, per #160's table.
+_STALE_SNAPSHOT = {
+    **_in_step_snapshot(),
+    "model": "anthropic/claude-opus-4.8",
+    "timeout_seconds": 120.0,
+}
+
+
+def _drift_records(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [r for r in caplog.records if r.getMessage().startswith(DRIFT_PREFIX)]
+
+
+def test_synthesis_config_drift_names_both_the_model_and_the_clock() -> None:
+    """#62 predicted the model would stick and wrote it down; the timeout
+    stuck anyway, because the lesson was recorded about one key rather than
+    about the snapshot. Both must be named."""
+    drift = pipeline.synthesis_config_drift(_STALE_SNAPSHOT)
+
+    assert set(drift) == {"model", "timeout_seconds"}
+    assert drift["model"] == ("anthropic/claude-opus-4.8", DEFAULT_SYNTHESIS_MODEL)
+    assert drift["timeout_seconds"] == (120.0, AGENT_TIMEOUT_SECONDS)
+
+
+def test_synthesis_config_drift_is_empty_for_a_freshly_seeded_workflow() -> None:
+    """The negative control: after a re-seed this must go quiet, or the report
+    is noise and gets filtered out."""
+    assert pipeline.synthesis_config_drift(_in_step_snapshot()) == {}
+
+
+def test_synthesis_config_drift_shortens_a_prompt_rather_than_pasting_it() -> None:
+    """A drifted prompt is thousands of characters. Two copies of it in one
+    log line pushes the thing that actually differs off the end."""
+    drift = pipeline.synthesis_config_drift({**_in_step_snapshot(), "instructions": "x" * 4000})
+
+    deployed, declared = drift["instructions"]
+    assert deployed.endswith("(4000 chars)")
+    assert len(deployed) < 200 and len(declared) < 200
+
+
+def test_synthesis_config_drift_says_nothing_when_the_snapshot_is_unknown() -> None:
+    """`None` is "not checked", never "in step". A view built from a list row
+    (or an older Core) has no snapshot, and reporting that as agreement is the
+    fail-open this whole issue is about."""
+    assert pipeline.synthesis_config_drift(None) == {}
+
+
+@pytest.mark.asyncio
+async def test_advance_research_reports_the_stale_config_that_actually_ran(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The end-to-end guard: a normal, *successful* research chain whose
+    synthesis was fired from a stale workflow now says so, at ERROR, naming
+    the command that fixes it — and still returns the synthesis, because the
+    run has already happened and refusing its output would cost an operator a
+    campaign over a configuration report."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed")
+    gateway.complete(run_ids[1], status="completed")
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_findings_call("audience"),
+        definition_snapshot=_STALE_SNAPSHOT,
+    )
+
+    with caplog.at_level("ERROR"):
+        result = await pipeline.advance_research(
+            gateway, chain_id=chain_id, research_run_ids=run_ids
+        )
+
+    assert isinstance(result, pipeline.ResearchSynthesis)  # a report, not a gate
+    records = _drift_records(caplog)
+    assert len(records) == 1
+    assert pipeline.RESEED_COMMAND in records[0].getMessage()
+    reported = records[0].synthesis_config_drift
+    assert reported["model"]["deployed"] == "anthropic/claude-opus-4.8"
+    assert reported["timeout_seconds"]["deployed"] == 120.0
+    assert records[0].causation_id == chain_id
+
+
+@pytest.mark.asyncio
+async def test_advance_research_is_quiet_when_the_engine_ran_what_this_repo_declares(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed")
+    gateway.complete(run_ids[1], status="completed")
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_findings_call("audience"),
+    )
+
+    with caplog.at_level("ERROR"):
+        await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    assert _drift_records(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_advance_research_reports_drift_on_the_run_that_died_on_the_short_clock(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The case worth the most. #130 was synthesis producing 8,546 output
+    tokens and dying at 120s; the fix (#131) raised every agent to 240s and
+    never reached this stage. A failed run is exactly when someone asks *why*,
+    so the drift line has to be on the failure path too — not only the happy
+    one."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed")
+    gateway.complete(run_ids[1], status="completed")
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        status="failed",
+        definition_snapshot=_STALE_SNAPSHOT,
+    )
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(pipeline.RunNotSucceededError):
+            await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+
+    assert len(_drift_records(caplog)) == 1
+
+
+@pytest.mark.asyncio
+async def test_advance_research_says_nothing_while_synthesis_is_still_running(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`advance_research` is polled. A drift line per poll would be a stream
+    rather than a report — it belongs on the terminal transition, once."""
+    gateway = _FakeGateway()
+    chain_id, run_ids = await pipeline.start_research(gateway, brief={})
+    gateway.complete(run_ids[0], status="completed")
+    gateway.complete(run_ids[1], status="completed")
+    gateway.fire_chain_run(
+        chain_id=chain_id,
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        status="running",
+        definition_snapshot=_STALE_SNAPSHOT,
+    )
+
+    with caplog.at_level("ERROR"):
+        assert (
+            await pipeline.advance_research(gateway, chain_id=chain_id, research_run_ids=run_ids)
+            is None
+        )
+
+    assert _drift_records(caplog) == []

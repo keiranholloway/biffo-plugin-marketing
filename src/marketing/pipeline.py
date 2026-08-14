@@ -77,6 +77,7 @@ from .definitions import (
     RESEARCH_AGENT_NAMES,
     RESEARCH_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_AGENT_NAME,
+    RESEARCH_SYNTHESIS_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_TOOL_NAME,
     ChannelCopy,
     ChannelPlan,
@@ -96,6 +97,7 @@ from .definitions import (
     positioning_tool_schema,
     research_definition,
     research_search_query,
+    research_synthesis_definition,
 )
 
 logger = Logger(child=True)
@@ -1121,12 +1123,24 @@ class AgentRunView:
       nothing to cite.
     - non-empty — retrieval succeeded; the run has evidence, whatever the
       model's tool call did or didn't repeat of it.
+
+    ``definition_snapshot`` is Core's ``AgentRunResponse.definition_snapshot``:
+    the configuration this run **actually ran with**, as opposed to the one
+    this repo declares. For every stage this plugin starts itself the two are
+    the same thing by construction. For the one stage it does not — research
+    synthesis, fired by the orchestration engine from a config frozen into the
+    seeded workflow — they are two independent documents that drifted apart
+    for two days without anything noticing (issue #160), which is why the
+    snapshot is carried here at all. ``None`` means "not known": a view built
+    from a list row rather than the detail endpoint, or a Core too old to
+    return the field. It never means "matches".
     """
 
     id: str
     status: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     annotations: list[dict[str, Any]] | None = None
+    definition_snapshot: dict[str, Any] | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -1462,6 +1476,127 @@ async def _log_evidence_profile_for(
     _log_evidence_profile(chain_id=chain_id, views=views)
 
 
+#: The exact command that re-seeds the workflow definition, quoted verbatim
+#: anywhere this repo reports drift. Anyone reading a drift report is one
+#: command away from fixing it and should never have to go and find which one.
+RESEED_COMMAND = "uv run python scripts/seed_fan_in_workflow.py --replace"
+
+#: The keys of the frozen copy this plugin can compare a *run* against.
+#:
+#: Not "the model", which is how #62 recorded the lesson and why the timeout
+#: went unnoticed for two more days: **the whole snapshot is frozen**, so the
+#: subject of the check is every key of the run definition, enumerated from
+#: ``research_synthesis_definition``'s own output rather than listed here.
+#: ``tools`` and ``output_tools`` are compared too — a stale tool schema is
+#: the same class of defect and would be even quieter.
+SYNTHESIS_DRIFT_IGNORED_KEYS = frozenset({"output_tools"})
+
+
+def _drift_summary(value: Any) -> Any:
+    """A long string reduced to something a log line can carry.
+
+    The synthesis instructions are thousands of characters; a drift report
+    that pasted two copies of them would be unreadable and would push the
+    thing that actually differs off the end of the line.
+    """
+    if isinstance(value, str) and len(value) > 80:
+        return f"{value[:60]}… ({len(value)} chars)"
+    return value
+
+
+def synthesis_config_drift(
+    snapshot: Mapping[str, Any] | None,
+    *,
+    synthesis_model: str = DEFAULT_SYNTHESIS_MODEL,
+) -> dict[str, tuple[Any, Any]]:
+    """What the research-synthesis run **actually ran with**, against what this
+    repo declares — ``{key: (deployed, declared)}``, empty when they agree.
+
+    This is the guard for issue #160, and the document it reads matters more
+    than the comparison it makes. The synthesis stage is the one stage this
+    plugin does not start: the orchestration engine fires it from a copy of
+    the run definition that ``scripts/seed_fan_in_workflow.py`` froze into the
+    workflow's ``action_config`` at seed time. A test that reads
+    ``definitions.py`` and asserts something about ``definitions.py`` proves
+    nothing about that copy — it is biffo-template#1362's class, a guard
+    reading a different document from the one that acts, and it is exactly the
+    check that would have stayed green through all of #160.
+
+    So the subject here is ``AgentRunView.definition_snapshot``: the
+    configuration Core recorded on the run it created, which is what the
+    runtime read and billed. If that disagrees with
+    ``research_synthesis_definition``, the deployed workflow is stale and the
+    only fix is :data:`RESEED_COMMAND`.
+
+    ``None`` means the snapshot is not known (an older Core, or a view built
+    from a list row) and yields ``{}`` — the caller must not read that as
+    "in step"; it is "not checked". A key missing from the snapshot is a
+    drift with a deployed value of ``None``, because absent is precisely how
+    ``timeout_seconds`` produced the 120s clock #160 measured: the runtime
+    silently substitutes its own default for a key nobody wrote.
+    """
+    if snapshot is None:
+        return {}
+    declared = research_synthesis_definition(
+        model=synthesis_model, instructions=RESEARCH_SYNTHESIS_INSTRUCTIONS
+    )
+    drift: dict[str, tuple[Any, Any]] = {}
+    for key, declared_value in declared.items():
+        if key in SYNTHESIS_DRIFT_IGNORED_KEYS:
+            continue
+        deployed_value = snapshot.get(key)
+        if deployed_value != declared_value:
+            drift[key] = (_drift_summary(deployed_value), _drift_summary(declared_value))
+    return drift
+
+
+def _report_synthesis_config_drift(
+    view: AgentRunView, *, chain_id: str, synthesis_model: str
+) -> dict[str, tuple[Any, Any]]:
+    """Log — never raise — when the run the engine fired was configured from a
+    stale copy of this repo.
+
+    Deliberately not an exception. The run has already happened and has
+    already been paid for; refusing its output over a configuration mismatch
+    would turn a reporting problem into an outage, and the operator would lose
+    a campaign to a stale workflow rather than merely running one on the wrong
+    model. It is logged at ``error`` because it is a deployment defect that
+    needs a person, not a condition the pipeline can recover from.
+
+    Reported on **every terminal path**, including failure — a run that died
+    on a 120s clock its declaration says should be 240s is the case where this
+    line is worth the most, and that run is a failure, not a success.
+    """
+    try:
+        drift = synthesis_config_drift(view.definition_snapshot, synthesis_model=synthesis_model)
+    except Exception:  # pragma: no cover — defensive; a report must not raise
+        logger.warning(
+            "synthesis config drift: not checked — the run's definition snapshot could not be read",
+            exc_info=True,
+            extra={"causation_id": chain_id},
+        )
+        return {}
+    if not drift:
+        return {}
+    logger.error(
+        "The seeded fan-in workflow is STALE: the research-synthesis run ran a "
+        "configuration this repo no longer declares. The engine fires this stage "
+        "from a copy frozen into the workflow's action_config at seed time, so "
+        "nothing in a deploy updates it. Re-seed with: %s",
+        RESEED_COMMAND,
+        extra={
+            "causation_id": chain_id,
+            "agent_run_id": view.id,
+            "reseed_command": RESEED_COMMAND,
+            "synthesis_config_drift": {
+                key: {"deployed": deployed, "declared": declared}
+                for key, (deployed, declared) in drift.items()
+            },
+        },
+    )
+    return drift
+
+
 async def advance_research(
     gateway: AgentGateway,
     *,
@@ -1479,9 +1614,17 @@ async def advance_research(
     artefact would sit ``pending`` forever with nothing to explain why.
     Raises :class:`MalformedOutputError` / :class:`NoCitationsError` via
     :func:`extract_research_synthesis` on a malformed or citation-less
-    result. ``synthesis_model`` is accepted for parity with the other stage
-    starters even though this stage never *starts* a run — the engine does —
-    so callers have one place to read every model this pipeline can use.
+    result. ``synthesis_model`` used to be accepted for parity with the other
+    stage starters and then discarded (``del synthesis_model``), because this
+    stage never *starts* a run — the engine does. It is now the model this
+    stage is **supposed** to run on, and the run's own
+    ``definition_snapshot`` is checked against it
+    (:func:`synthesis_config_drift`): the engine fires synthesis from a copy
+    of that definition frozen into the seeded workflow, and for two days that
+    copy ran ``claude-opus-4.8`` on a 120s clock while this repo declared
+    ``claude-opus-5`` on 240s with nothing anywhere reporting it (#160). A
+    parameter that is accepted and discarded is how a stage ends up with no
+    guard at all.
 
     The citation guard is grounded in the **research** runs' annotations
     (:func:`_aggregate_research_annotations`), not the synthesis run's own —
@@ -1504,14 +1647,18 @@ async def advance_research(
     still in flight, because this function is polled and the line would then be
     a stream of partial snapshots rather than one measurement per chain.
     """
-    del synthesis_model  # the engine chooses the synthesis run's model, not us
-
     synthesis_run = await gateway.find_chain_run(
         chain_id=chain_id, agent_name=RESEARCH_SYNTHESIS_AGENT_NAME
     )
     if synthesis_run is not None:
         if not synthesis_run.is_terminal:
             return None  # synthesis is running; nothing to do yet
+        # The engine chose this run's configuration, from a copy of ours frozen
+        # at seed time — so `synthesis_model` is not the model that ran, it is
+        # the model that *should* have (issue #160). Compare them and say so.
+        _report_synthesis_config_drift(
+            synthesis_run, chain_id=chain_id, synthesis_model=synthesis_model
+        )
         if not synthesis_run.succeeded:
             await _log_evidence_profile_for(
                 gateway, chain_id=chain_id, research_run_ids=research_run_ids
