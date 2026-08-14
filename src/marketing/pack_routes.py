@@ -566,7 +566,14 @@ async def get_pack_route(
             detail="The copy artefact must be approved before this can proceed.",
         )
 
-    copy_body = admin_app._parse_artefact_body(approved_copy.get("body"))
+    # Narrowed to the operator's approved subset (issue #145) — `None` means
+    # "everything", the backwards-compatible reading every pre-#145 approved
+    # copy artefact gets. A rejected/unselected channel must not appear in an
+    # assembled pack.
+    copy_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_copy.get("body")),
+        admin_app._artefact_selection(approved_copy),
+    )
     channels = copy_body.get("channels") or []
     try:
         pipeline.require_channel_keyed_copy(channels)

@@ -93,12 +93,26 @@ async def start_copy_route(
             detail="The channel-plan artefact must be approved before this can proceed.",
         )
 
-    channel_plan_body = admin_app._parse_artefact_body(approved_channel_plan.get("body"))
-    # `{channel_key: motion}` for the plan's real entries (#76 increment 2) —
-    # excludes any suggested_label-only proposal, since it is not a real
-    # channel yet. Stored on the pending artefact below and re-read at
-    # advance time so `extract_copy` validates against exactly this set,
-    # not whatever the plan has become by the time the run completes.
+    # Narrowed to each parent's own approved subset (issue #145) — `None`
+    # means "everything", the backwards-compatible reading every pre-#145
+    # approved artefact gets. Both are used as agent input below AND as the
+    # basis for the citation check, so a dropped element neither reaches the
+    # model nor stays cite-able.
+    positioning_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_positioning.get("body")),
+        admin_app._artefact_selection(approved_positioning),
+    )
+    channel_plan_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_channel_plan.get("body")),
+        admin_app._artefact_selection(approved_channel_plan),
+    )
+    # `{channel_key: motion}` for the plan's real, APPROVED entries (#76
+    # increment 2, narrowed per #145) — excludes any suggested_label-only
+    # proposal, since it is not a real channel yet, and now also excludes any
+    # channel the operator did not approve. Stored on the pending artefact
+    # below and re-read at advance time so `extract_copy` validates against
+    # exactly this set, not whatever the plan has become by the time the run
+    # completes.
     #
     # Raises 409 when the approved plan predates the taxonomy migration —
     # every entry the old free-text shape, none carrying a channel_key — the
@@ -111,24 +125,28 @@ async def start_copy_route(
     except pipeline.StaleChannelPlanError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    # The closed set of URLs this run is being shown (issue #22). Copy is
-    # started against TWO approved artefacts, so its legitimate source set is
-    # the union of both their citations — the plan's are a subset of the
-    # positioning's in practice, but only because this same check holds one
-    # stage up, which is not something this stage should assume. Read at start
-    # time and stashed below for the same reason `channel_plan_channels` is.
+    # The closed set of URLs this run is being shown (issue #22), recomputed
+    # from each approved SUBSET rather than read off either parent's
+    # unfiltered `citations` column — see `pipeline.source_urls_from_body` for
+    # why a fresh union, not a subtraction, is what makes this narrow
+    # correctly when two elements share a source. Copy is started against TWO
+    # approved artefacts, so its legitimate source set is the union of both —
+    # the plan's are a subset of the positioning's in practice, but only
+    # because this same check holds one stage up, which is not something this
+    # stage should assume. Read at start time and stashed below for the same
+    # reason `channel_plan_channels` is.
     allowed_source_urls = list(
         dict.fromkeys(
             [
-                *pipeline.citation_source_urls(approved_positioning.get("citations")),
-                *pipeline.citation_source_urls(approved_channel_plan.get("citations")),
+                *pipeline.source_urls_from_body(positioning_body),
+                *pipeline.source_urls_from_body(channel_plan_body),
             ]
         )
     )
 
     causation_id, run_id = await pipeline.start_copy(
         gateway,
-        positioning_body=admin_app._parse_artefact_body(approved_positioning.get("body")),
+        positioning_body=positioning_body,
         channel_plan_body=channel_plan_body,
     )
 
@@ -145,10 +163,12 @@ async def start_copy_route(
             # Pending-state payload, overwritten with the real result once
             # proposed — same pattern as `channel_plan_routes.py`'s own.
             "body": json.dumps(
-                {
-                    "channel_plan_channels": channel_plan_channels,
-                    "allowed_source_urls": allowed_source_urls,
-                }
+                pipeline.with_element_ids(
+                    {
+                        "channel_plan_channels": channel_plan_channels,
+                        "allowed_source_urls": allowed_source_urls,
+                    }
+                )
             ),
         },
     )

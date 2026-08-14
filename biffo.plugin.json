@@ -125,6 +125,12 @@
           "name": "agent_run_id",
           "type": "String(36)",
           "nullable": true
+        },
+        {
+          "name": "approved_selection",
+          "type": "Text",
+          "nullable": true,
+          "description": "JSON-serialised list of the element `id`s an operator approved out of this artefact's body (issue #145) — e.g. 8 of 9 channel_plan recommendations. NULL means every element was approved: the backwards-compatible reading, and what every artefact approved before this column existed has, since nothing on this deployment has ever written anything else. Kept separate from `body` on purpose — `body` is what was generated, this is what a human chose, and conflating them would make it impossible to see what was discarded."
         }
       ],
       "permissions": {

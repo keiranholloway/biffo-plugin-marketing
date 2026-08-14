@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -735,6 +735,139 @@ def flatten_citations(
             seen.add(source.url)
             flat.append(source.model_dump())
     return flat
+
+
+# ── Element identity + operator selection (issue #145) ──────────────────────
+#
+# Every artefact body is a LIST of proposed items — research findings,
+# positioning segments/pillars/CTAs, channel recommendations, copy entries —
+# and `approve_artefact_route` used to flip the whole body `proposed ->
+# approved` in one move. An operator who wanted 8 of 9 channels had to accept
+# the ninth or reject the whole run. The functions below are the machinery
+# that makes a PARTIAL approval real: a stable id per element, a way to narrow
+# a body down to an approved subset, and a way to recompute the closed
+# citation set that subset actually supports.
+#
+# **Ids are server-assigned here, at persist time — never model-generated and
+# never positional.** A model asked to invent a stable id will not reliably
+# produce one; a positional id (an index into the list) silently reassigns an
+# operator's earlier choice to whatever content now sits at that index the
+# moment the list is reordered — the exact failure #94 already recorded once
+# for pack link ordering. `with_element_ids` is called on every body this
+# plugin writes (see `admin_app.py`, `channel_plan_routes.py`,
+# `copy_routes.py` — every `"body": json.dumps(...)` site wraps its argument
+# in this, `tests/test_marketing_element_id_call_sites.py` enforces it
+# statically), so a future write site cannot forget to stamp ids just by
+# following the pattern already on screen.
+
+#: The list fields, across every artefact kind, that hold operator-selectable
+#: elements. Field-name based rather than keyed by `kind`, deliberately: a
+#: pending-state placeholder body (`{"channel_taxonomy": ..., ...}`) simply
+#: has none of these keys, so every function below is a no-op on it, and a
+#: stage added later that carries a new list of selectable things needs only
+#: to be named here — not to teach every call site about a new `kind`.
+ELEMENT_LIST_KEYS: tuple[str, ...] = ("findings", "segments", "pillars", "ctas", "channels")
+
+
+def with_element_ids(body: Mapping[str, Any]) -> dict[str, Any]:
+    """`body`, with a server-assigned, stable `id` stamped onto every
+    selectable element it carries (issue #145).
+
+    Idempotent: an element that already carries a truthy `id` keeps it, so
+    calling this twice — or on a body that already went through it — never
+    reassigns anything. Every other key in `body`, and every other key in
+    each element dict, passes through unchanged; this only ever adds `id`.
+    """
+    stamped = dict(body)
+    for key in ELEMENT_LIST_KEYS:
+        items = stamped.get(key)
+        if not isinstance(items, list):
+            continue
+        stamped[key] = [
+            {**item, "id": item.get("id") or uuid.uuid4().hex} if isinstance(item, dict) else item
+            for item in items
+        ]
+    return stamped
+
+
+def known_element_ids(body: Mapping[str, Any]) -> set[str]:
+    """Every element `id` present in `body` — what an approval route's
+    requested `element_ids` is validated against (issue #145), so a stale
+    page selecting a since-regenerated element is rejected rather than
+    silently approving nothing."""
+    ids: set[str] = set()
+    for key in ELEMENT_LIST_KEYS:
+        items = body.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            element_id = item.get("id") if isinstance(item, dict) else None
+            if isinstance(element_id, str) and element_id:
+                ids.add(element_id)
+    return ids
+
+
+def selected_body(body: Mapping[str, Any], element_ids: Collection[str] | None) -> dict[str, Any]:
+    """`body`, narrowed to only the elements named in `element_ids` — the
+    downstream-facing read of an artefact's approval (issue #145).
+
+    `element_ids=None` means "everything was approved"
+    (`marketing_artefact.approved_selection` is `NULL`) — the
+    backwards-compatible reading, and the one every artefact approved before
+    this change has, since nothing on this deployment has ever written
+    anything else. `body` is returned unfiltered in that case: byte-for-byte
+    what every downstream stage already did.
+
+    A non-`None` `element_ids` filters every known list of selectable
+    elements (:data:`ELEMENT_LIST_KEYS`) down to the items whose `id` is in
+    it. An item with no `id` at all — a legacy element, from a body persisted
+    before this change and never re-approved since — cannot have been named
+    in the selection, so it is dropped rather than kept.
+    """
+    if element_ids is None:
+        return dict(body)
+    wanted = set(element_ids)
+    narrowed = dict(body)
+    for key in ELEMENT_LIST_KEYS:
+        items = narrowed.get(key)
+        if not isinstance(items, list):
+            continue
+        narrowed[key] = [
+            item for item in items if isinstance(item, dict) and item.get("id") in wanted
+        ]
+    return narrowed
+
+
+def source_urls_from_body(body: Mapping[str, Any]) -> list[str]:
+    """Every citation URL the elements actually present in `body` carry,
+    first-seen order, deduplicated (issue #145) — the closed source set the
+    NEXT stage down may cite from, recomputed fresh from whatever survived a
+    selection rather than read off the parent's unfiltered `citations`
+    column.
+
+    **This is what makes provenance narrow WITH a selection rather than
+    independently of it.** Called on a body already passed through
+    :func:`selected_body`, a URL that was only ever cited by a dropped
+    element is not in the result — but a URL a *surviving* element also
+    cites still is, because this is a fresh union over what `body` actually
+    contains, never a subtraction of the dropped element's own sources from
+    the parent's full citation set. Subtracting would be wrong the moment two
+    elements cite the same source: dropping one must not revoke a citation a
+    kept element still legitimately relies on.
+    """
+    urls: list[str] = []
+    for key in ELEMENT_LIST_KEYS:
+        items = body.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for source in item.get("sources") or []:
+                url = source.get("url") if isinstance(source, dict) else None
+                if isinstance(url, str) and url and url not in urls:
+                    urls.append(url)
+    return urls
 
 
 # ── The agent-run port ────────────────────────────────────────────────────────
