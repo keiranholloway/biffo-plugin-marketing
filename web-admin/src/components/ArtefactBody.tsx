@@ -8,6 +8,7 @@ import type {
   ResearchSynthesisBody,
   Source,
 } from '../lib/api'
+import type { ElementSelection } from '../lib/elementSelection'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import { ChannelName } from './ChannelName'
 
@@ -128,12 +129,41 @@ function CitationMarkers({
 
 interface FindingItem {
   key: string
+  /** Server-assigned (issue #145) — `undefined` for an artefact body from
+   * before #150, which this item then renders exactly as it always did:
+   * no checkbox, because there is nothing stable to select it by. */
+  id?: string
+  /** A plain-text identifier for this item, used only for the checkbox's
+   * accessible name (`aria-label`) — never rendered, so it does not need to
+   * match `heading`'s exact wording, only to say which item this is. */
+  label: string
   /** The item's own heading, as a full element — callers vary the tag
    * (`<h4>`/`<h5>`/`<p className="pillar">`) and content (plain text, or
    * text plus a motion badge), so this is a rendered node, not a string. */
   heading: ReactNode
   body: ReactNode
   sources: Source[]
+}
+
+/** One element's carry-forward checkbox (issue #145) — rendered only when
+ * both the item has a server-assigned `id` and the caller actually supplied
+ * `selection` (every existing `ArtefactBody` test omits it, and renders
+ * exactly as before #145: no `selection` prop, no checkbox, unchanged
+ * markup). A real `<input type="checkbox">` with its own accessible name,
+ * not a styled `<div>`, so it is reachable and operable the same way as
+ * every other control on the page (#98's design pass: real keyboard access,
+ * a visible focus-visible ring). */
+function ElementCheckbox({ id, label, selection }: { id: string; label: string; selection: ElementSelection }) {
+  return (
+    <label className="element-select">
+      <input
+        type="checkbox"
+        checked={selection.isSelected(id)}
+        onChange={() => selection.toggle(id)}
+        aria-label={`Carry "${label}" forward when this stage is approved`}
+      />
+    </label>
+  )
 }
 
 /** One list of cited items — a research finding, a positioning segment,
@@ -149,15 +179,26 @@ interface FindingItem {
 function FindingGroup({
   items,
   renderSources,
+  selection,
 }: {
   items: FindingItem[]
   renderSources: (sources: Source[]) => ReactNode
+  /** Omitted entirely by every render site that has no selection to offer
+   * (a `pending`/`approved`/`rejected` artefact — `Pipeline.tsx` only ever
+   * builds one for a `proposed` stage) and by every existing test, which is
+   * exactly the pre-#145 rendering this preserves byte for byte. */
+  selection?: ElementSelection
 }) {
   return (
     <>
       {items.map((item) => (
         <div className="finding" key={item.key}>
-          {item.heading}
+          <div className="finding-head">
+            {selection !== undefined && item.id !== undefined && (
+              <ElementCheckbox id={item.id} label={item.label} selection={selection} />
+            )}
+            {item.heading}
+          </div>
           {item.body}
           {renderSources(item.sources)}
         </div>
@@ -183,7 +224,15 @@ function summaryParagraphs(summary: string): string[] {
     .filter((p) => p !== '')
 }
 
-export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
+export function ResearchArtefact({
+  body,
+  selection,
+}: {
+  body: ResearchSynthesisBody
+  /** See {@link FindingGroup}'s own doc — omitted for every non-`proposed`
+   * render and every existing test. */
+  selection?: ElementSelection
+}) {
   // One canonical, deduplicated citation list for the whole artefact — a URL
   // cited by several findings (common: two findings from different angles
   // independently landing on the same source) used to print its full URL and
@@ -204,11 +253,14 @@ export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
       <FindingGroup
         items={body.findings.map((f, i) => ({
           key: `${f.signal}-${i}`,
+          id: f.id,
+          label: f.signal,
           heading: <h4>{f.signal}</h4>,
           body: <p>{f.why_it_matters}</p>,
           sources: f.sources,
         }))}
         renderSources={(sources) => <CitationMarkers sources={sources} indexByUrl={indexByUrl} />}
+        selection={selection}
       />
       <h4>Sources cited</h4>
       <SourceList sources={allSources} />
@@ -216,40 +268,59 @@ export function ResearchArtefact({ body }: { body: ResearchSynthesisBody }) {
   )
 }
 
-export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
+export function PositioningArtefact({
+  body,
+  selection,
+}: {
+  body: PositioningBodyT
+  /** See {@link FindingGroup}'s own doc. One selection covers all three
+   * lists — segments, pillars and CTAs share one artefact and one approval,
+   * so a single set of ids is exactly what `pipeline.ELEMENT_LIST_KEYS`
+   * already treats them as. */
+  selection?: ElementSelection
+}) {
   return (
     <div className="artefact-body">
       <h4>Segments</h4>
       <FindingGroup
         items={body.segments.map((s, i) => ({
           key: `${s.name}-${i}`,
+          id: s.id,
+          label: s.name,
           heading: <h5>{s.name}</h5>,
           body: <p>{s.description}</p>,
           sources: s.sources,
         }))}
         renderSources={(sources) => <SourceRefs sources={sources} />}
+        selection={selection}
       />
 
       <h4>Message pillars</h4>
       <FindingGroup
         items={body.pillars.map((p, i) => ({
           key: `${p.pillar}-${i}`,
+          id: p.id,
+          label: p.pillar,
           heading: <p className="pillar">{p.pillar}</p>,
           body: <p>{p.rationale}</p>,
           sources: p.sources,
         }))}
         renderSources={(sources) => <SourceRefs sources={sources} />}
+        selection={selection}
       />
 
       <h4>Calls to action</h4>
       <FindingGroup
         items={body.ctas.map((c, i) => ({
           key: `${c.text}-${i}`,
+          id: c.id,
+          label: c.text,
           heading: <p className="pillar">{c.text}</p>,
           body: <p>{c.rationale}</p>,
           sources: c.sources,
         }))}
         renderSources={(sources) => <SourceRefs sources={sources} />}
+        selection={selection}
       />
     </div>
   )
@@ -258,9 +329,12 @@ export function PositioningArtefact({ body }: { body: PositioningBodyT }) {
 export function ChannelPlanArtefact({
   body,
   channelLookup,
+  selection,
 }: {
   body: ChannelPlanBodyT
   channelLookup: ChannelLookup
+  /** See {@link FindingGroup}'s own doc. */
+  selection?: ElementSelection
 }) {
   const byRank = [...body.channels].sort((a, b) => a.rank - b.rank)
   return (
@@ -268,6 +342,8 @@ export function ChannelPlanArtefact({
       <FindingGroup
         items={byRank.map((c, i) => ({
           key: `${c.channel_key ?? c.suggested_label ?? 'proposal'}-${i}`,
+          id: c.id,
+          label: c.channel_key ?? c.suggested_label ?? 'this channel',
           heading: (
             <h4>
               #{c.rank}{' '}
@@ -279,6 +355,7 @@ export function ChannelPlanArtefact({
           sources: c.sources,
         }))}
         renderSources={(sources) => <SourceRefs sources={sources} />}
+        selection={selection}
       />
     </div>
   )
@@ -309,12 +386,23 @@ function OverBudget({ overages, field }: { overages: LengthOverage[] | undefined
   )
 }
 
-export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; channelLookup: ChannelLookup }) {
+export function CopyArtefact({
+  body,
+  channelLookup,
+  selection,
+}: {
+  body: CopySetBody
+  channelLookup: ChannelLookup
+  /** See {@link FindingGroup}'s own doc. */
+  selection?: ElementSelection
+}) {
   return (
     <div className="artefact-body">
       <FindingGroup
         items={body.channels.map((c, i) => ({
           key: `${c.channel_key}-${i}`,
+          id: c.id,
+          label: `${c.channel_key} — ${c.headline}`,
           heading: (
             <h4>
               <ChannelName channelKey={c.channel_key} suggestedLabel={null} lookup={channelLookup} />{' '}
@@ -337,6 +425,7 @@ export function CopyArtefact({ body, channelLookup }: { body: CopySetBody; chann
           sources: c.sources,
         }))}
         renderSources={(sources) => <SourceRefs sources={sources} />}
+        selection={selection}
       />
     </div>
   )

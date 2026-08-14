@@ -670,6 +670,59 @@ details.mint-toggle[open] > .mint {
   margin-top: 0.75rem;
 }
 
+/* ── Partial approval (issue #145) ────────────────────────────────────────
+ *
+ * `.selection-summary` sits above the Approve/Reject row, only while at
+ * least one element is unchecked — the drop-consequence preview the issue
+ * asks for ("show what will be dropped before they commit"), not a second
+ * confirmation step: it is on screen for as long as the deselection is, so
+ * approving is still one click once it has been read.
+ */
+
+.stage-actions-group {
+  margin-top: 0.75rem;
+}
+
+.stage-actions-group .stage-actions {
+  margin-top: 0.5rem;
+}
+
+.selection-summary {
+  padding: 0.6rem 0.75rem;
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+}
+
+.selection-summary .hint {
+  margin: 0;
+  color: var(--warning-text);
+}
+
+.dropped-elements {
+  margin: 0.4rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.8rem;
+  color: var(--warning-text);
+}
+
+.dropped-elements li {
+  margin-bottom: 0.15rem;
+}
+
+/* The error message and its optional "Reload" action (a stale-selection 422,
+   issue #145) sit on one row so Reload reads as attached to the message it
+   answers, not as an unrelated extra control. */
+.error-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+}
+
+.error-panel .error {
+  margin: 0;
+}
+
 /* ── Artefact bodies ───────────────────────────────────────────────────────
  *
  * Constrained to a readable measure regardless of how wide the card around
@@ -697,6 +750,51 @@ details.mint-toggle[open] > .mint {
 .artefact-body .finding {
   padding: 0.5rem 0;
   border-top: 1px solid var(--border);
+}
+
+/* One element's carry-forward checkbox (issue #145), beside its own heading
+   rather than above or below it — the operator is deciding about THIS
+   heading, and the checkbox needs to read as attached to it. Only rendered
+   at all when the artefact is `proposed` and the element has a
+   server-assigned id (`ArtefactBody.tsx`'s `FindingGroup`), so `.finding` on
+   every other status still renders with `.finding-head` holding just the
+   heading — no layout shift when the controls disappear. */
+.artefact-body .finding-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.artefact-body .finding-head h4,
+.artefact-body .finding-head h5,
+.artefact-body .finding-head .pillar,
+.artefact-body .finding-head .headline {
+  margin-top: 0;
+}
+
+.element-select {
+  display: inline-flex;
+  align-items: center;
+  /* Nudges the checkbox onto the heading's own cap-height rather than its
+     line-box top, so it does not read as floating above the text. */
+  margin-top: 0.2rem;
+  cursor: pointer;
+}
+
+.element-select input[type='checkbox'] {
+  /* Overrides the generic `input { width: 100%; margin-bottom: 1rem }`
+     rule above — correct for a text field, not for an inline checkbox. */
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.element-select input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus-ring) 25%, transparent);
+  border-radius: var(--radius-sm);
 }
 
 /* The research summary is "reconciled into a few paragraphs"
