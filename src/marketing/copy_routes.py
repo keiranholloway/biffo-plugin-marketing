@@ -120,10 +120,23 @@ async def start_copy_route(
     # silently producing copy with no channel to reference, or crashing on a
     # missing key, this campaign must have channel planning re-run before
     # copy can be generated for it.
+    # Asked of the plan as GENERATED, not as narrowed (issue #152). Staleness
+    # means "this plan predates the taxonomy" — a fact about the artefact the
+    # agent produced, which an operator's selection cannot change. Asking it of
+    # the narrowed body told an operator who legitimately kept only a
+    # `suggested_label`-only proposal that their current plan was stale and had
+    # to be re-run, with no way to generate copy for the entry they approved.
     try:
-        channel_plan_channels = pipeline.channel_plan_channel_map(channel_plan_body)
+        pipeline.channel_plan_channel_map(
+            admin_app._parse_artefact_body(approved_channel_plan.get("body"))
+        )
     except pipeline.StaleChannelPlanError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    # The mapping itself comes from the operator's approved subset, and may
+    # legitimately be empty — that is what keeping only an outside-taxonomy
+    # proposal means, and it is not a stale plan.
+    channel_plan_channels = pipeline.channel_key_motions(channel_plan_body)
 
     # The closed set of URLs this run is being shown (issue #22), recomputed
     # from each approved SUBSET rather than read off either parent's

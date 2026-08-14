@@ -1024,3 +1024,51 @@ def test_require_channel_keyed_copy_raises_on_a_pre_migration_copy_artefact() ->
         require_channel_keyed_copy(channels)
 
     require_channel_keyed_copy([])  # must not raise on a genuinely empty list
+
+
+# ── issue #152: staleness is about the plan as generated, not as narrowed ────
+
+
+def test_channel_key_motions_never_calls_a_narrowed_plan_stale() -> None:
+    """The #152 defect, at the unit level.
+
+    A plan narrowed (#145) to only a `suggested_label`-only proposal has the
+    same shape a pre-taxonomy plan has — entries, none carrying a
+    `channel_key` — so `channel_plan_channel_map` called it stale and told the
+    operator to re-run a plan that was current and valid, with no route to
+    copy for the entry they had actually approved.
+
+    `channel_key_motions` answers only "what are the keyed channels", with no
+    opinion about staleness, so it returns empty rather than raising.
+    `test_channel_plan_channel_map_raises_on_a_pre_migration_plan` above still
+    covers the genuine legacy case, which must keep raising.
+    """
+    from marketing.pipeline import channel_key_motions
+
+    narrowed = {
+        "channels": [
+            {
+                "id": "e1",
+                "channel_key": None,
+                "suggested_label": "Review platforms",
+                "motion": "organic",
+            }
+        ]
+    }
+
+    assert channel_key_motions(narrowed) == {}
+
+
+def test_channel_key_motions_and_the_map_agree_on_a_healthy_plan() -> None:
+    """Guards the split itself: two functions now derive the same mapping, and
+    nothing else would notice if they drifted apart."""
+    from marketing.pipeline import channel_key_motions, channel_plan_channel_map
+
+    plan = {
+        "channels": [
+            {"id": "a", "channel_key": "search_organic", "motion": "organic"},
+            {"id": "b", "channel_key": "linkedin_paid", "motion": "paid"},
+        ]
+    }
+
+    assert channel_key_motions(plan) == channel_plan_channel_map(plan)
