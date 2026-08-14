@@ -135,10 +135,20 @@ class _FakeGateway:
         return self._runs.get(run_id)
 
     def complete(
-        self, run_id: str, *, status: str = "completed", messages: list | None = None
+        self,
+        run_id: str,
+        *,
+        status: str = "completed",
+        messages: list | None = None,
+        annotations: list[dict[str, Any]] | None = None,
     ) -> None:
+        """`annotations` defaults to `None` — "no record of what this run
+        retrieved" — which is what every run in this module was until issue
+        #65 gave the channel-plan stage its own retrieval. Tests that care
+        about the evidence guards pass it explicitly; the rest keep exercising
+        the routes rather than the guards, which is what they are for."""
         self._runs[run_id] = pipeline.AgentRunView(
-            id=run_id, status=status, messages=messages or []
+            id=run_id, status=status, messages=messages or [], annotations=annotations
         )
 
     def fire_chain_run(self, *, chain_id: str, agent_name: str, messages: list) -> None:
@@ -658,7 +668,17 @@ def test_start_channel_plan_stashes_the_approved_positioning_citation_urls(ctx) 
 def test_get_channel_plan_artefact_502s_a_fabricated_citation_and_leaves_it_pending(ctx) -> None:
     """The issue's case one stage down: a channel recommendation citing a URL
     the approved positioning never contained is the most confident-sounding
-    fabrication in the pipeline."""
+    fabrication in the pipeline.
+
+    `annotations=[]` since #65, and that is the point of the case rather than
+    test bookkeeping: this stage retrieves now, so "a URL the positioning never
+    contained" is only a fabrication once retrieval is *known* not to have
+    returned it. An empty list is the state that establishes that — retrieval
+    ran and came back with nothing — so the parent's citations are again the
+    entire legitimate set, exactly as before this stage could search. The
+    `None` (no record at all) case is a different answer and is proved in
+    `tests/test_marketing_channel_plan_grounding.py`.
+    """
     client, core, gateway = ctx
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
@@ -666,12 +686,59 @@ def test_get_channel_plan_artefact_502s_a_fabricated_citation_and_leaves_it_pend
     gateway.complete(
         started["agent_run_id"],
         messages=_channel_plan_call(url="https://marketing-statistics.example/benchmarks"),
+        annotations=[],
     )
 
     resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 502
     assert "marketing-statistics.example" in resp.json()["detail"]
+    assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
+
+
+def test_channel_plan_grounded_in_its_own_retrieval_is_proposed_and_cites_it(ctx) -> None:
+    """Issue #65 end to end, through the real route: the stage retrieved a
+    conversion source the approved positioning never contained, cited it, and
+    the artefact is proposed with that URL in `citations` — which is what makes
+    the evidence reviewable by the operator, and what the copy stage below may
+    then legitimately draw on."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    retrieved = "https://benchmarks.example/paid-search-cpa-by-sector"
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_channel_plan_call(url=retrieved),
+        annotations=[{"type": "url_citation", "url": retrieved, "title": "CPA by sector"}],
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    assert resp.status_code == 200
+    assert core.artefacts[started["id"]]["status"] == "proposed"
+    assert retrieved in core.artefacts[started["id"]]["citations"]
+
+
+def test_channel_plan_that_only_re_cites_positioning_is_refused_by_the_route(ctx) -> None:
+    """The defect issue #65 was filed about, at the seam an operator meets it:
+    the run searched (`annotations` says so) and then justified both channels
+    with the audience research it was handed. Every count-based check passes,
+    so before #65 this was proposed as evidenced."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_channel_plan_call(),  # the approved positioning's own URL
+        annotations=[{"type": "url_citation", "url": "https://benchmarks.example/cpa"}],
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    assert resp.status_code == 502
+    assert "instagram_organic" in resp.json()["detail"]
     assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
 
 

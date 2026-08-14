@@ -729,7 +729,32 @@ You are the campaign studio's channel strategist. You are given one
 calls to action, each carrying the sources that support it — a
 `campaign_motion` (`organic`, `paid` or `both`), and one **channel
 taxonomy**: a list of `{{channel_key, label, motion, category}}` entries.
-Nothing else. You do not have web access and must not claim to.
+
+**You also have live web search, and you are expected to use it.** The
+positioning you were given answers a different question from yours. It was
+researched to establish who this audience is and what competitors say to
+them; you are deciding where this audience actually converts. Its sources
+cannot answer that, and a channel plan justified entirely by them is the
+failure this stage was rebuilt to end.
+
+## Search for conversion evidence, not for description
+
+Search before you decide, and search for the numbers a media planner would
+ask for:
+
+- Where this audience demonstrably **converts** — not where it merely has
+  attention. Intent expressed beats attention observed.
+- Reported **conversion rates, cost per acquisition, cost per click or lead
+  cost** for this kind of buyer, on these channels, in this market.
+- What **comparable campaigns** report — case studies, published results,
+  benchmark reports for this sector and geography.
+- Channel **economics and saturation** for this segment: what it costs to be
+  seen there now, and what that buys.
+
+Prefer the specific page carrying the number — a benchmark report, a results
+write-up, a case study — over a vendor home page or an agency's "top 10
+channels" listicle. A retrieved page of generic channel wisdom is still
+generic channel wisdom; it has simply been fetched.
 
 **The taxonomy you are given is not the whole taxonomy.** It is the set of
 channels the operator selected for this campaign, already narrowed to the
@@ -767,25 +792,45 @@ around checking the list first, and never to re-propose a channel the
 operator has already left out for a reason you cannot see.
 
 Rank the channels within each motion (1 = highest priority) and give each a
-rationale an operator can disagree with: name exactly which segment, pillar or
-CTA the recommendation follows from. A channel recommendation with no evidence
-behind it is the most confident-sounding fabrication in this pipeline —
+rationale an operator can disagree with: name the conversion evidence you
+found — the figure, the comparable campaign, the observed intent — and name
+which segment, pillar or CTA it serves. Rank on what the evidence says
+converts, not on what is conventionally listed first. A channel recommendation
+with no evidence behind it is the most confident-sounding fabrication in this
+pipeline —
 "run paid social" or "post on LinkedIn" reads as correct whether or not
 anyone researched it, so generic channel wisdom is not an acceptable
 rationale.
 
-Every recommendation must carry `sources`: copy the `url` of each relevant
-`Source` from the positioning you were given, exactly as written. This is
-checked mechanically against that positioning, exactly as `channel_key` is
-checked against the taxonomy: a `url` that does not appear in it is rejected
-and the whole plan fails with it. For `note`,
-do not paste the positioning item's note verbatim — your `rationale` already
-says why this channel follows from the evidence, so repeat only what a
-`note` genuinely adds beyond that, or leave it empty. Never invent a source,
-and never recommend a channel that cites nothing: if the positioning does not
-support recommending a channel, do not recommend it.
+## Sources: two legitimate origins, and one of them is required
 
-If the positioning is too thin to support any recommendation in a motion,
+Every recommendation must carry `sources`, and a `url` may come from exactly
+two places:
+
+1. **Your own search results** — copied exactly as the result gives it,
+   character for character. Do not tidy a URL, do not shorten it, and do not
+   cite a link you saw quoted *inside* a page rather than in your results.
+2. **The positioning you were given** — the `url` of a `Source` on a segment,
+   pillar or CTA, again exactly as written.
+
+Both are checked mechanically, against the runtime's own record of what your
+search actually returned and against the positioning you were given. A `url`
+in neither is rejected and the whole plan fails with it, so a plausible-looking
+source you did not read is worse than a recommendation you leave out.
+
+**Every recommendation needs at least one source from your own search
+results.** This is checked per recommendation, not across the plan: a channel
+justified only by positioning's sources is justified by evidence about a
+different question, and is rejected along with the whole plan. If you searched
+and found nothing about a channel's performance for this audience, do not
+recommend that channel — say nothing rather than reach for the positioning to
+dress it up.
+
+For `note`, do not paste the positioning item's note verbatim — your
+`rationale` already says why this channel follows from the evidence, so repeat
+only what a `note` genuinely adds beyond that, or leave it empty.
+
+If your search turns up nothing that supports any recommendation in a motion,
 return fewer channels (or none) for that motion rather than inventing content
 to fill it — a channel plan that recommends nothing beats one that recommends
 plausibly.
@@ -993,6 +1038,92 @@ def research_search_query(*, agent_name: str, brief: Mapping[str, Any] | None) -
     return f"{topic} — {framing}" if topic else framing
 
 
+#: What the channel-plan stage's retrieval is aimed at (issue #65).
+#:
+#: The counterpart to ``RESEARCH_SEARCH_FRAMING``, and deliberately a
+#: *different question* from either research angle: research asks who this
+#: audience is and what competitors say to them, this asks where that audience
+#: converts. Both halves of that distinction are load-bearing — "conversion,
+#: not description" is the phrase issue #65 uses — so the framing names the
+#: figures a media planner would ask for rather than saying "search for
+#: channels", which retrieves the same listicles for every campaign.
+CHANNEL_PLAN_SEARCH_FRAMING = (
+    "where this audience actually converts — reported conversion rates, cost per "
+    "acquisition, lead cost and results from comparable campaigns on these channels "
+    "in this market; the specific benchmark, case study or published results page "
+    "carrying the number, not a vendor home page or a listicle"
+)
+
+#: How many of the positioning's segment names, and how many channel labels,
+#: ride in the searched query. Bounded for the same reason
+#: ``SEARCH_QUERY_BRIEF_CHARS`` is: the whole positioning body still travels in
+#: the payload for the *model* to read, and a query assembled from nine
+#: segments and thirty channels is a worse query than one built from the few
+#: that lead.
+CHANNEL_PLAN_QUERY_SEGMENTS = 3
+CHANNEL_PLAN_QUERY_CHANNELS = 6
+
+
+def _named_items(body: Mapping[str, Any] | None, key: str, field: str, limit: int) -> list[str]:
+    """Up to ``limit`` non-empty ``field`` values from ``body[key]``.
+
+    Tolerant by construction, exactly like ``_brief_topic``: the positioning
+    body is JSON this plugin persisted but a model wrote, and a malformed or
+    partially-approved one must degrade to a thinner query rather than fail
+    the run before it starts.
+    """
+    if not isinstance(body, Mapping):
+        return []
+    items = body.get(key)
+    if not isinstance(items, list):
+        return []
+    found: list[str] = []
+    for item in items:
+        value = item.get(field) if isinstance(item, Mapping) else None
+        if isinstance(value, str) and value.strip() and value not in found:
+            found.append(" ".join(value.split()))
+        if len(found) == limit:
+            break
+    return found
+
+
+def channel_plan_search_query(
+    *,
+    positioning_body: Mapping[str, Any] | None,
+    taxonomy: list[dict[str, Any]],
+    campaign_motion: str,
+) -> str:
+    """The text the channel-plan run's retrieval is derived from (issue #65).
+
+    Sent as the FIRST key of the run's ``input_payload`` (see
+    ``marketing.pipeline.start_channel_plan``), for exactly the reason
+    ``research_search_query`` is: an ``:online`` run's provider searches
+    *before* the model is invoked, from the payload, so the payload — not the
+    instructions — is the only place this stage can influence what comes back.
+    Issue #101 measured what happens when that is left alone: two agents sent
+    identical payloads received 4 of 5 identical pages.
+
+    A channel-plan payload that led with the positioning body would retrieve
+    the positioning question a second time, which is precisely the defect
+    #65 reports one layer up. So the query is assembled from the three things
+    that make this campaign's channel question specific — its audience, the
+    channels actually on the table, and the motion it runs — and closed with
+    :data:`CHANNEL_PLAN_SEARCH_FRAMING`.
+    """
+    audience = _named_items(positioning_body, "segments", "name", CHANNEL_PLAN_QUERY_SEGMENTS)
+    labels = [
+        " ".join(str(entry["label"]).split())
+        for entry in taxonomy
+        if isinstance(entry, Mapping) and entry.get("label")
+    ][:CHANNEL_PLAN_QUERY_CHANNELS]
+
+    who = ", ".join(audience) if audience else "this audience"
+    topic = f"{campaign_motion} channels for {who}"
+    if labels:
+        topic += f" — {', '.join(labels)}"
+    return f"{topic} — {CHANNEL_PLAN_SEARCH_FRAMING}"
+
+
 #: Every stage runs on the Claude 5 family (issue #62). The tier is chosen per
 #: stage rather than uniformly: research is the fan-out, reading-heavy leg and
 #: runs on the Sonnet tier; the four stages that turn evidence into artefacts an
@@ -1045,11 +1176,39 @@ def research_search_query(*, agent_name: str, brief: Mapping[str, Any] | None) -
 #: training and read ``annotations``. Do not move this constant on the strength
 #: of a model being newer — that is exactly what #108 did.
 DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
-#: Neither synthesis, positioning nor channel planning searches — all three
-#: reason over what they are given — so none of them needs `:online`.
+#: Neither synthesis nor positioning searches — both reason over what they are
+#: given — so neither needs `:online`.
 DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-5"
 DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-5"
-DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-5"
+#: Channel planning **does** search (issue #65), so it carries `:online` — and
+#: therefore lands on the same route research does, for the same measured
+#: reason rather than a stylistic one.
+#:
+#: **This is a deliberate tier downgrade, and the trade is worth stating.**
+#: Every artefact-producing stage runs on Opus above, because a
+#: confident-sounding fabrication is their failure mode. Channel planning is
+#: the stage where that is *least* visible — "run paid social" reads as
+#: correct whether or not anyone researched it — so the Opus tier was doing
+#: real work here. It is given up because the alternative is worse: the
+#: question this stage has to answer ("where does this audience convert") is
+#: not answerable from weights at all, and #136's table says plainly that a
+#: Claude 5 route with `:online` attached returns **zero** annotations. A
+#: better model that cannot retrieve produces a more persuasive version of
+#: exactly the defect #65 was filed about.
+#:
+#: What replaces the tier is mechanical rather than aspirational, which is the
+#: only kind of replacement worth having: provenance is now checked against
+#: the union of the approved parent's citations and the run's OWN
+#: `annotations` (so an invented URL is still refused), and every single
+#: recommendation must cite at least one URL the runtime recorded this run
+#: retrieving (`pipeline.UngroundedRecommendationError`). A plan resting on
+#: positioning's carried-over sources fails whatever tier produced it.
+#:
+#: Revisit exactly as `DEFAULT_RESEARCH_MODEL` says to: run the stage against
+#: a fact that post-dates training, read `annotations`, and move it only on
+#: that evidence. Not because a model is newer — that is what #108 did, and it
+#: cost a day.
+DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-sonnet-4:online"
 #: Copy reasons over what it is given, same as positioning and channel
 #: planning — no `:online` needed.
 DEFAULT_COPY_MODEL = "anthropic/claude-opus-5"
@@ -1058,11 +1217,26 @@ DEFAULT_COPY_MODEL = "anthropic/claude-opus-5"
 # and still answer. Every turn has an invoice attached and this plugin fans out
 # two of these per research run, so raising it is a cost decision.
 RESEARCH_MAX_TURNS = 8
-# Neither synthesis, positioning nor channel planning searches; one turn to
-# answer, plus headroom for a retried tool call.
+# Neither synthesis nor positioning searches; one turn to answer, plus
+# headroom for a retried tool call.
 SYNTHESIS_MAX_TURNS = 3
 POSITIONING_MAX_TURNS = 3
-CHANNEL_PLAN_MAX_TURNS = 3
+# Channel planning searches (issue #65), so it needs research's budget rather
+# than a reasoning stage's: at 3 turns it could search once and then had to
+# answer, which is not a stage that researches anything. Matched to
+# `RESEARCH_MAX_TURNS` deliberately — same retrieval shape, same provider,
+# same wall clock — so the two move together rather than drifting apart.
+#
+# **This makes the stage materially more expensive**, and that is the accepted
+# trade: `:online` bills per result, every turn can carry a retrieval, and the
+# stage now runs several. Issue #65 states the position explicitly ("I don't
+# mind making this an expensive/time consuming query. This is key to
+# success"), because channel choice is what every downstream artefact is
+# generated per. What it does NOT buy is more wall clock: every agent is
+# already at `AGENT_TIMEOUT_SECONDS` = the runtime ceiling, so these turns
+# have to fit in the same 240s research's do, and raising that is an instance
+# change (see `RUNTIME_TIMEOUT_CEILING_SECONDS`), not a plugin one.
+CHANNEL_PLAN_MAX_TURNS = RESEARCH_MAX_TURNS
 COPY_MAX_TURNS = 3
 
 #: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_SECONDS` — the
@@ -1182,8 +1356,16 @@ def positioning_definition(*, model: str, instructions: str) -> dict[str, Any]:
 
 
 def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
-    """The channel-plan agent's run definition — no tools; it reasons over
-    the approved positioning artefact it is given in ``input_payload``."""
+    """The channel-plan agent's run definition.
+
+    ``tools`` is empty and that is **not** because this agent does not search —
+    since issue #65 it does. It reaches the web the same way research does,
+    through OpenRouter's ``:online`` model suffix rather than a registry tool,
+    for the reason ``research_definition`` records: a registered-but-
+    unconfigured ``web_search`` is silently dropped rather than failed, so an
+    agent that declared it would return no findings with no error anywhere —
+    which is the exact shape of failure this stage is least able to survive.
+    """
     return {
         "instructions": instructions,
         "model": model,

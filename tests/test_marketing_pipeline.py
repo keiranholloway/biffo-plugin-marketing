@@ -447,7 +447,14 @@ def test_positioning_is_refused_even_when_it_also_cites_a_real_url() -> None:
 def test_channel_plan_citing_a_url_the_approved_positioning_never_contained_is_refused() -> None:
     """The same check one stage down, which is why this issue was filed during
     M4: channel advice reads as generic wisdom whether or not anyone
-    researched it, so an invented citation is least visible here."""
+    researched it, so an invented citation is least visible here.
+
+    `annotations=[]` since issue #65 gave this stage its own retrieval: the
+    parent's citations are the whole legitimate set only when retrieval is
+    known to have returned nothing. The widened set, and what each of the
+    three `annotations` states means for it, is proved in
+    `tests/test_marketing_channel_plan_grounding.py`.
+    """
     messages = _tool_call("submit_channel_plan", _channel_plan_args(_FABRICATED))
 
     with pytest.raises(UncitedSourceError) as excinfo:
@@ -455,12 +462,20 @@ def test_channel_plan_citing_a_url_the_approved_positioning_never_contained_is_r
             messages,
             taxonomy={"instagram_organic": "organic"},
             allowed_source_urls=_APPROVED,
+            annotations=[],
         )
 
     assert "approved positioning" in str(excinfo.value)
 
 
-def test_channel_plan_citing_only_approved_positioning_urls_succeeds() -> None:
+def test_channel_plan_citing_only_approved_positioning_urls_survives_provenance() -> None:
+    """Provenance-wise this is fine — every URL came from the parent. It is
+    refused one check later, by the grounding guard #65 added, because a plan
+    that cites only the positioning is answering the audience question rather
+    than the channel one; that is proved in
+    `tests/test_marketing_channel_plan_grounding.py`. Here the run has no
+    retrieval record at all, so neither evidence check can be adjudicated and
+    the artefact stands, exactly as every pre-#65 artefact must continue to."""
     messages = _tool_call("submit_channel_plan", _channel_plan_args(*_APPROVED))
 
     plan = extract_channel_plan(

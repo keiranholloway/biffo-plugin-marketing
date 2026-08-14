@@ -644,6 +644,10 @@ async def _advance_artefact(
         result = await pipeline.advance_channel_plan(
             gateway,
             run_id=_require_run_id(),
+            # Carried purely so this stage's retrieval-breadth line (#65 — the
+            # instrument #101 built for research, now pointed here too) can be
+            # joined to the rest of this campaign's runs.
+            causation_id=artefact.get("causation_id"),
             taxonomy=taxonomy,
             allowed_motions=allowed_motions,
             allowed_source_urls=allowed_source_urls,

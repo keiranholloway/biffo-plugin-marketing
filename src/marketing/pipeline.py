@@ -87,6 +87,7 @@ from .definitions import (
     ResearchSynthesis,
     Source,
     channel_plan_definition,
+    channel_plan_search_query,
     channel_plan_tool_schema,
     copy_definition,
     copy_tool_schema,
@@ -151,6 +152,36 @@ class UncitedSourceError(PipelineError):
     refusal to salvage ``annotations`` into ``sources`` in
     :func:`_no_citations_message`: the honest response to "this attribution is
     not real" is to say so, not to tidy it away.
+    """
+
+
+class UngroundedRecommendationError(PipelineError):
+    """A channel recommendation cited nothing this run itself retrieved
+    (issue #65) — every one of its sources was carried over from the approved
+    positioning it was handed.
+
+    **A different failure from :class:`UncitedSourceError`, and the one that
+    check cannot see.** Provenance asks "could this source have been read";
+    carried-over positioning sources pass that trivially, because they
+    demonstrably were. This asks the question the citation count never did:
+    was the recommendation grounded in evidence gathered for the CHANNEL
+    question, or in evidence gathered to answer a different one.
+
+    That distinction is the whole of issue #65. Research asks who this
+    audience is and what competitors say to them; channel planning asks where
+    that audience converts. A source about a competitor's pricing page can
+    legitimately support "recommend Google Search ads" under a count-based
+    guard, and nothing detects that the evidence is about the wrong question —
+    while channel choice is what every downstream artefact is generated *per*,
+    so a wrong one is not one wrong artefact, it is every artefact after it.
+
+    Raised per recommendation rather than per plan, deliberately: a plan-level
+    check passes the moment one channel is researched, and the rest ride along
+    on it.
+
+    Only askable when the run's own retrieval is **known** — see
+    :func:`extract_channel_plan` for the tri-state, which is the same one
+    ``annotations`` and ``allowed_source_urls`` already carry.
     """
 
 
@@ -598,6 +629,76 @@ def extract_positioning(
     )
 
 
+def annotation_source_urls(annotations: list[dict[str, Any]] | None) -> list[str] | None:
+    """Every URL the runtime recorded this run retrieving, deduplicated in
+    first-seen order — or ``None`` when there is no record to read.
+
+    The tri-state of :attr:`AgentRunView.annotations` is preserved exactly,
+    because collapsing it is the mistake every check in this module is careful
+    not to make: ``None`` is "not known", ``[]`` is "retrieval genuinely
+    returned nothing", and those two lead to opposite decisions in
+    :func:`extract_channel_plan` — skip the check, versus fail the run.
+
+    Reads both annotation shapes via :func:`_annotation_url`, for the same
+    reason the breadth instrument does.
+    """
+    if annotations is None:
+        return None
+    urls: list[str] = []
+    for entry in annotations:
+        url = _annotation_url(entry)
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _require_retrieved_evidence(
+    plan: ChannelPlan, *, retrieved_source_urls: Collection[str]
+) -> None:
+    """Every recommendation must cite at least one URL **this run retrieved**
+    (issue #65), or :class:`UngroundedRecommendationError`.
+
+    See that class for why this is a different question from provenance and
+    why it is asked per recommendation. Two things about the shape:
+
+    - The comparison is on :func:`_url_key`, not the raw string, exactly as
+      provenance is: a model that retypes a retrieved URL with a trailing
+      slash has cited what it retrieved, and failing that would make the guard
+      fire on honest runs — which is how a guard ends up switched off.
+    - ``retrieved_source_urls`` being empty is not a special case here. It
+      falls through to "every recommendation is ungrounded", which is exactly
+      right — a run whose retrieval returned nothing cannot have grounded
+      anything in it — and the message says which of the two happened, since
+      "search found nothing" and "the search results never reached the plan"
+      need different responses from an operator.
+    """
+    allowed = {_url_key(url) for url in retrieved_source_urls}
+    ungrounded = [
+        recommendation.channel_key or recommendation.suggested_label or "(unnamed channel)"
+        for recommendation in plan.channels
+        if not any(_url_key(source.url) in allowed for source in recommendation.sources)
+    ]
+    if not ungrounded:
+        return
+
+    named = ", ".join(ungrounded[:_MAX_REPORTED_UNCITED])
+    if len(ungrounded) > _MAX_REPORTED_UNCITED:
+        named += f" (and {len(ungrounded) - _MAX_REPORTED_UNCITED} more)"
+    cause = (
+        "this run's own search returned nothing, so there is no conversion evidence "
+        "behind any of it"
+        if not allowed
+        else "they rest entirely on sources carried over from the approved positioning, "
+        "which was researched to answer a different question"
+    )
+    raise UngroundedRecommendationError(
+        f"The channel-plan run recommended {len(ungrounded)} channel"
+        f"{'s' if len(ungrounded) != 1 else ''} with no evidence it retrieved itself "
+        f"({named}): {cause}. Channel choice decides where the whole campaign goes, so "
+        "nothing was produced — try running channel planning again."
+    )
+
+
 def extract_channel_plan(
     messages: list[dict[str, Any]],
     *,
@@ -614,10 +715,51 @@ def extract_channel_plan(
     not anyone researched it. ``annotations`` — see
     :func:`extract_research_synthesis`.
 
+    ## What provenance means for a stage that retrieves (issue #65 vs #22/#113)
+
+    Since #65 this stage performs its own live retrieval, which breaks the
+    assumption the provenance check was built on. ``positioning``,
+    ``channel_plan`` and ``copy`` were guarded because their legitimate source
+    set was **closed and already known**: exactly the approved parent's
+    ``citations``. Citing evidence the parent did not contain was, by
+    definition, fabrication. #65's whole purpose is to make this stage cite
+    evidence the parent does not contain, so carrying that rule over unchanged
+    would reject every grounded run — and simply dropping it would switch off
+    the fabrication guard at the stage where fabrication is least visible.
+
+    Neither. **The set stays closed; it stops being the parent alone.** A
+    channel-plan run can legitimately have read exactly two things: the
+    approved positioning it was handed, and whatever its own retrieval
+    returned. The runtime records the second independently of the model, on
+    ``annotations`` — that is the point of the column (#82) — so the union of
+    the two is a set this repo can check against without trusting the model
+    for any of it. A URL in neither was not read by anything, which is the
+    same sentence :class:`UncitedSourceError` always meant.
+
+    The tri-state is preserved and matters more here than anywhere else:
+
+    - ``annotations`` non-empty — allowed set is ``allowed_source_urls`` ∪
+      retrieved.
+    - ``annotations == []`` — retrieval genuinely returned nothing, so the
+      allowed set is the parent's alone, exactly as before #65.
+    - ``annotations is None`` — there is **no record of what this run
+      retrieved**, so no closed set exists to check against and the check is
+      skipped rather than guessed at. Enforcing the parent-only set here would
+      fail a genuinely grounded run whose annotations were not recorded, which
+      is how a guard gets switched off for real; the module already treats
+      "not known" this way for ``allowed_source_urls`` itself.
+
+    Provenance alone is then *necessary and not sufficient*, which is the
+    other half of #65: carried-over positioning sources satisfy it perfectly
+    while answering the wrong question. So each recommendation must also cite
+    at least one URL this run retrieved — :class:`UngroundedRecommendationError`,
+    :func:`_require_retrieved_evidence` — asked only when retrieval is known,
+    for the same reason.
+
     ``allowed_source_urls`` is the approved **positioning** artefact's
     citation URLs (issue #22) — see :func:`extract_positioning` for the full
     reasoning; this is that same check one stage further down, which is where
-    the issue was filed from.
+    the issue was filed from, now widened as described above.
 
     ``taxonomy`` is ``{channel_key: motion}`` for exactly the taxonomy this
     run was shown (#76 increment 2) — stored on the artefact at start time,
@@ -650,21 +792,42 @@ def extract_channel_plan(
     not exist when they were produced — the same distinction
     ``allowed_source_urls=None`` already carries for #22.
     """
+    retrieved = annotation_source_urls(annotations)
+    if retrieved is None:
+        # No record of this run's retrieval: the legitimate set is unknowable,
+        # so neither evidence check can be adjudicated. Said out loud rather
+        # than passed over in silence — a stage that is meant to ground and
+        # cannot be shown to have grounded is exactly what #65 was filed
+        # about, and the failure mode is invisible by construction.
+        widened: Collection[str] | None = None
+        logger.warning(
+            "channel plan evidence checks skipped: the run reported no annotations, so "
+            "there is no record of what it retrieved to check its sources against"
+        )
+    else:
+        widened = [*(allowed_source_urls or []), *retrieved]
+
     plan = _extract_cited_artefact(
         messages,
         annotations=annotations,
-        allowed_source_urls=allowed_source_urls,
-        parent_description="the approved positioning it was given",
+        allowed_source_urls=widened,
+        parent_description=(
+            "the evidence this run actually had — the approved positioning it was "
+            "given, plus what its own search returned —"
+        ),
         tool_name=CHANNEL_PLAN_TOOL_NAME,
         model_cls=ChannelPlan,
         citation_groups=lambda r: [c.sources for c in r.channels],
         malformed_message=f"the channel-plan run produced no {CHANNEL_PLAN_TOOL_NAME} tool call",
         no_citations_message=(
-            "The channel-plan run cited nothing from the approved positioning. Nothing "
-            "was produced — try running channel planning again."
+            "The channel-plan run cited nothing at all — neither its own search results "
+            "nor the approved positioning. Nothing was produced — try running channel "
+            "planning again."
         ),
         retry_hint="channel planning",
     )
+    if retrieved is not None:
+        _require_retrieved_evidence(plan, retrieved_source_urls=retrieved)
     permitted = None if allowed_motions is None else frozenset(allowed_motions)
     for recommendation in plan.channels:
         if recommendation.channel_key is None:
@@ -1185,7 +1348,9 @@ def evidence_profile(views: Collection[AgentRunView | None]) -> EvidenceProfile:
     )
 
 
-def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | None]) -> None:
+def _log_evidence_profile(
+    *, chain_id: str | None, views: Collection[AgentRunView | None], stage: str = "research"
+) -> None:
     """Record this chain's retrieval breadth where an operator investigating a
     thin artefact will find it, without failing the run over it.
 
@@ -1200,12 +1365,26 @@ def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | Non
     while reporting on a failure replaces a diagnosable error with a spurious
     one, so every step here is wrapped. Nothing this function can do is worth
     more than the exception the caller is already carrying.
+
+    ``stage`` names which stage's retrieval is being measured (issue #65).
+    It defaults to ``research`` because that is the stage this instrument was
+    built for and every existing filter is written against — the message
+    prefix and the structured keys are unchanged for it, byte for byte.
+    Channel planning retrieves too now, and "is the channel plan grounded?" is
+    the same question about the same kind of evidence: #101 was settled only
+    because somebody measured research's retrieval by hand and then
+    instrumented it, and asking the new question without the instrument buys
+    the same day of archaeology a second time. One implementation rather than
+    a near-copy, so a fix to the tri-state reasoning below cannot apply to one
+    stage and not the other.
     """
+    label = stage.replace("_", " ")
     try:
         profile = evidence_profile(views)
     except Exception:  # pragma: no cover - defensive; a report must not raise
         logger.warning(
-            "research retrieval breadth: not measured — the profile could not be computed",
+            "%s retrieval breadth: not measured — the profile could not be computed",
+            label,
             exc_info=True,
             extra={"causation_id": chain_id},
         )
@@ -1222,23 +1401,26 @@ def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | Non
         # reason: a filter on this field must not be able to average unknowns
         # in as zeroes.
         logger.info(
-            "research retrieval breadth: not measured — no research run reported "
+            "%s retrieval breadth: not measured — no %s run reported "
             "annotations (%d run view(s) seen)",
+            label,
+            label,
             len(views),
             extra={
                 "causation_id": chain_id,
-                "research_runs_measured": 0,
-                "research_distinct_urls": None,
-                "research_shared_urls": None,
-                "research_deep_pages": None,
-                "research_site_roots": None,
+                f"{stage}_runs_measured": 0,
+                f"{stage}_distinct_urls": None,
+                f"{stage}_shared_urls": None,
+                f"{stage}_deep_pages": None,
+                f"{stage}_site_roots": None,
             },
         )
         return
 
     logger.info(
-        "research retrieval breadth: %d distinct URLs across %d grounded run(s) "
+        "%s retrieval breadth: %d distinct URLs across %d grounded run(s) "
         "(%d shared by more than one, %d deep pages, %d site roots)",
+        label,
         profile.distinct_urls,
         profile.runs_measured,
         profile.shared_urls,
@@ -1246,11 +1428,11 @@ def _log_evidence_profile(*, chain_id: str, views: Collection[AgentRunView | Non
         profile.site_roots,
         extra={
             "causation_id": chain_id,
-            "research_runs_measured": profile.runs_measured,
-            "research_distinct_urls": profile.distinct_urls,
-            "research_shared_urls": profile.shared_urls,
-            "research_deep_pages": profile.deep_pages,
-            "research_site_roots": profile.site_roots,
+            f"{stage}_runs_measured": profile.runs_measured,
+            f"{stage}_distinct_urls": profile.distinct_urls,
+            f"{stage}_shared_urls": profile.shared_urls,
+            f"{stage}_deep_pages": profile.deep_pages,
+            f"{stage}_site_roots": profile.site_roots,
         },
     )
 
@@ -1465,7 +1647,20 @@ async def start_channel_plan(
             instructions=CHANNEL_PLAN_INSTRUCTIONS,
         ),
         output_tool=channel_plan_tool_schema(),
+        # `search_query` FIRST, exactly as `start_research`'s payload is and
+        # for exactly the same reason (issue #101, now #65): this is an
+        # `:online` run, so the provider searches from the payload BEFORE the
+        # model is invoked, and the payload is therefore the only place this
+        # stage can decide what its retrieval is about. Leading with
+        # `positioning` would retrieve the positioning question all over
+        # again — the audience/competitive evidence this stage already has
+        # too much of — instead of the conversion question it exists to ask.
         input_payload={
+            "search_query": channel_plan_search_query(
+                positioning_body=positioning_body,
+                taxonomy=taxonomy,
+                campaign_motion=campaign_motion,
+            ),
             "positioning": positioning_body,
             "channel_taxonomy": taxonomy,
             "campaign_motion": campaign_motion,
@@ -1480,6 +1675,7 @@ async def advance_channel_plan(
     *,
     run_id: str,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    causation_id: str | None = None,
     allowed_motions: Collection[str] | None = None,
     allowed_source_urls: Collection[str] | None = None,
 ) -> ChannelPlan | None:
@@ -1489,10 +1685,29 @@ async def advance_channel_plan(
     what :func:`start_channel_plan` gave this run, and ``allowed_motions``
     the campaign motion it was started under (#67) — see
     :func:`extract_channel_plan` for how they and ``allowed_source_urls`` are
-    used."""
+    used.
+
+    Since #65 this stage retrieves, so its breadth is measured and logged on
+    every terminal path exactly as :func:`advance_research`'s is — including
+    the failed one, which is where the measurement is worth most: "the
+    retrieval was thin" and "the run died" produce the same dead artefact and
+    this line is the only thing that separates them. It is a report, never a
+    gate; it changes nothing this function returns or raises.
+
+    ``causation_id`` is the chain this run belongs to, carried only so the
+    breadth line can be joined to the rest of the campaign's runs. Optional
+    because it is diagnostic: a caller that has not got one still gets the
+    measurement, with the id reading as unknown rather than the measurement
+    being withheld.
+    """
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
+    # Once, here, before either branch: emitted exactly one time per terminal
+    # advance, on the success and failure paths alike, and never while the run
+    # is still in flight (this function is polled, so that would be a stream of
+    # partial snapshots rather than one measurement).
+    _log_evidence_profile(chain_id=causation_id, views=[view], stage="channel_plan")
     if not view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
     return extract_channel_plan(
