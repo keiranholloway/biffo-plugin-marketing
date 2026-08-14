@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from marketing import admin_app, pack_routes, paid_pack_routes
+from marketing import admin_app, pack_routes, paid_pack_routes, spend_routes
 from marketing.definitions import PLACEMENTS
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000ab"
@@ -185,13 +185,29 @@ class _FakeCore:
 
 
 class _FakeCampaignClient:
-    def __init__(self, *, assets: list[dict[str, Any]] | None = None) -> None:
+    """The dual-auth generated-CRUD client. Serves `marketing_asset` rows and
+    — since #8's spend recording landed — `marketing_spend` rows, which the
+    pack totals into its `spend` metric (`spend_routes.recorded_spend`)."""
+
+    def __init__(
+        self,
+        *,
+        assets: list[dict[str, Any]] | None = None,
+        spends: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.assets: list[dict[str, Any]] = list(assets or [])
+        self.spends: list[dict[str, Any]] = list(spends or [])
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         if path == f"{paid_pack_routes._INTERNAL_PREFIX}/assets":
             campaign_id = (params or {}).get("campaign_id")
             return [a for a in self.assets if a.get("campaign_id") == campaign_id]
+        if path == f"{paid_pack_routes._INTERNAL_PREFIX}/spends":
+            campaign_id = (params or {}).get("campaign_id")
+            matching = [s for s in self.spends if s.get("campaign_id") == campaign_id]
+            offset = int((params or {}).get("offset") or 0)
+            limit = int((params or {}).get("limit") or len(matching))
+            return matching[offset : offset + limit]
         raise AssertionError(f"unexpected GET {path}")
 
 
@@ -467,12 +483,69 @@ def test_assembles_the_paid_pack(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(link["is_paid"] for link in body["links"])
     assert all("utm_medium=paid" in core.links[i]["destination_url"] for i in range(2))
 
-    # 6. Spend: explicitly unmeasurable, never a fabricated zero.
+    # 6. Spend: nothing recorded for this campaign, so unmeasurable — never a
+    # fabricated zero. Since #8 the reason is actionable ("record it") rather
+    # than "no transport exists (issue #31)", because a transport now does.
     assert body["spend"]["measurable"] is False
-    assert "issue #31" in body["spend"]["reason"] or "31" in body["spend"]["reason"]
+    assert body["spend"]["value"] is None
+    assert body["spend"]["reason"] == spend_routes.NO_SPEND_RECORDED_REASON
 
     # 7. Guidance carried through unchanged, same as the organic pack.
     assert body["guidance"] == "Disclose #ad. Licensed music only."
+
+
+def test_recorded_spend_renders_as_a_measured_figure_not_not_measurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last unmet criterion of issue #8: once an operator records what
+    they spent, the pack reports it as a real number.
+
+    This is also #114's class, one surface along: the pack's `spend` was
+    typed and rendered as unmeasurable-only, so a measured figure was
+    literally unrepresentable. A measured value has to survive the whole
+    round trip — `measurable: true`, a real `value`, `reason: null`.
+    """
+    core = _FakeCore(
+        copy_artefact=_copy_artefact([_PAID_CHANNEL_META]),
+        positioning_artefact=_positioning_artefact(_SEGMENTS),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(
+        spends=[
+            {"id": "s1", "campaign_id": _CAMPAIGN, "amount": 240.5, "currency": "USD"},
+            {"id": "s2", "campaign_id": _CAMPAIGN, "amount": 59.5, "currency": "USD"},
+        ]
+    )
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    body = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack").json()
+
+    assert body["spend"]["measurable"] is True
+    assert body["spend"]["value"] == pytest.approx(300.0)
+    assert body["spend"]["currency"] == "USD"
+    assert body["spend"]["reason"] is None
+
+
+def test_a_recorded_zero_spend_is_measured_not_unmeasurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distinction #99 and DDL module 049 both insist on, in the one
+    place it is easiest to lose: an operator who really spent nothing gets a
+    measured `0`, which is NOT what an unrecorded campaign gets."""
+    core = _FakeCore(
+        copy_artefact=_copy_artefact([_PAID_CHANNEL_META]),
+        positioning_artefact=_positioning_artefact(_SEGMENTS),
+    )
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(
+        spends=[{"id": "s1", "campaign_id": _CAMPAIGN, "amount": 0.0, "currency": "USD"}]
+    )
+    client = TestClient(_app(core_client=_FakeStorageClient(), campaign_client=campaign_client))
+
+    body = client.get(f"/campaigns/{_CAMPAIGN}/paid-pack").json()
+
+    assert body["spend"]["measurable"] is True
+    assert body["spend"]["value"] == 0
 
 
 def test_does_not_leak_an_existing_organic_link_into_the_paid_pack(

@@ -1041,6 +1041,16 @@ def build_app() -> FastAPI:
 
     app.include_router(paid_pack_router)
 
+    # Recording what a campaign actually cost (M9, issue #8) — the paid
+    # pack's own `spend` figure has to come from somewhere, and an operator
+    # typing it in is the only source this deployment can ever have (no ad
+    # platform API, by design). Its own module for the same reason every
+    # other route module above is, and see that file's docstring for why the
+    # row lives in this plugin's own table rather than tabsii's.
+    from .spend_routes import router as spend_router
+
+    app.include_router(spend_router)
+
     # LAST. See the module docstring: a StaticFiles mount at "/" swallows
     # everything registered after it, so anything below this line is unreachable.
     static = _static_dir()

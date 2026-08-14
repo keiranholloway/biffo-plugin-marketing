@@ -413,6 +413,58 @@
           "required_role": ["admin"]
         }
       }
+    },
+    {
+      "name": "marketing_spend",
+      "description": "What an operator actually spent on a campaign, typed in by the person who spent it. This plugin calls no ad platform API (`paid_pack_routes.py`), so nothing can generate a row here — which is exactly why NO rows means \"unknown\", never \"zero\", while a row with `amount` 0 is a real, measured zero. The two must never be collapsed; DDL module 049 takes the same position for `tabsii.lead_source_costs`, and `src/marketing/spend_routes.py`'s module docstring says why the figure lives in this plugin's own table rather than that one.",
+      "columns": [
+        {
+          "name": "campaign_id",
+          "type": "String(36)",
+          "nullable": false,
+          "index": true
+        },
+        {
+          "name": "amount",
+          "type": "Float",
+          "nullable": false,
+          "description": "Non-negative; the route rejects a negative as a data-entry slip, the same position module 049 takes in SQL. NOT nullable, unlike module 049's `amount`: there, NULL means \"period acknowledged, invoice not in yet\", a state this plugin has no workflow for. Here the unknown state is simply the absence of a row."
+        },
+        {
+          "name": "currency",
+          "type": "String(3)",
+          "nullable": false,
+          "description": "ISO-4217-shaped, upper-cased at the route so `usd` and `USD` are one currency rather than two. Stored per row rather than per campaign so a total can REFUSE to sum mixed currencies instead of silently adding numbers that do not add."
+        },
+        {
+          "name": "notes",
+          "type": "Text",
+          "nullable": true,
+          "description": "Free text — \"week 1, Meta\". Shown to an operator, never parsed."
+        }
+      ],
+      "permissions": {
+        "list": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "read": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "create": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "update": {
+          "allowed": true,
+          "required_role": ["admin"]
+        },
+        "delete": {
+          "allowed": true,
+          "required_role": ["admin"]
+        }
+      }
     }
   ],
   "api_routes": [
@@ -576,6 +628,27 @@
       "table": "marketing_channel",
       "operation": "delete",
       "description": "Remove a channel (admin only). A future recommendation/copy/link row that already referenced this channel's key would be orphaned, same trade-off as idea-scout's business-model categories."
+    },
+    {
+      "method": "GET",
+      "path": "/spends",
+      "table": "marketing_spend",
+      "operation": "list",
+      "description": "List recorded spend for the caller's tenant. Filtered by `campaign_id` and paged in full by `spend_routes._all_spend_rows` — a total that stopped at page one would under-count money."
+    },
+    {
+      "method": "GET",
+      "path": "/spends/{id}",
+      "table": "marketing_spend",
+      "operation": "read",
+      "description": "Read one recorded spend entry."
+    },
+    {
+      "method": "POST",
+      "path": "/spends",
+      "table": "marketing_spend",
+      "operation": "create",
+      "description": "Record one spend entry against a campaign (admin only). Written by `spend_routes.record_spend_route`, which confirms the campaign exists first — a row naming no campaign is money recorded against nowhere, and no route here would ever surface it again."
     }
   ],
   "event_subscriptions": [

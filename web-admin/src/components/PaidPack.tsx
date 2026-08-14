@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-import { getPaidPack, type PaidPack as PaidPackData } from '../lib/api'
+import { getPaidPack, recordSpend, type PaidPack as PaidPackData, type SpendMetric } from '../lib/api'
 import { composeChannelCopy } from '../lib/packCopy'
 import { useClipboard } from '../lib/useClipboard'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
@@ -8,12 +8,110 @@ import { CopyButton } from './CopyButton'
 import { MissingPlacementsWarning, PackAssets, PackGuidance, PackLinks } from './PackParts'
 import { PublishLink } from './PublishLink'
 
+/** One recorded-spend figure, or the reason there isn't one.
+ *
+ * Deliberately the same two-branch shape as `Results.tsx`'s `MetricCell`, and
+ * for the same reason: "no data" is a structurally distinct thing from
+ * "zero", so a measured `0` renders as `0` rather than borrowing the
+ * unmeasurable wording. Getting this wrong in the other direction is issue
+ * #114 — a real figure rendered as "not measurable — undefined" because only
+ * the unmeasurable branch was representable.
+ *
+ * Not shared with `MetricCell` itself: this one is money, so it prints the
+ * currency the value is denominated in, and it carries no denominator (a
+ * spend is an amount, not a share of anything). */
+function SpendFigure({ spend }: { spend: SpendMetric }) {
+  if (spend.measurable) {
+    return (
+      <p className="measured">
+        {spend.currency} {spend.value}
+      </p>
+    )
+  }
+  return <p className="unmeasurable">Not measurable — {spend.reason}</p>
+}
+
+/** The form an operator records spend with (issue #8).
+ *
+ * Deliberately minimal — an amount, a currency and an optional note. This
+ * plugin calls no ad platform API, so the only way a spend figure can ever
+ * exist is for the person who spent it to type it in; anything more elaborate
+ * than that is a reporting feature nothing yet reads.
+ *
+ * Entries are additive (`spend_routes.record_spend_route`): the pack totals
+ * every one. There is no edit or delete here, because the server declares no
+ * route for either yet. */
+function RecordSpend({ campaignId, onRecorded }: { campaignId: string; onRecorded: () => Promise<void> }) {
+  const [amount, setAmount] = useState('')
+  const [currency, setCurrency] = useState('USD')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    const parsed = Number(amount)
+    if (amount.trim() === '' || Number.isNaN(parsed) || parsed < 0) {
+      // Caught here rather than sent, so the operator gets the reason back
+      // immediately instead of a 422 that says the same thing more slowly.
+      setError('Enter the amount spent as a number of 0 or more.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      await recordSpend(campaignId, { amount: parsed, currency, notes: notes.trim() || null })
+      setAmount('')
+      setNotes('')
+      // Reload rather than patching the figure locally: the total is the
+      // server's to compute (it may refuse to sum mixed currencies), and a
+      // number this component worked out itself could disagree with it.
+      await onRecorded()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form className="record-spend" onSubmit={submit}>
+      <label htmlFor="spend-amount">Amount spent</label>
+      <input
+        id="spend-amount"
+        type="number"
+        min="0"
+        step="0.01"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+      />
+      <label htmlFor="spend-currency">Currency</label>
+      <input
+        id="spend-currency"
+        type="text"
+        maxLength={3}
+        value={currency}
+        onChange={(e) => setCurrency(e.target.value)}
+      />
+      <label htmlFor="spend-notes">Note (optional)</label>
+      <input id="spend-notes" type="text" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <button type="submit" disabled={saving}>
+        {saving ? 'Recording…' : 'Record spend'}
+      </button>
+      {error !== null && <p className="error">{error}</p>}
+    </form>
+  )
+}
+
 /** The paid brief pack (M9): ad copy at real platform character limits,
  * creative, targeting drawn from the approved positioning, a declared budget
- * heuristic, tracked links, and spend — reported as explicitly unmeasurable
- * (issue #31), reusing the exact same `UnmeasuredMetric` shape the results
- * dashboard uses, so "no data" reads the same way in both places rather than
- * a bespoke zero here.
+ * heuristic, tracked links, and spend — which since issue #8 is a real figure
+ * an operator recorded, not a permanently unmeasurable field.
+ *
+ * A campaign with nothing recorded is still explicitly unmeasurable rather
+ * than a zero, using the same wording discipline the results dashboard uses,
+ * so "no data" reads the same way in both places. See `spend_routes.py`'s
+ * module docstring for why "nobody has told us" is not "nothing was spent".
  *
  * Assets, tracked links, the missing-placements warning and guidance are the
  * same pieces `DistributionPack` renders — shared via `PackParts.tsx` rather
@@ -171,7 +269,8 @@ export function PaidPack({
           <p className="hint">{pack.budget.basis}</p>
 
           <h4>Spend</h4>
-          <p className="unmeasurable">Not measurable — {pack.spend.reason}</p>
+          <SpendFigure spend={pack.spend} />
+          <RecordSpend campaignId={campaignId} onRecorded={load} />
 
           <PackAssets assets={pack.assets} campaignName={campaignName} />
 
