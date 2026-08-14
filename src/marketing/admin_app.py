@@ -438,6 +438,16 @@ class _CoreAgentGateway:
             # coerce to `[]`: that would make an unknown run read as a proven
             # empty retrieval, which is the exact ambiguity #82 exists to remove.
             annotations=run.get("annotations"),
+            # What this run ACTUALLY ran with (issue #160). Core's
+            # `AgentRunResponse.definition_snapshot` — carried across because
+            # the research-synthesis run is fired by the orchestration engine
+            # from a copy of this plugin's definition frozen into the seeded
+            # workflow, and this is the only place the plugin can see that
+            # copy. Same reasoning as `annotations` above: absent stays
+            # `None` ("not known"), never `{}` ("checked, and it was empty"),
+            # because `synthesis_config_drift` must not read an unknown
+            # snapshot as a clean bill of health.
+            definition_snapshot=run.get("definition_snapshot"),
         )
 
 

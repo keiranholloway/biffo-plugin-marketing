@@ -108,3 +108,50 @@ async def test_get_agent_run_defaults_a_missing_annotations_key_to_none() -> Non
 
     assert view is not None
     assert view.annotations is None
+
+
+# ── definition_snapshot: what the run ACTUALLY ran with (issue #160) ──────────
+#
+# Same boundary, same failure mode as `annotations` above: the drift check in
+# `pipeline.synthesis_config_drift` is inert unless the field it reads survives
+# the trip from Core's JSON onto the view. It matters more here than usual —
+# the synthesis run is fired by the orchestration engine from a *copy* of this
+# plugin's run definition frozen into the seeded workflow, so this snapshot is
+# the only thing in the whole system that can tell the plugin what that copy
+# actually says.
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_carries_the_definition_snapshot_onto_the_view() -> None:
+    """Core's `AgentRunResponse.definition_snapshot` — the configuration the
+    runtime read and billed, including the model and wall clock #160 found
+    two releases behind."""
+    run = {
+        **_BASE_RUN,
+        "definition_snapshot": {
+            "instructions": "…",
+            "model": "anthropic/claude-opus-4.8",
+            "max_turns": 3,
+        },
+    }
+    gateway = admin_app._CoreAgentGateway(_FakeClient(run))  # type: ignore[arg-type]
+
+    view = await gateway.get_agent_run(run_id="run-1")
+
+    assert view is not None
+    assert view.definition_snapshot == run["definition_snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_defaults_a_missing_definition_snapshot_to_none() -> None:
+    """Absent must stay `None` — "not known", never `{}`. An empty dict would
+    make `synthesis_config_drift` report every key as drifted, and a check
+    that screams on every run is one nobody reads."""
+    run = dict(_BASE_RUN)
+    assert "definition_snapshot" not in run
+    gateway = admin_app._CoreAgentGateway(_FakeClient(run))  # type: ignore[arg-type]
+
+    view = await gateway.get_agent_run(run_id="run-1")
+
+    assert view is not None
+    assert view.definition_snapshot is None
