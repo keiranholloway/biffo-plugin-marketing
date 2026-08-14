@@ -709,6 +709,15 @@ async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body
     assert requested.agent_name == CHANNEL_PLAN_AGENT_NAME
     assert requested.causation_id == causation_id
     assert requested.input_payload == {
+        # #65: the stage retrieves now, and an `:online` run's provider
+        # searches from the payload before the model is invoked — so the
+        # searched query leads, exactly as research's does (#101). Its
+        # CONTENT is asserted in `test_marketing_channel_plan_grounding.py`;
+        # what matters here is that the payload's other keys are unchanged
+        # and this one is present.
+        "search_query": pipeline.channel_plan_search_query(
+            positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
+        ),
         "positioning": positioning_body,
         "channel_taxonomy": taxonomy,
         # #67: told the campaign's motion as well as shown a taxonomy already
@@ -716,6 +725,7 @@ async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body
         # efficiency and the narrowing is the enforcement.
         "campaign_motion": "both",
     }
+    assert next(iter(requested.input_payload)) == "search_query"
     assert run_id  # a real id was returned
 
 

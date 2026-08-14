@@ -10,13 +10,21 @@ The two invariants worth pinning are the ones whose breakage is silent:
 
 * **Family.** A stage left behind on an older generation still runs and still
   bills — nothing fails — so the only way to notice is to assert it.
-* **``:online`` on research, and only research.** The suffix is what gives
-  research grounded retrieval, and it is the sole reason the zero-citation
-  guard has anything to cite (Biffo's native ``web_search`` is silently never
-  offered on dev, so an agent that declares it fabricates rather than errors).
-  Losing it on research would produce confident, uncited findings; gaining it
-  on a downstream stage would bill for retrieval that stage does not use and
-  would make issue #90's "this run was never grounded" reasoning wrong.
+* **``:online`` on exactly the stages that retrieve.** The suffix is what
+  gives a stage grounded retrieval, and it is the sole reason the
+  zero-citation guard has anything to cite (Biffo's native ``web_search`` is
+  silently never offered on dev, so an agent that declares it fabricates
+  rather than errors). Losing it on a retrieving stage produces confident,
+  uncited output; gaining it on a stage that only reasons would bill for
+  retrieval that stage does not use and would make issue #90's "this run was
+  never grounded" reasoning wrong about it.
+
+  Since issue #65 that set is ``research`` **and** ``channel_plan``. Channel
+  planning asks "where does this audience convert", which research's evidence
+  — gathered to answer "who is this audience and what do competitors say" —
+  cannot answer; it now retrieves its own. See
+  ``tests/test_marketing_channel_plan_grounding.py`` for the guards that make
+  that retrieval mean something rather than merely happen.
 """
 
 from __future__ import annotations
@@ -41,11 +49,25 @@ _STAGE_MODELS = {
 }
 
 
-#: Research is deliberately NOT on Claude 5 — see issue #136 and
-#: `DEFAULT_RESEARCH_MODEL`'s docstring. Named here rather than special-cased
-#: inline so the exception is one reviewable fact, not a condition buried in an
-#: assertion.
-_GROUNDED_STAGE = "research"
+#: The stages that retrieve, and are therefore deliberately NOT on Claude 5 —
+#: see issue #136 and `DEFAULT_RESEARCH_MODEL`'s docstring. Named here rather
+#: than special-cased inline so the exception is one reviewable fact, not a
+#: condition buried in an assertion.
+#:
+#: `channel_plan` joined `research` in issue #65: it retrieves its own
+#: conversion evidence now, so it needs `:online`, and `:online` only
+#: demonstrably grounds on `sonnet-4` in this estate. That is a tier
+#: *downgrade* for an artefact-producing stage, taken deliberately — grounding
+#: that has been observed beats a tier whose grounding has been observed to be
+#: absent, and the fabrication risk the Opus tier was standing in for is now
+#: carried by mechanical guards (`UngroundedRecommendationError`, and
+#: provenance widened to the run's own `annotations`) rather than by trusting
+#: a better model.
+_GROUNDED_STAGES = frozenset({"research", "channel_plan"})
+
+#: The one route in this estate whose `:online` grounding has actually been
+#: watched to work. #136's table, in one constant.
+_OBSERVED_GROUNDED_ROUTE = "anthropic/claude-sonnet-4:online"
 
 
 @pytest.mark.parametrize(("stage", "model"), sorted(_STAGE_MODELS.items()))
@@ -65,14 +87,14 @@ def test_every_stage_runs_on_the_claude_5_family(stage: str, model: str) -> None
 
     assert base.startswith("anthropic/claude-"), f"{stage} is not on an Anthropic slug: {model!r}"
 
-    if stage == _GROUNDED_STAGE:
-        # Asserted positively rather than skipped: research must stay on a
-        # route whose grounding has actually been observed, so silently
+    if stage in _GROUNDED_STAGES:
+        # Asserted positively rather than skipped: a retrieving stage must stay
+        # on a route whose grounding has actually been observed, so silently
         # drifting it forward again fails here rather than in production.
-        assert model == "anthropic/claude-sonnet-4:online", (
-            "research must stay on a model whose `:online` grounding has been "
+        assert model == _OBSERVED_GROUNDED_ROUTE, (
+            f"{stage} must stay on a model whose `:online` grounding has been "
             f"verified live (#136); got {model!r}. If you are moving it, run "
-            "research against a fact that post-dates training and confirm "
+            "the stage against a fact that post-dates training and confirm "
             "`annotations` comes back non-empty first."
         )
         return
@@ -80,12 +102,13 @@ def test_every_stage_runs_on_the_claude_5_family(stage: str, model: str) -> None
     assert base.endswith("-5"), f"{stage} is not on the Claude 5 family: {model!r}"
 
 
-def test_only_research_carries_the_online_suffix() -> None:
-    """`:online` is grounded retrieval. Research needs it; nothing downstream
-    does, and issue #90's not-grounded reasoning depends on that staying true."""
+def test_exactly_the_retrieving_stages_carry_the_online_suffix() -> None:
+    """`:online` is grounded retrieval. Research and channel planning need it
+    (#65); nothing else does, and issue #90's not-grounded reasoning about the
+    synthesis run depends on that staying true."""
     online = {stage for stage, model in _STAGE_MODELS.items() if ":online" in model}
 
-    assert online == {"research"}
+    assert online == set(_GROUNDED_STAGES)
 
 
 def test_the_seeded_synthesis_model_is_the_constant() -> None:
