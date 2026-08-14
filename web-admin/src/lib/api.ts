@@ -21,6 +21,16 @@
 import { getCurrentSession } from './auth'
 import { createRequest } from './api-core'
 
+/** Thrown by {@link approveArtefact} specifically for `approve_artefact_route`'s
+ * "Unknown element id(s)" 422 (issue #145, `admin_app.py`) — the artefact
+ * changed under the operator (someone re-ran the stage, or the page has been
+ * open since before this run) so the ids it is holding are no longer the
+ * artefact's own. Distinguished from every other failure this route can
+ * return (403, "not proposed" 409, an empty-selection 422) because it is the
+ * one case where the right response is not "read the message" but "reload
+ * and choose again" — a stale id cannot be retried into success. */
+export class StaleArtefactError extends Error {}
+
 export interface Campaign {
   id: string
   name: string
@@ -182,6 +192,23 @@ async function onError(response: Response, context: string | undefined): Promise
       if (response.status === 403) {
         throw new Error(detail !== null ? `${detail} (403)` : `you need the admin role to ${context} (403)`)
       }
+      // `approve_artefact_route`'s "Unknown element id(s)" 422 (issue #145):
+      // the artefact changed under the operator, so the selection they are
+      // holding cannot succeed no matter how many times it is retried — the
+      // one 422 this route returns that means "reload", not "read this and
+      // adjust". Matched on the context (only an approve call reaches this
+      // shape) and the detail text itself, since a "not proposed" 409 or the
+      // empty-selection 422 from the very same route are NOT this case and
+      // must keep their own plain-error rendering.
+      if (
+        response.status === 422 &&
+        context !== undefined &&
+        context.startsWith('approve the ') &&
+        detail !== null &&
+        detail.startsWith('Unknown element id')
+      ) {
+        throw new StaleArtefactError(detail)
+      }
       if (detail !== null) {
         throw new Error(`${detail} (${response.status})`)
       }
@@ -328,7 +355,16 @@ export interface Source {
   note: string
 }
 
+/** `id` is server-assigned at persist time (`pipeline.with_element_ids`,
+ * issue #145) — never model-generated, never positional. **Optional**, not
+ * required: an artefact body written before #150 shipped has none, and
+ * carries none until it is re-run. Every element written from here on
+ * always has one; the optionality only covers that legacy gap, and the
+ * selection UI (`PipelineStage`/`ArtefactBody`) treats an id-less element as
+ * not independently selectable — it rides along with whatever the approval
+ * decides for the rest of the artefact, exactly as it did before this issue. */
 export interface ResearchFinding {
+  id?: string
   signal: string
   why_it_matters: string
   sources: Source[]
@@ -340,18 +376,21 @@ export interface ResearchSynthesisBody {
 }
 
 export interface Segment {
+  id?: string
   name: string
   description: string
   sources: Source[]
 }
 
 export interface MessagePillar {
+  id?: string
   pillar: string
   rationale: string
   sources: Source[]
 }
 
 export interface CallToAction {
+  id?: string
   text: string
   rationale: string
   sources: Source[]
@@ -368,6 +407,7 @@ export interface PositioningBody {
  * outside it (#67). Never both, never neither — enforced server-side by
  * `definitions.ChannelRecommendation`'s own validator, not re-checked here. */
 export interface ChannelRecommendation {
+  id?: string
   channel_key: string | null
   suggested_label: string | null
   motion: 'organic' | 'paid'
@@ -394,6 +434,7 @@ export interface LengthOverage {
 }
 
 export interface ChannelCopy {
+  id?: string
   channel_key: string
   motion: 'organic' | 'paid'
   headline: string
@@ -473,11 +514,27 @@ export async function getArtefact(campaignId: string, kind: ArtefactKind): Promi
   return (await response.json()) as Artefact
 }
 
-export async function approveArtefact(campaignId: string, kind: ArtefactKind): Promise<Artefact> {
+/** Approve a `proposed` artefact, optionally narrowed to a subset of its
+ * elements (issue #145).
+ *
+ * `elementIds` is `null`/omitted for "approve everything" — the ONLY body
+ * this function sent before #145, and the one every existing caller must
+ * keep sending unchanged: `undefined` here means no request body goes out at
+ * all (`api-core.ts`'s `request` only serialises a body when one is passed),
+ * matching `approve_artefact_route`'s own "no body = approve everything"
+ * reading. A non-empty array narrows the approval to exactly those ids; the
+ * route itself rejects an empty array (422) — see {@link StaleArtefactError}
+ * for the other 422 this call can throw, which is a different failure and
+ * needs a different response from the caller. */
+export async function approveArtefact(
+  campaignId: string,
+  kind: ArtefactKind,
+  elementIds?: string[] | null,
+): Promise<Artefact> {
   return request<Artefact>(
     'POST',
     `/campaigns/${campaignId}/artefacts/${kind}/approve`,
-    undefined,
+    elementIds != null ? { element_ids: elementIds } : undefined,
     ADMIN_BASE,
     `approve the ${kind.replace('_', ' ')} stage`,
   )

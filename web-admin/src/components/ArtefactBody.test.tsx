@@ -1,7 +1,9 @@
 import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { ChannelTaxonomyEntry } from '../lib/api'
+import type { ElementSelection } from '../lib/elementSelection'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import {
   ChannelPlanArtefact,
@@ -445,5 +447,91 @@ describe('CopyArtefact', () => {
     )
     expect(screen.getByText('Faster onboarding, starting today')).toBeInTheDocument()
     expect(screen.queryByText(/budget/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Element selection (issue #145)', () => {
+  /** A selection where nothing is deselected — `isSelected` always true. */
+  function allSelected(): ElementSelection {
+    return { isSelected: () => true, toggle: vi.fn() }
+  }
+
+  it('renders no checkbox at all when no selection is supplied — every pre-#145 render, unchanged', () => {
+    render(
+      <ResearchArtefact
+        body={{
+          summary: 'x',
+          findings: [{ id: 'f1', signal: 'Owners want faster onboarding', why_it_matters: 'x', sources: [] }],
+        }}
+      />,
+    )
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('renders no checkbox for an element with no id, even when a selection is supplied (legacy body)', () => {
+    render(
+      <ResearchArtefact
+        body={{
+          summary: 'x',
+          findings: [{ signal: 'No id at all', why_it_matters: 'x', sources: [] }],
+        }}
+        selection={allSelected()}
+      />,
+    )
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('renders a checked, accessibly-labelled checkbox per element when a selection is supplied', () => {
+    render(
+      <ResearchArtefact
+        body={{
+          summary: 'x',
+          findings: [
+            { id: 'f1', signal: 'Owners want faster onboarding', why_it_matters: 'x', sources: [] },
+            { id: 'f2', signal: 'Competitors take 3 weeks', why_it_matters: 'x', sources: [] },
+          ],
+        }}
+        selection={allSelected()}
+      />,
+    )
+    const checkboxes = screen.getAllByRole('checkbox')
+    expect(checkboxes).toHaveLength(2)
+    for (const box of checkboxes) expect(box).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /owners want faster onboarding/i })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /competitors take 3 weeks/i })).toBeInTheDocument()
+  })
+
+  it('reflects isSelected(id) === false as unchecked, and toggling calls toggle with that id', async () => {
+    const toggle = vi.fn()
+    const selection: ElementSelection = { isSelected: (id) => id !== 'f1', toggle }
+    const user = userEvent.setup()
+    render(
+      <ResearchArtefact
+        body={{
+          summary: 'x',
+          findings: [{ id: 'f1', signal: 'Owners want faster onboarding', why_it_matters: 'x', sources: [] }],
+        }}
+        selection={selection}
+      />,
+    )
+    const checkbox = screen.getByRole('checkbox')
+    expect(checkbox).not.toBeChecked()
+    await user.click(checkbox)
+    expect(toggle).toHaveBeenCalledOnce()
+    expect(toggle).toHaveBeenCalledWith('f1')
+  })
+
+  it('offers one checkbox per element across segments, pillars and CTAs together (positioning)', () => {
+    render(
+      <PositioningArtefact
+        body={{
+          segments: [{ id: 's1', name: 'Busy owners', description: 'x', sources: [] }],
+          pillars: [{ id: 'p1', pillar: 'Onboard in a day', rationale: 'x', sources: [] }],
+          ctas: [{ id: 'c1', text: 'Book a demo', rationale: 'x', sources: [] }],
+        }}
+        selection={allSelected()}
+      />,
+    )
+    expect(screen.getAllByRole('checkbox')).toHaveLength(3)
   })
 })

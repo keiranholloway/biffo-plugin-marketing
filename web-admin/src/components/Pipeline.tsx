@@ -9,6 +9,7 @@ import {
   startCopy,
   startPositioning,
   startResearch,
+  StaleArtefactError,
   type Artefact,
   type ArtefactKind,
   type ChannelPlanBody,
@@ -16,6 +17,7 @@ import {
   type PositioningBody,
   type ResearchSynthesisBody,
 } from '../lib/api'
+import { elementsOf, type ElementSelection } from '../lib/elementSelection'
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 import { POLL_CEILING_MS, usePendingPolling } from '../lib/usePendingPolling'
 import { ChannelPlanArtefact, CopyArtefact, PositioningArtefact, ResearchArtefact } from './ArtefactBody'
@@ -25,7 +27,17 @@ interface StageState {
   artefact: Artefact | null
   loading: boolean
   error: string | null
+  /** See `PipelineStage`'s own doc — true only for an unknown-element-id 422
+   * from `approveArtefact` (issue #145), never for any other failure this
+   * stage can report. */
+  stale: boolean
   busy: boolean
+  /** Element ids the operator has unchecked for this stage's current
+   * `proposed` artefact (issue #145) — reset to empty the moment a NEW
+   * artefact (a different `id`) arrives for this stage, so a selection made
+   * against a previous run's elements can never silently carry over onto a
+   * fresh one's. */
+  deselected: Set<string>
 }
 
 interface Gate {
@@ -54,8 +66,11 @@ interface StageConfig {
   /** The stage's real output, once it has one — never called for a `null`
    * or still-`pending` artefact (see `Pipeline`'s render loop). `channelLookup`
    * is only read by the channel-plan and copy stages; research and
-   * positioning's renderers simply ignore the second argument. */
-  renderBody: (artefact: Artefact, channelLookup: ChannelLookup) => ReactNode
+   * positioning's renderers simply ignore the second argument. `selection`
+   * (issue #145) is passed straight through to the `ArtefactBody` renderer,
+   * which is the one place that actually knows how to draw a checkbox next
+   * to each of ITS shape's elements. */
+  renderBody: (artefact: Artefact, channelLookup: ChannelLookup, selection: ElementSelection) => ReactNode
   gate: (approved: Approved, hasBrief: boolean) => Gate
 }
 
@@ -67,9 +82,13 @@ const STAGES: StageConfig[] = [
     kind: 'research',
     title: 'Research',
     start: startResearch,
-    renderBody: (artefact) => {
+    renderBody: (artefact, _channelLookup, selection) => {
       const body = parseArtefactBody<ResearchSynthesisBody>(artefact)
-      return body !== null ? <ResearchArtefact body={body} /> : <p className="empty">No content to show.</p>
+      return body !== null ? (
+        <ResearchArtefact body={body} selection={selection} />
+      ) : (
+        <p className="empty">No content to show.</p>
+      )
     },
     gate: (_approved, hasBrief) =>
       reason(hasBrief, 'This campaign has no brief yet — add one above before starting research.'),
@@ -78,9 +97,13 @@ const STAGES: StageConfig[] = [
     kind: 'positioning',
     title: 'Positioning',
     start: startPositioning,
-    renderBody: (artefact) => {
+    renderBody: (artefact, _channelLookup, selection) => {
       const body = parseArtefactBody<PositioningBody>(artefact)
-      return body !== null ? <PositioningArtefact body={body} /> : <p className="empty">No content to show.</p>
+      return body !== null ? (
+        <PositioningArtefact body={body} selection={selection} />
+      ) : (
+        <p className="empty">No content to show.</p>
+      )
     },
     gate: (approved) => reason(approved.research, 'Approve the research stage first.'),
   },
@@ -88,10 +111,10 @@ const STAGES: StageConfig[] = [
     kind: 'channel_plan',
     title: 'Channel plan',
     start: startChannelPlan,
-    renderBody: (artefact, channelLookup) => {
+    renderBody: (artefact, channelLookup, selection) => {
       const body = parseArtefactBody<ChannelPlanBody>(artefact)
       return body !== null ? (
-        <ChannelPlanArtefact body={body} channelLookup={channelLookup} />
+        <ChannelPlanArtefact body={body} channelLookup={channelLookup} selection={selection} />
       ) : (
         <p className="empty">No content to show.</p>
       )
@@ -102,10 +125,10 @@ const STAGES: StageConfig[] = [
     kind: 'copy',
     title: 'Copy',
     start: startCopy,
-    renderBody: (artefact, channelLookup) => {
+    renderBody: (artefact, channelLookup, selection) => {
       const body = parseArtefactBody<CopySetBody>(artefact)
       return body !== null ? (
-        <CopyArtefact body={body} channelLookup={channelLookup} />
+        <CopyArtefact body={body} channelLookup={channelLookup} selection={selection} />
       ) : (
         <p className="empty">No content to show.</p>
       )
@@ -127,7 +150,14 @@ const STAGES: StageConfig[] = [
 ]
 
 function initialState(): Record<ArtefactKind, StageState> {
-  const empty = (): StageState => ({ artefact: null, loading: true, error: null, busy: false })
+  const empty = (): StageState => ({
+    artefact: null,
+    loading: true,
+    error: null,
+    stale: false,
+    busy: false,
+    deselected: new Set<string>(),
+  })
   return { research: empty(), positioning: empty(), channel_plan: empty(), copy: empty() }
 }
 
@@ -155,6 +185,40 @@ export function Pipeline({
     setState((prev) => ({ ...prev, [kind]: { ...prev[kind], ...next } }))
   }
 
+  /** Set a stage's freshly-read/mutated `artefact`, and reset its selection
+   * (issue #145) the moment the artefact's own `id` changes — a new pipeline
+   * run, which must never inherit a previous run's deselections onto
+   * whatever now sits at the same position in a regenerated list (`with_
+   * element_ids`' own reasoning against positional ids, one level up: the
+   * SAME failure shape — an earlier choice silently reattaching to different
+   * content — is just as real for the OPERATOR'S selection as it is for the
+   * element ids themselves). Always clears `stale`: whatever the previous
+   * error meant, a fresh artefact read is the resolution to it. */
+  function applyArtefact(kind: ArtefactKind, artefact: Artefact | null, extra: Partial<StageState> = {}) {
+    setState((prev) => {
+      const idChanged = prev[kind].artefact?.id !== artefact?.id
+      return {
+        ...prev,
+        [kind]: {
+          ...prev[kind],
+          artefact,
+          stale: false,
+          ...(idChanged ? { deselected: new Set<string>() } : {}),
+          ...extra,
+        },
+      }
+    })
+  }
+
+  function toggleElement(kind: ArtefactKind, id: string) {
+    setState((prev) => {
+      const next = new Set(prev[kind].deselected)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return { ...prev, [kind]: { ...prev[kind], deselected: next } }
+    })
+  }
+
   /** Read a stage's artefact.
    *
    * `quiet` is the difference between a read somebody ASKED for and one the
@@ -176,13 +240,13 @@ export function Pipeline({
    * the stage rather than in place of it.
    */
   async function load(kind: ArtefactKind, { quiet = false }: { quiet?: boolean } = {}) {
-    if (!quiet) patch(kind, { loading: true, error: null })
+    if (!quiet) patch(kind, { loading: true, error: null, stale: false })
     try {
       const artefact = await getArtefact(campaignId, kind)
-      patch(kind, quiet ? { artefact } : { artefact, loading: false })
+      applyArtefact(kind, artefact, quiet ? {} : { loading: false })
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e)
-      patch(kind, quiet ? { error: message } : { loading: false, error: message })
+      patch(kind, quiet ? { error: message } : { loading: false, error: message, stale: false })
     }
   }
 
@@ -198,12 +262,20 @@ export function Pipeline({
   }, [campaignId])
 
   async function runMutation(kind: ArtefactKind, mutate: () => Promise<Artefact | null>) {
-    patch(kind, { busy: true, error: null })
+    patch(kind, { busy: true, error: null, stale: false })
     try {
       const artefact = await mutate()
-      patch(kind, { artefact, busy: false })
+      applyArtefact(kind, artefact, { busy: false })
     } catch (e: unknown) {
-      patch(kind, { busy: false, error: e instanceof Error ? e.message : String(e) })
+      // `StaleArtefactError` (issue #145) is `approveArtefact`'s "unknown
+      // element id" 422 — the artefact changed under the operator, so
+      // `PipelineStage` offers "Reload" instead of leaving them to resubmit
+      // the exact selection that just failed.
+      patch(kind, {
+        busy: false,
+        error: e instanceof Error ? e.message : String(e),
+        stale: e instanceof StaleArtefactError,
+      })
     }
   }
 
@@ -248,12 +320,25 @@ export function Pipeline({
       {STAGES.map((stage) => {
         const s = state[stage.kind]
         const gate = stage.gate(approved, hasBrief)
+        // Every operator-selectable element in this stage's CURRENT
+        // artefact (issue #145) — `[]` while there is nothing proposed yet,
+        // computed fresh every render rather than cached in state, since it
+        // is a pure read of `s.artefact.body` and keeping a second copy in
+        // sync with it is exactly the kind of drift this file elsewhere
+        // avoids (see `StageConfig` itself).
+        const elements = elementsOf(s.artefact)
+        const selection: ElementSelection = {
+          isSelected: (id) => !s.deselected.has(id),
+          toggle: (id) => toggleElement(stage.kind, id),
+        }
         // `pending`'s body is bookkeeping (e.g. research's in-flight run
         // ids), not the real stage output — see `Artefact`'s own doc
         // comment. Nothing to render until the gate has actually produced
         // something.
         const body =
-          s.artefact !== null && s.artefact.status !== 'pending' ? stage.renderBody(s.artefact, channelLookup) : null
+          s.artefact !== null && s.artefact.status !== 'pending'
+            ? stage.renderBody(s.artefact, channelLookup, selection)
+            : null
         return (
           <PipelineStage
             key={stage.kind}
@@ -262,13 +347,18 @@ export function Pipeline({
             artefact={s.artefact}
             loading={s.loading}
             error={s.error}
+            stale={s.stale}
             canStart={gate.canStart}
             blockedReason={gate.blockedReason}
             busy={s.busy}
             onStart={() => runMutation(stage.kind, () => stage.start(campaignId))}
             onRefresh={() => runMutation(stage.kind, () => getArtefact(campaignId, stage.kind))}
-            onApprove={() => runMutation(stage.kind, () => approveArtefact(campaignId, stage.kind))}
+            onApprove={(elementIds) =>
+              runMutation(stage.kind, () => approveArtefact(campaignId, stage.kind, elementIds))
+            }
             onReject={() => runMutation(stage.kind, () => rejectArtefact(campaignId, stage.kind))}
+            elements={elements}
+            deselectedIds={s.deselected}
           >
             {body}
           </PipelineStage>

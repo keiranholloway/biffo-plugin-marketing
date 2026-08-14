@@ -11,6 +11,7 @@ import {
   listChannels,
   mintLinks,
   parseArtefactBody,
+  StaleArtefactError,
   startResearch,
   updateCampaign,
   type ResearchSynthesisBody,
@@ -200,6 +201,76 @@ describe('pipeline artefacts', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/plugins/marketing/admin/campaigns/c1/artefacts/channel_plan/approve')
     expect(init.method).toBe('POST')
+  })
+
+  // ── Partial approval (issue #145) ─────────────────────────────────────────
+
+  it('sends no body when approving with no element ids — the pre-#145 caller, unchanged', async () => {
+    stubSession('abc123')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ id: 'a1', status: 'approved' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await approveArtefact('c1', 'research')
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    // `api-core.ts`'s `request` only serialises a body when one is passed at
+    // all — a `null`/omitted `elementIds` must reach `fetch` as no body,
+    // not as `{"element_ids": null}`, or a stale reader on the server that
+    // treats "key present" differently from "key absent" would see a
+    // different request than every existing caller sends today.
+    expect(init.body).toBeUndefined()
+  })
+
+  it('sends exactly the given element ids when a subset is approved', async () => {
+    stubSession('abc123')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ id: 'a1', status: 'approved' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await approveArtefact('c1', 'research', ['e2', 'e3'])
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ element_ids: ['e2', 'e3'] })
+  })
+
+  it('throws StaleArtefactError, not a plain Error, for the unknown-element-id 422', async () => {
+    stubSession('abc123')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: "Unknown element id(s): e9. This selection may be stale — refresh the artefact and try again.",
+        }),
+      }),
+    )
+    await expect(approveArtefact('c1', 'research', ['e9'])).rejects.toBeInstanceOf(StaleArtefactError)
+  })
+
+  it('does NOT throw StaleArtefactError for the empty-selection 422 from the same route', async () => {
+    // A different failure from the same endpoint (issue #145's own route):
+    // the operator deselected everything, which `PipelineStage` already
+    // stops them from submitting, but a defensive caller must still read
+    // this as an ordinary error, not "reload" — there is nothing stale
+    // about it.
+    stubSession('abc123')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: 'An empty selection is not a valid approval — it is indistinguishable from approving nothing by accident.',
+        }),
+      }),
+    )
+    const failure = approveArtefact('c1', 'research', [])
+    await expect(failure).rejects.not.toBeInstanceOf(StaleArtefactError)
+    await expect(failure).rejects.toThrow(/empty selection/i)
   })
 })
 
