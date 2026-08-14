@@ -448,6 +448,15 @@ class _CoreAgentGateway:
             # because `synthesis_config_drift` must not read an unknown
             # snapshot as a clean bill of health.
             definition_snapshot=run.get("definition_snapshot"),
+            # Why a failed run failed, in the runtime's own words (issue #164).
+            # Core's `AgentRunResponse.error` — the one field that separates
+            # "the provider refused the request" from "the model produced
+            # nothing" from "the wall clock ran out", all three of which reach
+            # an operator as the same sentence without it. Absent stays `None`
+            # ("not known"), never `""`, for the same reason as the two fields
+            # above: `run_not_succeeded` says "Core recorded no reason" out
+            # loud, and it must only say that when there genuinely was none.
+            error=run.get("error"),
         )
 
 

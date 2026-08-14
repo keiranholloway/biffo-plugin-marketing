@@ -201,7 +201,12 @@ class MalformedOutputError(PipelineError):
 
 
 class RunNotSucceededError(PipelineError):
-    """An agent run this stage was waiting on finished without succeeding."""
+    """An agent run this stage was waiting on finished without succeeding.
+
+    **Always constructed through :func:`run_not_succeeded`, never directly** —
+    see that function for why, and ``tests/test_marketing_run_failure_reason.py``
+    for the sweep that enforces it.
+    """
 
 
 class ArtefactNotApprovedError(PipelineError):
@@ -1239,6 +1244,15 @@ class AgentRunView:
     snapshot is carried here at all. ``None`` means "not known": a view built
     from a list row rather than the detail endpoint, or a Core too old to
     return the field. It never means "matches".
+
+    ``error`` is Core's ``AgentRunResponse.error``: **why** the run failed, in
+    the runtime's own words — the provider's status line, the wall-clock hard
+    stop, an unregistered tool. It is the only place that reason exists (issue
+    #164: a positioning run died in 0.048s, the runtime logged no ERROR because
+    it had not failed *itself*, and Core held ``OpenRouter returned 402: This
+    request requires more credits…`` that nothing read). Same tri-state as the
+    two fields above: ``None`` means "not known", never "the run failed for no
+    reason".
     """
 
     id: str
@@ -1246,6 +1260,7 @@ class AgentRunView:
     messages: list[dict[str, Any]] = field(default_factory=list)
     annotations: list[dict[str, Any]] | None = None
     definition_snapshot: dict[str, Any] | None = None
+    error: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -1254,6 +1269,66 @@ class AgentRunView:
     @property
     def succeeded(self) -> bool:
         return self.status == RUN_COMPLETED
+
+
+#: How much of a failed run's recorded error travels in the message an operator
+#: is shown.
+#:
+#: The runtime already truncates a provider's response body before storing it,
+#: so this bounds a string that is usually a few hundred characters — enough to
+#: carry ``OpenRouter returned 402: This request requires more credits, or fewer
+#: max_tokens. You requested up to 65536 tokens, but can only afford 57975``,
+#: which is the whole diagnosis, while keeping a provider that returns an HTML
+#: error page from filling a toast.
+RUN_ERROR_EXCERPT_CHARS = 400
+
+
+def _run_error_excerpt(error: str | None) -> str:
+    """One failed run's reason, collapsed onto a single line and bounded.
+
+    Returns ``""`` for anything unusable — absent, blank, or not a string — so
+    the caller's "Core recorded no reason" branch means exactly that.
+    """
+    if not isinstance(error, str):
+        return ""
+    collapsed = " ".join(error.split())
+    if len(collapsed) <= RUN_ERROR_EXCERPT_CHARS:
+        return collapsed
+    return f"{collapsed[:RUN_ERROR_EXCERPT_CHARS]}…"
+
+
+def run_not_succeeded(message: str, *views: AgentRunView | None) -> RunNotSucceededError:
+    """The failure a stage raises when the run it waited on did not succeed —
+    **carrying the reason Core recorded**, not just the fact.
+
+    Every ``RunNotSucceededError`` in this module is built here, and the sweep
+    in ``tests/test_marketing_run_failure_reason.py`` fails if one is
+    constructed directly, for the reason issue #164 cost an afternoon:
+    ``"The positioning run did not complete successfully."`` is true of a bad
+    definition, a wall-clock timeout, a provider outage and an exhausted
+    OpenRouter balance alike, and it is the entire text an operator (or the
+    next agent to debug this) is given. The distinguishing sentence already
+    existed one hop away, on the run row, and every stage discarded it — so the
+    diagnosis went to CloudWatch, to three merged PRs and to a bisect, and the
+    answer was "add credits".
+
+    Deliberately variadic: research's fan-in fails against a *set* of runs, and
+    two runs that died differently are two different diagnoses. Duplicate
+    reasons collapse — two runs killed by the same exhausted balance is one
+    fact, not two.
+    """
+    reasons: list[str] = []
+    for view in views:
+        reason = _run_error_excerpt(view.error if view is not None else None)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    if not reasons:
+        # Said out loud rather than left as a bare sentence: "Core recorded no
+        # reason" and "nobody looked" are different problems with different
+        # fixes, and the whole point of this function is that the reader can
+        # tell which one they have.
+        return RunNotSucceededError(f"{message} Core recorded no reason for the failure.")
+    return RunNotSucceededError(f"{message} The run reported: {' | '.join(reasons)}")
 
 
 class AgentGateway(Protocol):
@@ -1825,7 +1900,9 @@ async def advance_research(
             await _log_evidence_profile_for(
                 gateway, chain_id=chain_id, research_run_ids=research_run_ids
             )
-            raise RunNotSucceededError("The research-synthesis run did not complete successfully.")
+            raise run_not_succeeded(
+                "The research-synthesis run did not complete successfully.", synthesis_run
+            )
         research_views = [await gateway.get_agent_run(run_id=rid) for rid in research_run_ids]
         _log_evidence_profile(chain_id=chain_id, views=research_views)
         return extract_research_synthesis(
@@ -1849,9 +1926,10 @@ async def advance_research(
     # have retrieved before it died, and "what did retrieval return?" is the
     # whole question on this path.
     _log_evidence_profile(chain_id=chain_id, views=views)
-    raise RunNotSucceededError(
+    raise run_not_succeeded(
         "Every research agent failed to return usable findings. Nothing was found "
-        "to synthesise — try running research again."
+        "to synthesise — try running research again.",
+        *views,
     )
 
 
@@ -1905,7 +1983,7 @@ async def advance_positioning(
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
-        raise RunNotSucceededError("The positioning run did not complete successfully.")
+        raise run_not_succeeded("The positioning run did not complete successfully.", view)
     return extract_positioning(
         view.messages, allowed_source_urls=allowed_source_urls, annotations=view.annotations
     )
@@ -2110,7 +2188,9 @@ async def advance_channel_plan(
     # while it is still in flight.
     _log_evidence_profile(chain_id=causation_id, views=[evidence_view], stage="channel_plan")
     if not evidence_view.succeeded:
-        raise RunNotSucceededError("The channel-plan evidence run did not complete successfully.")
+        raise run_not_succeeded(
+            "The channel-plan evidence run did not complete successfully.", evidence_view
+        )
 
     if plan_run_id is None:
         evidence_set = extract_channel_evidence(evidence_view.messages)
@@ -2150,7 +2230,7 @@ async def advance_channel_plan(
     if plan_view is None or not plan_view.is_terminal:
         return ChannelPlanAdvance()
     if not plan_view.succeeded:
-        raise RunNotSucceededError("The channel-plan run did not complete successfully.")
+        raise run_not_succeeded("The channel-plan run did not complete successfully.", plan_view)
     return ChannelPlanAdvance(
         plan=extract_channel_plan(
             plan_view.messages,
@@ -2204,7 +2284,7 @@ async def advance_copy(
     if view is None or not view.is_terminal:
         return None
     if not view.succeeded:
-        raise RunNotSucceededError("The copy run did not complete successfully.")
+        raise run_not_succeeded("The copy run did not complete successfully.", view)
     return extract_copy(
         view.messages,
         channel_plan_channels=channel_plan_channels,
