@@ -31,14 +31,15 @@ this module adds is the part that is genuinely paid-only:
    no historical spend or performance data to optimise against, so this is a
    declared, fixed starting-point heuristic — not a bidding model — and says
    so in its own ``basis`` field.
-4. **Spend, reported as explicitly unmeasurable.** Issue #31 closed the gap
-   for ``results_routes.py``'s leads/conversions/cost — those now go through
-   the instance-configured leads source — but this route asks a different
-   question (spend for one campaign, inside a paid brief pack) that contract
-   was never wired to answer, and still isn't. This module does not invent a
-   call to a route that does not exist; it reuses
-   ``results_routes.UnmeasuredMetric`` verbatim so "no data" reads the same
-   way here as it does on the results dashboard, rather than a bespoke ``0``.
+4. **Spend, from what an operator recorded.** This was the last unmet
+   criterion of issue #8, and until ``spend_routes.py`` existed this field
+   was a hard-coded ``UnmeasuredMetric`` — there was genuinely no way for a
+   spend figure to exist, because nothing could write one. There is now:
+   ``POST /campaigns/{id}/spend`` writes a ``marketing_spend`` row, and this
+   pack totals them (``spend_routes.recorded_spend``). **A campaign with
+   nothing recorded is still unmeasurable, not a zero** — see that module's
+   docstring for the full reasoning and for why the row lives in this
+   plugin's own table rather than ``tabsii.lead_source_costs``.
 
 ## What this module deliberately does NOT do
 
@@ -59,8 +60,7 @@ from typing import Any
 from biffo_plugin_sdk import BiffoAPIClient, create_core_client
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from . import admin_app, config, pack_routes, pipeline, principal_client
-from .results_routes import UnmeasuredMetric
+from . import admin_app, config, pack_routes, pipeline, principal_client, spend_routes
 
 require_admin = admin_app.require_admin
 
@@ -413,5 +413,8 @@ async def get_paid_pack_route(
         "budget": _budget_recommendation(len(paid_channels)),
         "links": links,
         "guidance": campaign.get("guidance") or "",
-        "spend": UnmeasuredMetric(),
+        # Totalled from this plugin's own `marketing_spend` rows. Unmeasurable
+        # when nothing has been recorded — never a fabricated zero; see
+        # `spend_routes`'s module docstring.
+        "spend": await spend_routes.recorded_spend(campaign_id, campaign_client=campaign_client),
     }

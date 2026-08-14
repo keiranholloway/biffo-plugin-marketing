@@ -261,4 +261,157 @@ describe('PaidPack', () => {
     )
     expect(link).toHaveAttribute('download', 'spring-launch-story-9x16.png')
   })
+  // ── Spend recording (M9, issue #8) ────────────────────────────────────────
+
+  /** A minimal pack body, so the spend tests below assert one thing each
+   * rather than re-stating the whole pack. */
+  function packWith(spend: unknown) {
+    return {
+      campaign_id: CAMPAIGN,
+      ad_copy: [],
+      assets: [],
+      missing_placements: [],
+      targeting: [],
+      budget: {
+        currency: 'USD',
+        channel_count: 1,
+        per_channel_daily: 20,
+        total_daily: 20,
+        test_window_days: 7,
+        total_test_budget: 140,
+        basis: 'A fixed starting-point heuristic.',
+      },
+      links: [],
+      guidance: '',
+      spend,
+    }
+  }
+
+  it('renders a recorded spend as a measured figure, not "not measurable"', async () => {
+    // This is issue #114's class, one surface along: `PaidPack.spend` was
+    // typed as unmeasurable-only, so a measured figure could not be
+    // represented — let alone rendered.
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => packWith({
+          value: 300,
+          measurable: true,
+          denominator: null,
+          reason: null,
+          currency: 'USD',
+        }),
+      }),
+    )
+
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/USD 300/)).toBeInTheDocument()
+    expect(screen.queryByText(/not measurable/i)).not.toBeInTheDocument()
+  })
+
+  it('renders a recorded zero as a measured 0, never as "not measurable"', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => packWith({
+          value: 0,
+          measurable: true,
+          denominator: null,
+          reason: null,
+          currency: 'GBP',
+        }),
+      }),
+    )
+
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/GBP 0/)).toBeInTheDocument()
+    expect(screen.queryByText(/not measurable/i)).not.toBeInTheDocument()
+  })
+
+  it('lets an operator record spend, then reloads the pack with the new figure', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    const fetchMock = vi
+      .fn()
+      // 1. initial pack load — nothing recorded yet
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => packWith({
+          value: null,
+          measurable: false,
+          denominator: null,
+          reason: 'No spend has been recorded against this campaign yet.',
+        }),
+      })
+      // 2. the POST that records it
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 's1' }) })
+      // 3. the reload, now measured
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => packWith({
+          value: 240.5,
+          measurable: true,
+          denominator: null,
+          reason: null,
+          currency: 'USD',
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+
+    expect(await screen.findByText(/not measurable — no spend has been recorded/i)).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/amount spent/i), '240.50')
+    await user.click(screen.getByRole('button', { name: /record spend/i }))
+
+    expect(await screen.findByText(/USD 240.5/)).toBeInTheDocument()
+
+    const [url, init] = fetchMock.mock.calls[1]
+    expect(String(url)).toContain(`/campaigns/${CAMPAIGN}/spend`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ amount: 240.5, currency: 'USD', notes: null })
+  })
+
+  it('surfaces a failed spend recording rather than silently doing nothing', async () => {
+    stubSession()
+    const user = userEvent.setup()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => packWith({
+          value: null,
+          measurable: false,
+          denominator: null,
+          reason: 'No spend has been recorded against this campaign yet.',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: 'Campaign not found.' }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<PaidPack campaignId={CAMPAIGN} campaignName="Spring Launch" channelLookup={makeLookup([])} />)
+    await user.click(screen.getByRole('button', { name: /load paid pack/i }))
+    await screen.findByText(/not measurable/i)
+
+    await user.type(screen.getByLabelText(/amount spent/i), '10')
+    await user.click(screen.getByRole('button', { name: /record spend/i }))
+
+    expect(await screen.findByText(/campaign not found/i)).toBeInTheDocument()
+  })
 })

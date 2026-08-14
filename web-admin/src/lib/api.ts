@@ -723,13 +723,56 @@ export interface PaidPack {
   budget: BudgetRecommendation
   links: PackLink[]
   guidance: string
-  /** This plugin has no reachable transport to spend data (issue #31) — see
-   * {@link UnmeasuredMetric}. */
-  spend: UnmeasuredMetric
+  /** What an operator has recorded spending on this campaign (issue #8), or
+   * the reason there is no figure. See {@link SpendMetric}.
+   *
+   * **Deliberately not an unmeasurable-only type.** It used to be one, back
+   * when spend genuinely could not exist — and once `recordSpend` made it
+   * possible, that type would have left a measured figure literally
+   * unrepresentable, which is issue #114 exactly: the results dashboard
+   * rendered a real leads figure as "not measurable — undefined" for that
+   * same reason. */
+  spend: SpendMetric
 }
+
+/** The paid pack's `spend`: `results_routes.Metric`'s two shapes, plus the
+ * currency a measured value is denominated in (`spend_routes.SpendMetric`).
+ * `240.5` alone is not a spend figure — 240.5 of what? — and `currency` is
+ * `null` exactly when `measurable` is `false`, for the same reason `value`
+ * is: there is no figure to denominate.
+ *
+ * A campaign with nothing recorded is `measurable: false`, NOT a zero: this
+ * plugin calls no ad platform API, so no rows means nobody has entered any,
+ * which is not the same as having spent nothing. A recorded `0` is
+ * `measurable: true, value: 0` — a real, measured zero. Render the two
+ * differently. */
+export type SpendMetric =
+  | (MeasuredMetric & { currency: string })
+  | (UnmeasurableMetric & { currency: null })
 
 export async function getPaidPack(campaignId: string): Promise<PaidPack> {
   return request<PaidPack>('GET', `/campaigns/${campaignId}/paid-pack`, undefined, ADMIN_BASE, 'load the paid pack')
+}
+
+/** Record one spend entry against a campaign (`spend_routes.record_spend_route`).
+ *
+ * Additive: each call records what was spent, and the paid pack totals every
+ * entry. `currency` defaults to the currency the pack states its budget
+ * recommendation in, so the plan and the actual are comparable unless an
+ * operator says otherwise; the server upper-cases it, so `usd` and `USD` do
+ * not become two currencies that the total then refuses to add.
+ */
+export async function recordSpend(
+  campaignId: string,
+  entry: { amount: number; currency?: string; notes?: string | null },
+): Promise<void> {
+  await request<unknown>(
+    'POST',
+    `/campaigns/${campaignId}/spend`,
+    { amount: entry.amount, currency: entry.currency ?? 'USD', notes: entry.notes ?? null },
+    ADMIN_BASE,
+    'record spend',
+  )
 }
 
 // ── Results (M8) ──────────────────────────────────────────────────────────────
@@ -741,23 +784,13 @@ export interface ClickBreakdown {
   unknown_channel_type: number
 }
 
-/** A metric this endpoint cannot compute at all today — never a bare `null`
- * or a `0`. `measurable` is always `false` on every instance the API
- * constructs; `reason` says why. `denominator` is the population this metric
- * would be a share of once it becomes measurable, when that population is
- * itself known; `null` when it isn't. Render "not measurable" distinctly from
- * zero — this plugin has no reachable transport to `demo_requests`/
- * `lead_source_costs` (issue #31), so reporting zero would claim "we looked,
- * and nothing happened," which is not a claim it can make today.
- *
- * Still the exact shape of the paid pack's `spend`, which really is
- * unmeasurable on every instance. It is NOT the shape of the results
- * dashboard's leads/conversions/cost — see {@link Metric}. */
-export interface UnmeasuredMetric {
-  measurable: false
-  denominator: number | null
-  reason: string
-}
+/* `UnmeasuredMetric` used to live here — a metric shape whose `measurable`
+ * was fixed at `false`, mirroring `results_routes.UnmeasuredMetric`. Issue
+ * #31 moved leads/conversions/cost off it and issue #8 moved the paid pack's
+ * `spend` off it, so nothing is that shape any more and the server no longer
+ * defines it. Deleted rather than kept available: a type that can only be
+ * unmeasurable makes the measured case unrepresentable, which is precisely
+ * how #114 shipped a real leads figure as "not measurable — undefined". */
 
 /** A leads/conversions/cost figure the instance-configured leads source
  * answered (issue #31). Mirrors `results_routes.py`'s `Metric` when

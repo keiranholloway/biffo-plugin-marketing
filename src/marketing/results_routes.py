@@ -182,30 +182,17 @@ class ClickBreakdown(BaseModel):
     unknown_channel_type: int
 
 
-class UnmeasuredMetric(BaseModel):
-    """A metric this endpoint cannot compute at all today.
-
-    Deliberately not a bare `null` or a `0`: `measurable` is always `False`
-    on every instance this module constructs, and `reason` says why, so a
-    caller reading the JSON — not just this file's docstring — can tell "no
-    data" from "zero" without guessing. `denominator` is the population this
-    metric would be a share of once it becomes measurable (e.g. total clicks,
-    for a click-to-lead rate) when that population is itself known here;
-    `None` when it isn't (e.g. a conversion rate's denominator is a lead
-    count this plugin cannot see either).
-
-    Still used verbatim by `paid_pack_routes.py` for its own, still-genuinely
-    -unreachable `spend` field — unrelated to the leads/conversions/cost
-    metrics below, which now go through `Metric` instead.
-    """
-
-    measurable: bool = False
-    denominator: int | None = None
-    reason: str = (
-        "No route reachable from this plugin's internal Core transport exposes this yet "
-        "(tracked in issue #31) — 'unmeasurable' means the transport does not exist, "
-        "not that the count is zero."
-    )
+#: `UnmeasuredMetric` used to live here: a metric with `measurable` fixed at
+#: `False` and a default reason of "no route reachable from this plugin's
+#: internal Core transport exposes this yet (tracked in issue #31)". Issue
+#: #31 removed its last use on this dashboard (leads/conversions/cost went to
+#: `Metric` below), leaving `paid_pack_routes.py`'s `spend` as the only
+#: caller — and issue #8 removed that one too, by building the transport its
+#: reason said did not exist. A model whose only remaining content is a claim
+#: that is no longer true is worse than no model, so it is gone rather than
+#: left as a shape a future field might reach for: a metric that can only
+#: ever be unmeasurable cannot represent the measured case, which is exactly
+#: how #114 shipped.
 
 
 class Metric(BaseModel):
@@ -219,9 +206,13 @@ class Metric(BaseModel):
       unmeasurable metric by `measurable` alone, never by `value` being falsy).
     - `measurable=False`, `value=None`, `reason` set to why.
 
-    `denominator` carries the same meaning as `UnmeasuredMetric.denominator`
-    above (see that class) and is populated the same way regardless of
-    whether this instance ended up measurable or not.
+    `denominator` is the population this metric would be a share of (e.g.
+    total clicks, for a click-to-lead rate) when that population is known
+    here; `None` when it isn't (a conversion rate's denominator is a lead
+    count this plugin does not independently verify). It is populated the
+    same way regardless of whether this instance ended up measurable or not —
+    showing it only in the unmeasurable branch inverted the requirement, and
+    was #114.
     """
 
     value: float | int | None = None
