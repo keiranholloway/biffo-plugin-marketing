@@ -32,6 +32,11 @@ Four things are pinned here, because each of them fails silently:
    benchmark, which is the gap issue #65 names in its own words: "re-using
    positioning's citations should stop being sufficient — otherwise the guard
    passes on the old evidence and nothing changes".
+
+The stage is now two runs — one that grounds, one that is handed what it found
+— and this module is unchanged by that on purpose: every rule above is a rule
+about the *plan*, and every one of them still holds. What the split adds is
+pinned separately in `tests/test_marketing_two_step_channel_plan.py`.
 """
 
 from __future__ import annotations
@@ -42,11 +47,13 @@ import pytest
 
 from marketing import pipeline
 from marketing.definitions import (
-    CHANNEL_PLAN_AGENT_NAME,
+    CHANNEL_EVIDENCE_AGENT_NAME,
+    CHANNEL_EVIDENCE_MAX_TURNS,
+    CHANNEL_EVIDENCE_TOOL_NAME,
     CHANNEL_PLAN_INSTRUCTIONS,
-    CHANNEL_PLAN_MAX_TURNS,
-    DEFAULT_CHANNEL_PLAN_MODEL,
+    DEFAULT_CHANNEL_EVIDENCE_MODEL,
     POSITIONING_MAX_TURNS,
+    channel_evidence_definition,
     channel_plan_definition,
 )
 
@@ -90,6 +97,28 @@ def _channel(channel_key: str, *urls: str, rank: int = 1) -> dict[str, Any]:
 
 def _plan_call(*channels: dict[str, Any]) -> list[dict[str, Any]]:
     return _tool_call({"channels": list(channels)})
+
+
+def _evidence_call(*urls: str) -> list[dict[str, Any]]:
+    """The grounding run's output — one note per retrieved page. Section 6
+    drives that run rather than the planning run, because breadth is a property
+    of the run that retrieved; the two-step's own behaviour is pinned in
+    `tests/test_marketing_two_step_channel_plan.py`."""
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": CHANNEL_EVIDENCE_TOOL_NAME,
+                        "arguments": {
+                            "evidence": [{"url": url, "note": "what it shows"} for url in urls]
+                        },
+                    }
+                }
+            ],
+        }
+    ]
 
 
 class _FakeGateway:
@@ -170,10 +199,11 @@ _TAXONOMY_ROWS = [
 
 def test_the_channel_plan_stage_runs_on_a_grounded_route() -> None:
     """Without `:online` the stage cannot retrieve at all, and this is a plain
-    string nothing else validates."""
-    assert DEFAULT_CHANNEL_PLAN_MODEL.endswith(":online"), (
-        "channel planning must retrieve its own conversion evidence (#65), and "
-        f"`:online` is how retrieval works here; got {DEFAULT_CHANNEL_PLAN_MODEL!r}"
+    string nothing else validates. Since the stage became two runs, the subject
+    is the run that retrieves — the pin moved, it was not dropped."""
+    assert DEFAULT_CHANNEL_EVIDENCE_MODEL.endswith(":online"), (
+        "the channel stage must retrieve its own conversion evidence (#65), and "
+        f"`:online` is how retrieval works here; got {DEFAULT_CHANNEL_EVIDENCE_MODEL!r}"
     )
 
 
@@ -184,11 +214,12 @@ def test_the_channel_plan_route_is_one_whose_grounding_has_been_observed_live() 
     emptiness on unfamiliar ones. So the route is pinned to the one this
     estate has actually watched ground, and moving it means running the cheap
     probe in `DEFAULT_RESEARCH_MODEL`'s docstring first."""
-    assert DEFAULT_CHANNEL_PLAN_MODEL == "anthropic/claude-sonnet-4:online", (
-        "channel planning must run on a route whose `:online` grounding has "
-        f"been observed live (#136/#141); got {DEFAULT_CHANNEL_PLAN_MODEL!r}. If "
-        "you are moving it, run the stage against a fact that post-dates "
-        "training and confirm `annotations` comes back non-empty first."
+    assert DEFAULT_CHANNEL_EVIDENCE_MODEL == "anthropic/claude-sonnet-4:online", (
+        "the channel stage's grounding run must run on a route whose `:online` "
+        f"grounding has been observed live (#136/#141); got "
+        f"{DEFAULT_CHANNEL_EVIDENCE_MODEL!r}. If you are moving it, run the stage "
+        "against a fact that post-dates training and confirm `annotations` comes "
+        "back non-empty first."
     )
 
 
@@ -223,15 +254,18 @@ def test_the_prompt_asks_for_conversion_evidence_specifically() -> None:
 
 def test_the_turn_budget_leaves_room_to_search_and_then_answer() -> None:
     """`POSITIONING_MAX_TURNS` is the budget of a stage that only reasons over
-    what it is given. A searching stage that keeps it can search once, at
+    what it is given. A retrieving stage that keeps it gets one retrieval, at
     most, and then must answer — which is not a stage that researches."""
-    assert CHANNEL_PLAN_MAX_TURNS > POSITIONING_MAX_TURNS
+    assert CHANNEL_EVIDENCE_MAX_TURNS > POSITIONING_MAX_TURNS
 
 
-def test_the_definition_still_declares_no_registry_tool() -> None:
+def test_neither_definition_declares_a_registry_tool() -> None:
     """Retrieval travels with the model id, never as a declared `web_search`
     tool: on dev that tool is silently unavailable, so an agent that declares
-    it fabricates rather than errors."""
+    it fabricates rather than errors. Asked of both runs of the stage, because
+    the planning run gaining a search tool would be a quieter defect than the
+    grounding run losing one."""
+    assert channel_evidence_definition(model="m", instructions="i")["tools"] == []
     assert channel_plan_definition(model="m", instructions="i")["tools"] == []
 
 
@@ -248,7 +282,7 @@ async def test_the_run_leads_with_a_conversion_search_query() -> None:
     the positioning question all over again."""
     gateway = _FakeGateway()
 
-    await pipeline.start_channel_plan(
+    await pipeline.start_channel_evidence(
         gateway,
         positioning_body=_POSITIONING_BODY,
         taxonomy=_TAXONOMY_ROWS,
@@ -264,7 +298,7 @@ async def test_the_run_leads_with_a_conversion_search_query() -> None:
     assert "convert" in query  # the channel question, not the audience question
     assert "multi-location operators" in query  # this campaign's audience, not any audience
     assert "google search ads" in query  # the channels actually on the table
-    assert gateway.requested[0]["agent_name"] == CHANNEL_PLAN_AGENT_NAME
+    assert gateway.requested[0]["agent_name"] == CHANNEL_EVIDENCE_AGENT_NAME
 
 
 # ── 4. Provenance, for a stage that retrieves (issue #113/#22 re-derived) ────
@@ -445,7 +479,7 @@ async def test_channel_plan_retrieval_breadth_is_measured_like_researchs(
     without the same instrument it is answerable only by the same day of
     archaeology."""
     gateway = _FakeGateway()
-    causation_id, run_id = await pipeline.start_channel_plan(
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
         positioning_body=_POSITIONING_BODY,
         taxonomy=_TAXONOMY_ROWS,
@@ -453,20 +487,20 @@ async def test_channel_plan_retrieval_breadth_is_measured_like_researchs(
     )
     gateway.complete(
         run_id,
-        messages=_plan_call(_channel("google_search_paid", _RETRIEVED_URL)),
+        messages=_evidence_call(_RETRIEVED_URL),
         annotations=[*_ANNOTATIONS, {"type": "url_citation", "url": "https://roots.example.com/"}],
     )
 
     with caplog.at_level("INFO"):
-        plan = await pipeline.advance_channel_plan(
+        advance = await pipeline.advance_channel_plan(
             gateway,
-            run_id=run_id,
+            evidence_run_id=run_id,
             causation_id=causation_id,
             taxonomy=_TAXONOMY,
             allowed_source_urls=[_PARENT_URL],
         )
 
-    assert plan is not None
+    assert advance.started_plan_run_id is not None
     (record,) = _breadth_records(caplog)
     assert "2 distinct URLs across 1 grounded run(s)" in record.getMessage()
     assert record.causation_id == causation_id
@@ -482,7 +516,7 @@ async def test_channel_plan_breadth_is_logged_when_the_run_failed(
     """The path an operator most needs it on, exactly as for research: "the
     retrieval was thin" and "the run died" produce the same dead artefact."""
     gateway = _FakeGateway()
-    causation_id, run_id = await pipeline.start_channel_plan(
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
         positioning_body=_POSITIONING_BODY,
         taxonomy=_TAXONOMY_ROWS,
@@ -492,7 +526,7 @@ async def test_channel_plan_breadth_is_logged_when_the_run_failed(
 
     with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
         await pipeline.advance_channel_plan(
-            gateway, run_id=run_id, causation_id=causation_id, taxonomy=_TAXONOMY
+            gateway, evidence_run_id=run_id, causation_id=causation_id, taxonomy=_TAXONOMY
         )
 
     (record,) = _breadth_records(caplog)
@@ -506,7 +540,7 @@ async def test_channel_plan_breadth_says_unmeasured_rather_than_a_false_zero(
     """`0 distinct URLs` and "we have no record" must not read the same — the
     second sends nobody hunting a retrieval outage that never happened."""
     gateway = _FakeGateway()
-    causation_id, run_id = await pipeline.start_channel_plan(
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
         positioning_body=_POSITIONING_BODY,
         taxonomy=_TAXONOMY_ROWS,
@@ -516,7 +550,7 @@ async def test_channel_plan_breadth_says_unmeasured_rather_than_a_false_zero(
 
     with caplog.at_level("INFO"), pytest.raises(pipeline.RunNotSucceededError):
         await pipeline.advance_channel_plan(
-            gateway, run_id=run_id, causation_id=causation_id, taxonomy=_TAXONOMY
+            gateway, evidence_run_id=run_id, causation_id=causation_id, taxonomy=_TAXONOMY
         )
 
     (record,) = _breadth_records(caplog)

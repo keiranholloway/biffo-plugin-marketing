@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from marketing.definitions import (
     AGENT_TIMEOUT_SECONDS,
+    CHANNEL_EVIDENCE_MAX_TURNS,
     CHANNEL_PLAN_MAX_TURNS,
     COPY_MAX_TURNS,
     POSITIONING_MAX_TURNS,
@@ -29,6 +30,7 @@ from marketing.definitions import (
     RUNTIME_DEFAULT_TIMEOUT_SECONDS,
     RUNTIME_TIMEOUT_CEILING_SECONDS,
     SYNTHESIS_MAX_TURNS,
+    channel_evidence_definition,
     channel_plan_definition,
     copy_definition,
     discover_definition_factories,
@@ -180,6 +182,7 @@ def test_every_definition_still_declares_a_turn_budget() -> None:
         research_definition: RESEARCH_MAX_TURNS,
         research_synthesis_definition: SYNTHESIS_MAX_TURNS,
         positioning_definition: POSITIONING_MAX_TURNS,
+        channel_evidence_definition: CHANNEL_EVIDENCE_MAX_TURNS,
         channel_plan_definition: CHANNEL_PLAN_MAX_TURNS,
         copy_definition: COPY_MAX_TURNS,
     }

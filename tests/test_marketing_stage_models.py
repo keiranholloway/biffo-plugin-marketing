@@ -19,11 +19,14 @@ The two invariants worth pinning are the ones whose breakage is silent:
   retrieval that stage does not use and would make issue #90's "this run was
   never grounded" reasoning wrong about it.
 
-  Since issue #65 that set is ``research`` **and** ``channel_plan``. Channel
+  Since issue #65 that set is ``research`` **and** the channel stage. Channel
   planning asks "where does this audience convert", which research's evidence
   — gathered to answer "who is this audience and what do competitors say" —
-  cannot answer; it now retrieves its own. See
-  ``tests/test_marketing_channel_plan_grounding.py`` for the guards that make
+  cannot answer; it retrieves its own. Since that issue's second increment the
+  channel stage is two runs, and only the first of them retrieves: the
+  ``channel_evidence`` run grounds, and ``channel_plan`` is handed what it
+  found. See ``tests/test_marketing_channel_plan_grounding.py`` and
+  ``tests/test_marketing_two_step_channel_plan.py`` for the guards that make
   that retrieval mean something rather than merely happen.
 """
 
@@ -32,6 +35,7 @@ from __future__ import annotations
 import pytest
 
 from marketing.definitions import (
+    DEFAULT_CHANNEL_EVIDENCE_MODEL,
     DEFAULT_CHANNEL_PLAN_MODEL,
     DEFAULT_COPY_MODEL,
     DEFAULT_POSITIONING_MODEL,
@@ -44,6 +48,7 @@ _STAGE_MODELS = {
     "research": DEFAULT_RESEARCH_MODEL,
     "synthesis": DEFAULT_SYNTHESIS_MODEL,
     "positioning": DEFAULT_POSITIONING_MODEL,
+    "channel_evidence": DEFAULT_CHANNEL_EVIDENCE_MODEL,
     "channel_plan": DEFAULT_CHANNEL_PLAN_MODEL,
     "copy": DEFAULT_COPY_MODEL,
 }
@@ -54,16 +59,18 @@ _STAGE_MODELS = {
 #: than special-cased inline so the exception is one reviewable fact, not a
 #: condition buried in an assertion.
 #:
-#: `channel_plan` joined `research` in issue #65: it retrieves its own
-#: conversion evidence now, so it needs `:online`, and `:online` only
-#: demonstrably grounds on `sonnet-4` in this estate. That is a tier
-#: *downgrade* for an artefact-producing stage, taken deliberately — grounding
-#: that has been observed beats a tier whose grounding has been observed to be
-#: absent, and the fabrication risk the Opus tier was standing in for is now
-#: carried by mechanical guards (`UngroundedRecommendationError`, and
-#: provenance widened to the run's own `annotations`) rather than by trusting
-#: a better model.
-_GROUNDED_STAGES = frozenset({"research", "channel_plan"})
+#: `channel_plan` joined `research` here in issue #65, because the stage was
+#: one run that retrieved and decided together — a tier *downgrade* for an
+#: artefact-producing stage, taken because grounding that has been observed
+#: beats a tier whose grounding has been observed to be absent.
+#:
+#: The stage is now two runs (#65's second increment), and this set names the
+#: one that actually retrieves: `channel_evidence`. The pin has not been
+#: relaxed, it has been pointed at the run it is about — and `channel_plan`,
+#: which is handed the evidence and does not retrieve, goes back to the Claude
+#: 5 family every other artefact-producing stage uses. Both halves are
+#: asserted below, so neither can drift quietly.
+_GROUNDED_STAGES = frozenset({"research", "channel_evidence"})
 
 #: The one route in this estate whose `:online` grounding has actually been
 #: watched to work. #136's table, in one constant.
@@ -103,9 +110,13 @@ def test_every_stage_runs_on_the_claude_5_family(stage: str, model: str) -> None
 
 
 def test_exactly_the_retrieving_stages_carry_the_online_suffix() -> None:
-    """`:online` is grounded retrieval. Research and channel planning need it
-    (#65); nothing else does, and issue #90's not-grounded reasoning about the
-    synthesis run depends on that staying true."""
+    """`:online` is grounded retrieval. Research and the channel stage's
+    grounding run need it (#65); nothing else does — and both halves matter.
+    Losing it on `channel_evidence` leaves the stage with nothing to hand on;
+    *gaining* it on `channel_plan` would bill a second per-result retrieval to
+    inject a second unenumerated set into the context, which is the exact
+    condition the two-step exists to remove. Issue #90's not-grounded
+    reasoning about the synthesis run depends on this staying true too."""
     online = {stage for stage, model in _STAGE_MODELS.items() if ":online" in model}
 
     assert online == set(_GROUNDED_STAGES)

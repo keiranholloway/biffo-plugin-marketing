@@ -16,6 +16,7 @@ import pytest
 from marketing import pipeline
 from marketing.definitions import (
     AGENT_TIMEOUT_SECONDS,
+    CHANNEL_EVIDENCE_AGENT_NAME,
     CHANNEL_PLAN_AGENT_NAME,
     COPY_AGENT_NAME,
     DEFAULT_SYNTHESIS_MODEL,
@@ -717,133 +718,216 @@ async def test_advance_positioning_propagates_the_runs_annotations_into_the_erro
     )
 
 
-# ── start_channel_plan / advance_channel_plan (M4) ───────────────────────────
+# ── start_channel_evidence / advance_channel_plan (M4, two-step since #65) ───
+#
+# The stage is two runs: a grounded one that retrieves and reads, and a
+# planning one that is handed what the RUNTIME recorded and turns it into the
+# artefact. What each run is handed, and why the guard reads the first run's
+# annotations rather than the second's, is pinned in
+# `tests/test_marketing_two_step_channel_plan.py`; this section covers the
+# orchestration shape — which run is requested, on which chain, and what each
+# poll returns.
+
+
+def _evidence_call(*urls: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_channel_evidence",
+                        "arguments": {"evidence": [{"url": url, "note": "n"} for url in urls]},
+                    }
+                }
+            ],
+        }
+    ]
+
+
+def _plan_call(channels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "submit_channel_plan", "arguments": {"channels": channels}}}
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio
-async def test_start_channel_plan_requests_one_run_carrying_the_positioning_body() -> None:
+async def test_start_channel_evidence_requests_one_grounded_run_carrying_the_positioning_body() -> (
+    None
+):
     gateway = _FakeGateway()
     positioning_body = {"segments": [], "pillars": [], "ctas": []}
     taxonomy = [{"channel_key": "instagram_organic", "label": "Instagram", "motion": "organic"}]
 
-    causation_id, run_id = await pipeline.start_channel_plan(
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway, positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
     )
 
     assert len(gateway.requested) == 1
     requested = gateway.requested[0]
-    assert requested.agent_name == CHANNEL_PLAN_AGENT_NAME
+    # The GROUNDING agent, not the planning one: the stage starts by
+    # retrieving, and the planning run is started from a later poll (#65).
+    assert requested.agent_name == CHANNEL_EVIDENCE_AGENT_NAME
     assert requested.causation_id == causation_id
     assert requested.input_payload == {
-        # #65: the stage retrieves now, and an `:online` run's provider
-        # searches from the payload before the model is invoked — so the
-        # searched query leads, exactly as research's does (#101). Its
-        # CONTENT is asserted in `test_marketing_channel_plan_grounding.py`;
-        # what matters here is that the payload's other keys are unchanged
-        # and this one is present.
+        # #65: an `:online` run's provider searches from the payload before the
+        # model is invoked — so the searched query leads, exactly as research's
+        # does (#101). Its CONTENT is asserted in
+        # `test_marketing_channel_plan_grounding.py`; what matters here is that
+        # the payload's other keys are unchanged and this one is present.
         "search_query": pipeline.channel_plan_search_query(
             positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
         ),
-        "positioning": positioning_body,
-        "channel_taxonomy": taxonomy,
-        # #67: told the campaign's motion as well as shown a taxonomy already
-        # narrowed to it — see `start_channel_plan` for why the telling is an
-        # efficiency and the narrowing is the enforcement.
-        "campaign_motion": "both",
+        # Exactly what the planning run will be started with, so the two runs
+        # cannot be shown different things.
+        **pipeline.channel_plan_input(
+            positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
+        ),
     }
     assert next(iter(requested.input_payload)) == "search_query"
     assert run_id  # a real id was returned
 
 
 @pytest.mark.asyncio
-async def test_advance_channel_plan_returns_none_while_running() -> None:
+async def test_advance_channel_plan_returns_nothing_while_the_grounding_run_is_running() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(
+    _causation_id, run_id = await pipeline.start_channel_evidence(
         gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
 
-    result = await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
+    advance = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
 
-    assert result is None
+    assert advance.plan is None
+    assert advance.started_plan_run_id is None
+    assert len(gateway.requested) == 1  # nothing else has been paid for yet
 
 
 @pytest.mark.asyncio
-async def test_advance_channel_plan_returns_the_plan_once_succeeded() -> None:
+async def test_advance_channel_plan_starts_the_planning_run_on_the_same_chain() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(
+    causation_id, run_id = await pipeline.start_channel_evidence(
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+    )
+    gateway.complete(run_id, messages=_evidence_call("https://example.com/y"))
+
+    advance = await pipeline.advance_channel_plan(
+        gateway,
+        evidence_run_id=run_id,
+        taxonomy={},
+        causation_id=causation_id,
+        plan_input=pipeline.channel_plan_input(
+            positioning_body={}, taxonomy=[], campaign_motion="both"
+        ),
+    )
+
+    assert advance.plan is None
+    assert advance.started_plan_run_id is not None
+    planning = gateway.requested[1]
+    assert planning.agent_name == CHANNEL_PLAN_AGENT_NAME
+    # One chain across both runs — which is what makes per-campaign spend
+    # assemble, and what joins the breadth line to the rest of the campaign.
+    assert planning.causation_id == causation_id
+
+
+@pytest.mark.asyncio
+async def test_advance_channel_plan_returns_the_plan_once_the_planning_run_succeeds() -> None:
+    gateway = _FakeGateway()
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(
         run_id,
-        messages=[
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "submit_channel_plan",
-                            "arguments": {
-                                "channels": [
-                                    {
-                                        "channel_key": "instagram_organic",
-                                        "rank": 1,
-                                        "rationale": "r",
-                                        "sources": [{"url": "https://example.com/y", "note": "n"}],
-                                    }
-                                ]
-                            },
-                        }
-                    }
-                ],
-            }
-        ],
+        messages=_evidence_call("https://example.com/y"),
+        annotations=[{"type": "url_citation", "url": "https://example.com/y"}],
+    )
+    started = await pipeline.advance_channel_plan(
+        gateway, evidence_run_id=run_id, taxonomy={}, causation_id=causation_id
+    )
+    gateway.complete(
+        started.started_plan_run_id or "",
+        messages=_plan_call(
+            [
+                {
+                    "channel_key": "instagram_organic",
+                    "rank": 1,
+                    "rationale": "r",
+                    "sources": [{"url": "https://example.com/y", "note": "n"}],
+                }
+            ]
+        ),
     )
 
-    result = await pipeline.advance_channel_plan(
-        gateway, run_id=run_id, taxonomy={"instagram_organic": "organic"}
+    advance = await pipeline.advance_channel_plan(
+        gateway,
+        evidence_run_id=run_id,
+        plan_run_id=started.started_plan_run_id,
+        taxonomy={"instagram_organic": "organic"},
+        causation_id=causation_id,
     )
 
-    assert isinstance(result, pipeline.ChannelPlan)
-    assert result.channels[0].channel_key == "instagram_organic"
-    assert result.channels[0].motion == "organic"  # derived from taxonomy, not the agent
+    assert isinstance(advance.plan, pipeline.ChannelPlan)
+    assert advance.plan.channels[0].channel_key == "instagram_organic"
+    assert advance.plan.channels[0].motion == "organic"  # derived from taxonomy, not the agent
 
 
 @pytest.mark.asyncio
-async def test_advance_channel_plan_raises_when_the_run_failed() -> None:
+async def test_advance_channel_plan_raises_when_the_grounding_run_failed() -> None:
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(
+    _causation_id, run_id = await pipeline.start_channel_evidence(
         gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, status="failed")
 
     with pytest.raises(pipeline.RunNotSucceededError):
-        await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
+        await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
+
+
+@pytest.mark.asyncio
+async def test_advance_channel_plan_raises_when_the_planning_run_failed() -> None:
+    gateway = _FakeGateway()
+    _causation_id, run_id = await pipeline.start_channel_evidence(
+        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+    )
+    gateway.complete(run_id, messages=_evidence_call("https://example.com/y"))
+    started = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
+    gateway.complete(started.started_plan_run_id or "", status="failed")
+
+    with pytest.raises(pipeline.RunNotSucceededError):
+        await pipeline.advance_channel_plan(
+            gateway,
+            evidence_run_id=run_id,
+            plan_run_id=started.started_plan_run_id,
+            taxonomy={},
+        )
 
 
 @pytest.mark.asyncio
 async def test_advance_channel_plan_propagates_null_annotations_into_the_error() -> None:
     """Issue #82, channel-plan half: `annotations=None` (a pre-upgrade run, or
     a non-`:online` model) must NOT be reported as a confirmed zero-URL
-    retrieval — proven through `advance_channel_plan`."""
+    retrieval — proven through `advance_channel_plan`. Since the stage became
+    two runs the annotations that matter are the GROUNDING run's, so that is
+    the run this leaves without them."""
     gateway = _FakeGateway()
-    _causation_id, run_id = await pipeline.start_channel_plan(
+    _causation_id, run_id = await pipeline.start_channel_evidence(
         gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
     )
-    gateway.complete(
-        run_id,
-        messages=[
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {"function": {"name": "submit_channel_plan", "arguments": {"channels": []}}}
-                ],
-            }
-        ],
-        annotations=None,
-    )
+    gateway.complete(run_id, messages=_evidence_call(), annotations=None)
+    started = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
+    gateway.complete(started.started_plan_run_id or "", messages=_plan_call([]))
 
     with pytest.raises(pipeline.NoCitationsError) as excinfo:
-        await pipeline.advance_channel_plan(gateway, run_id=run_id, taxonomy={})
+        await pipeline.advance_channel_plan(
+            gateway,
+            evidence_run_id=run_id,
+            plan_run_id=started.started_plan_run_id,
+            taxonomy={},
+        )
 
     assert "not known" in str(excinfo.value)
 

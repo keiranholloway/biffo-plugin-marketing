@@ -247,6 +247,44 @@ def _plan_call(channels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _evidence_call() -> list[dict[str, Any]]:
+    """The grounding run's output (#65). These runs carry no `annotations`, so
+    nothing is handed on to cite and nothing in this module's subject — the
+    campaign's motion — depends on it; the tool call still has to be there,
+    because a grounding run that answered in prose is the #159 failure."""
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"function": {"name": "submit_channel_evidence", "arguments": {"evidence": []}}}
+            ],
+        }
+    ]
+
+
+def _plan_through_both_runs(
+    client: TestClient,
+    core: _FakeCore,
+    gateway: _FakeGateway,
+    started: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> httpx.Response:
+    """Drive both runs of the two-step channel stage and return the response
+    that carries the plan (#65).
+
+    `agent_run_id` is the grounding run; the planning run is started by the
+    first advance and its id is stashed in the pending body, which is where
+    this reads it from — deliberately, rather than assuming a run id, because
+    that stashing is the thing that stops a second planning run being started
+    on every poll.
+    """
+    gateway.complete(started["agent_run_id"], messages=_evidence_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+    plan_run_id = json.loads(core.artefacts[started["id"]]["body"])["channel_plan_run_id"]
+    gateway.complete(plan_run_id, messages=messages)
+    return client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+
 def _recommendation(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "channel_key": "instagram_organic",
@@ -431,9 +469,13 @@ def test_a_proposal_outside_the_campaign_motion_fails_the_plan(
     client = _client(core, gateway, monkeypatch)
     _approve_positioning(client, gateway, core)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_plan_call(
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call(
             [
                 _recommendation(),
                 _recommendation(
@@ -442,8 +484,6 @@ def test_a_proposal_outside_the_campaign_motion_fails_the_plan(
             ]
         ),
     )
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 502
     assert "organic" in resp.json()["detail"].lower()
@@ -463,9 +503,13 @@ def test_a_proposal_within_the_campaign_motion_is_kept(
     client = _client(core, gateway, monkeypatch)
     _approve_positioning(client, gateway, core)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_plan_call(
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call(
             [
                 _recommendation(
                     channel_key=None, suggested_label="Regional franchise forum", motion="organic"
@@ -473,8 +517,6 @@ def test_a_proposal_within_the_campaign_motion_is_kept(
             ]
         ),
     )
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 200
     (channel,) = json.loads(resp.json()["body"])["channels"]
@@ -520,12 +562,14 @@ def test_a_legacy_pending_artefact_still_advances(monkeypatch: pytest.MonkeyPatc
     legacy = json.loads(core.artefacts[started["id"]]["body"])
     legacy.pop("allowed_motions", None)
     core.artefacts[started["id"]]["body"] = json.dumps(legacy)
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_plan_call([_recommendation(channel_key="google_search_paid")]),
-    )
 
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call([_recommendation(channel_key="google_search_paid")]),
+    )
 
     assert resp.status_code == 200
 

@@ -59,11 +59,14 @@ import pytest
 from marketing import pipeline
 from marketing.definitions import (
     AUDIENCE_RESEARCH_INSTRUCTIONS,
+    CHANNEL_EVIDENCE_INSTRUCTIONS,
+    CHANNEL_EVIDENCE_TOOL_NAME,
     CHANNEL_PLAN_INSTRUCTIONS,
     CHANNEL_PLAN_TOOL_NAME,
     COMPETITIVE_RESEARCH_INSTRUCTIONS,
     COPY_INSTRUCTIONS,
     COPY_TOOL_NAME,
+    DEFAULT_CHANNEL_EVIDENCE_MODEL,
     DEFAULT_CHANNEL_PLAN_MODEL,
     DEFAULT_COPY_MODEL,
     DEFAULT_POSITIONING_MODEL,
@@ -74,6 +77,7 @@ from marketing.definitions import (
     POSITIONING_TOOL_NAME,
     RESEARCH_SYNTHESIS_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_TOOL_NAME,
+    channel_evidence_definition,
     channel_plan_definition,
     copy_definition,
     positioning_definition,
@@ -113,6 +117,12 @@ _STAGES: dict[str, tuple[str, str, str, dict[str, Any]]] = {
         DEFAULT_POSITIONING_MODEL,
         POSITIONING_TOOL_NAME,
         positioning_definition(model=DEFAULT_POSITIONING_MODEL, instructions="i"),
+    ),
+    "channel_evidence": (
+        CHANNEL_EVIDENCE_INSTRUCTIONS,
+        DEFAULT_CHANNEL_EVIDENCE_MODEL,
+        CHANNEL_EVIDENCE_TOOL_NAME,
+        channel_evidence_definition(model=DEFAULT_CHANNEL_EVIDENCE_MODEL, instructions="i"),
     ),
     "channel_plan": (
         CHANNEL_PLAN_INSTRUCTIONS,
@@ -279,25 +289,62 @@ def test_the_empty_answer_sentence_is_the_one_the_prompt_ships() -> None:
 # always hands `extract_channel_plan` a tool call.
 
 
+_GROUNDING_RUN = "run-evidence"
+_PLANNING_RUN = "run-plan"
+
+
 class _CompletedWithProse:
-    """A gateway whose channel-plan run completes, successfully, having said
-    something reasonable-sounding and called nothing."""
+    """A gateway whose channel-PLANNING run completes, successfully, having
+    said something reasonable-sounding and called nothing.
+
+    Its grounding run behaves perfectly — it retrieved, and it reported what it
+    read — because the failure being reproduced is the planning run answering
+    in prose, and a two-step stage that fell over one run earlier would not be
+    the same defect.
+    """
 
     def __init__(self, text: str) -> None:
         self._text = text
 
     async def request_agent_run(self, **_kwargs: Any) -> str:
-        return "run-1"
+        return _PLANNING_RUN
 
     async def find_chain_run(self, **_kwargs: Any) -> pipeline.AgentRunView | None:
         return None
 
     async def get_agent_run(self, *, run_id: str) -> pipeline.AgentRunView:
+        annotations = [{"type": "url_citation", "url": "https://benchmarks.example.com/cpa"}]
+        if run_id == _GROUNDING_RUN:
+            return pipeline.AgentRunView(
+                id=run_id,
+                status="completed",
+                messages=[
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "submit_channel_evidence",
+                                    "arguments": {
+                                        "evidence": [
+                                            {
+                                                "url": "https://benchmarks.example.com/cpa",
+                                                "note": "Reported CPA for this buyer.",
+                                            }
+                                        ]
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                ],
+                annotations=annotations,
+            )
         return pipeline.AgentRunView(
             id=run_id,
             status="completed",
             messages=[{"role": "assistant", "content": self._text}],
-            annotations=[{"type": "url_citation", "url": "https://benchmarks.example.com/cpa"}],
+            annotations=None,
         )
 
 
@@ -321,7 +368,8 @@ async def test_a_completed_run_that_answered_in_prose_is_refused_not_accepted() 
     with pytest.raises(pipeline.MalformedOutputError) as raised:
         await pipeline.advance_channel_plan(
             gateway,  # type: ignore[arg-type]
-            run_id="run-1",
+            evidence_run_id=_GROUNDING_RUN,
+            plan_run_id=_PLANNING_RUN,
             taxonomy=_TAXONOMY,
         )
 

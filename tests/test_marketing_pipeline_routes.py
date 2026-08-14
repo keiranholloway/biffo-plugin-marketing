@@ -282,6 +282,53 @@ def _empty_channel_plan_call() -> list[dict[str, Any]]:
     ]
 
 
+def _channel_evidence_call(*urls: str) -> list[dict[str, Any]]:
+    """The grounding run's output (#65) — one note per page it read."""
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_channel_evidence",
+                        "arguments": {"evidence": [{"url": url, "note": "n"} for url in urls]},
+                    }
+                }
+            ],
+        }
+    ]
+
+
+def _drive_channel_plan(
+    client: Any,
+    core: Any,
+    gateway: Any,
+    started: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    annotations: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Drive both runs of the two-step channel stage (#65) and return the
+    response that carries the plan.
+
+    ``annotations`` belongs to the GROUNDING run — it is the runtime's record
+    of what retrieval returned, and since the split it is that run, not the
+    planning run, that retrieves. Which is the whole point: the planning run
+    below is never an ``:online`` run, so the guard cannot read its own.
+    """
+    gateway.complete(
+        started["agent_run_id"],
+        messages=_channel_evidence_call(
+            *[a["url"] for a in (annotations or []) if isinstance(a.get("url"), str)]
+        ),
+        annotations=annotations,
+    )
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # starts the planning run
+    plan_run_id = json.loads(core.artefacts[started["id"]]["body"])["channel_plan_run_id"]
+    gateway.complete(plan_run_id, messages=messages)
+    return client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+
 # ── start research ────────────────────────────────────────────────────────────
 
 
@@ -606,7 +653,7 @@ def test_start_channel_plan_runs_once_positioning_is_approved(ctx) -> None:
     assert body["kind"] == "channel_plan"
     assert body["status"] == "pending"
     channel_plan_requests = [
-        r for r in gateway.requested if r["agent_name"] == "marketing-channel-plan"
+        r for r in gateway.requested if r["agent_name"] == "marketing-channel-evidence"
     ]
     assert len(channel_plan_requests) == 1
     assert channel_plan_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == (
@@ -623,10 +670,7 @@ def test_get_channel_plan_artefact_proposes_organic_and_paid_once_it_succeeds(ct
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
 
-    run_id = started["agent_run_id"]
-    gateway.complete(run_id, messages=_channel_plan_call())
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+    resp = _drive_channel_plan(client, core, gateway, started, _channel_plan_call())
 
     assert resp.status_code == 200
     body = resp.json()
@@ -643,10 +687,7 @@ def test_get_channel_plan_artefact_502s_a_zero_citation_run_and_leaves_it_pendin
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
 
-    run_id = started["agent_run_id"]
-    gateway.complete(run_id, messages=_empty_channel_plan_call())
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+    resp = _drive_channel_plan(client, core, gateway, started, _empty_channel_plan_call())
 
     assert resp.status_code == 502
     assert core.artefacts[started["id"]]["status"] == "pending", "must not have been proposed"
@@ -683,13 +724,14 @@ def test_get_channel_plan_artefact_502s_a_fabricated_citation_and_leaves_it_pend
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
 
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_channel_plan_call(url="https://marketing-statistics.example/benchmarks"),
+    resp = _drive_channel_plan(
+        client,
+        core,
+        gateway,
+        started,
+        _channel_plan_call(url="https://marketing-statistics.example/benchmarks"),
         annotations=[],
     )
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 502
     assert "marketing-statistics.example" in resp.json()["detail"]
@@ -707,13 +749,14 @@ def test_channel_plan_grounded_in_its_own_retrieval_is_proposed_and_cites_it(ctx
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
     retrieved = "https://benchmarks.example/paid-search-cpa-by-sector"
 
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_channel_plan_call(url=retrieved),
+    resp = _drive_channel_plan(
+        client,
+        core,
+        gateway,
+        started,
+        _channel_plan_call(url=retrieved),
         annotations=[{"type": "url_citation", "url": retrieved, "title": "CPA by sector"}],
     )
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 200
     assert core.artefacts[started["id"]]["status"] == "proposed"
@@ -729,13 +772,14 @@ def test_channel_plan_that_only_re_cites_positioning_is_refused_by_the_route(ctx
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
 
-    gateway.complete(
-        started["agent_run_id"],
-        messages=_channel_plan_call(),  # the approved positioning's own URL
+    resp = _drive_channel_plan(
+        client,
+        core,
+        gateway,
+        started,
+        _channel_plan_call(),  # the approved positioning's own URL
         annotations=[{"type": "url_citation", "url": "https://benchmarks.example/cpa"}],
     )
-
-    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
 
     assert resp.status_code == 502
     assert "instagram_organic" in resp.json()["detail"]
@@ -749,8 +793,7 @@ def test_channel_plan_artefact_can_be_approved(ctx) -> None:
     client, core, gateway = ctx
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
-    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
-    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # proposes it
+    _drive_channel_plan(client, core, gateway, started, _channel_plan_call())  # proposes it
 
     resp = client.post(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan/approve")
 
@@ -801,8 +844,7 @@ def _propose_and_approve_channel_plan(client, core, gateway) -> dict[str, Any]:
     — the state `start_copy_route` requires from both upstream stages."""
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
-    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
-    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # advances pending -> proposed
+    _drive_channel_plan(client, core, gateway, started, _channel_plan_call())
     return client.post(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan/approve").json()
 
 
@@ -835,8 +877,7 @@ def test_start_copy_refuses_when_channel_plan_is_not_approved(ctx) -> None:
     client, core, gateway = ctx
     _propose_and_approve_positioning(client, core, gateway)
     started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
-    gateway.complete(started["agent_run_id"], messages=_channel_plan_call())
-    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")  # proposed, not approved
+    _drive_channel_plan(client, core, gateway, started, _channel_plan_call())  # proposed only
 
     resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
 
