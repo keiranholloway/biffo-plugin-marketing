@@ -651,17 +651,47 @@ async def _advance_artefact(
         # `or None` rather than `or []` because an empty list would read as
         # "no motion is allowed" and reject everything.
         allowed_motions = pending.get("allowed_motions") or None
-        result = await pipeline.advance_channel_plan(
+        advance = await pipeline.advance_channel_plan(
             gateway,
-            run_id=_require_run_id(),
+            # `agent_run_id` is the GROUNDING run (#65): the stage starts with
+            # the `:online` run that retrieves, and the planning run it feeds
+            # is started from a later poll of this very function. Its id lands
+            # in `channel_plan_run_id` below, and is passed back here so the
+            # transition happens exactly once.
+            evidence_run_id=_require_run_id(),
+            plan_run_id=pending.get("channel_plan_run_id"),
+            plan_input=pending.get("plan_input"),
             # Carried purely so this stage's retrieval-breadth line (#65 — the
             # instrument #101 built for research, now pointed here too) can be
-            # joined to the rest of this campaign's runs.
+            # joined to the rest of this campaign's runs, and so both runs of
+            # the stage share one chain.
             causation_id=artefact.get("causation_id"),
             taxonomy=taxonomy,
             allowed_motions=allowed_motions,
             allowed_source_urls=allowed_source_urls,
         )
+        if advance.started_plan_run_id is not None:
+            # The stage is half done: the grounding run finished and its
+            # evidence has just been handed to a freshly-started planning run.
+            # Recording that id is not bookkeeping — without it the next poll
+            # would see the same terminal grounding run and start (and bill
+            # for) a second planning run. The artefact stays `pending`; the
+            # next poll advances the planning run.
+            started = await _core(
+                "PATCH",
+                f"{_INTERNAL_PREFIX}/artefacts/{artefact['id']}",
+                token,
+                json={
+                    "body": json.dumps(
+                        pipeline.with_element_ids(
+                            {**pending, "channel_plan_run_id": advance.started_plan_run_id}
+                        )
+                    )
+                },
+            )
+            started.raise_for_status()
+            return started.json()
+        result = advance.plan
     elif kind == "copy":
         # `channel_plan_channels` is `{channel_key: motion}` for the approved
         # plan's real entries this run was started against — same pattern,

@@ -200,7 +200,12 @@ async def start_channel_plan_route(
     ]
     taxonomy_motions = {row["key"]: row["motion"] for row in channel_rows}
 
-    causation_id, run_id = await pipeline.start_channel_plan(
+    # The stage starts with its GROUNDING run (#65): one `:online` run whose
+    # job is to retrieve and to read. The planning run that turns what it
+    # retrieved into a channel plan is started from the advance route, once
+    # this one has finished and the runtime's record of what it retrieved can
+    # be handed over as an enumerated set — see `pipeline.advance_channel_plan`.
+    causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
         positioning_body=positioning_body,
         taxonomy=taxonomy,
@@ -226,6 +231,20 @@ async def start_channel_plan_route(
                         "channel_taxonomy": taxonomy_motions,
                         "allowed_motions": sorted(allowed_motions),
                         "allowed_source_urls": allowed_source_urls,
+                        # What the PLANNING run will be started with, one or
+                        # more polls from now (#65). Stashed for exactly the
+                        # reason `channel_taxonomy` is: it must be what this
+                        # stage was started against, not a fresh read of a
+                        # positioning or a taxonomy that has moved since. It
+                        # rides under its own key rather than at the top level
+                        # so `with_element_ids` — which stamps ids onto
+                        # top-level `segments`/`pillars`/`ctas` lists — cannot
+                        # reach into a copy of the parent artefact.
+                        "plan_input": pipeline.channel_plan_input(
+                            positioning_body=positioning_body,
+                            taxonomy=taxonomy,
+                            campaign_motion=campaign_motion,
+                        ),
                     }
                 )
             ),

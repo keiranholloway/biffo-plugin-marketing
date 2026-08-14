@@ -93,6 +93,14 @@ RESEARCH_AUDIENCE_AGENT_NAME = "marketing-research-audience"
 RESEARCH_COMPETITIVE_AGENT_NAME = "marketing-research-competitive"
 RESEARCH_SYNTHESIS_AGENT_NAME = "marketing-research-synthesis"
 POSITIONING_AGENT_NAME = "marketing-positioning"
+#: The channel stage's **grounding** run (issue #65, second increment). Its job
+#: is to retrieve and to read: it runs on the one route whose ``:online``
+#: grounding this estate has observed, and returns one note per page it was
+#: given. What makes it worth a run of its own is not the notes, which are the
+#: model's own account, but ``annotations`` — the runtime's independent record
+#: of what retrieval returned, which is what the planning run below is then
+#: handed as an enumerated set.
+CHANNEL_EVIDENCE_AGENT_NAME = "marketing-channel-evidence"
 CHANNEL_PLAN_AGENT_NAME = "marketing-channel-plan"
 COPY_AGENT_NAME = "marketing-copy"
 
@@ -109,6 +117,7 @@ RESEARCH_AGENT_NAMES: tuple[str, ...] = (
 FINDINGS_TOOL_NAME = "submit_research_findings"
 RESEARCH_SYNTHESIS_TOOL_NAME = "submit_research_synthesis"
 POSITIONING_TOOL_NAME = "submit_positioning"
+CHANNEL_EVIDENCE_TOOL_NAME = "submit_channel_evidence"
 CHANNEL_PLAN_TOOL_NAME = "submit_channel_plan"
 COPY_TOOL_NAME = "submit_copy"
 
@@ -232,6 +241,57 @@ class Positioning(BaseModel):
     segments: list[Segment] = Field(default_factory=list)
     pillars: list[MessagePillar] = Field(default_factory=list)
     ctas: list[CallToAction] = Field(default_factory=list)
+
+
+# ── The channel stage's grounding run (issue #65, second increment) ──────────
+
+
+class RetrievedPageNote(BaseModel):
+    """What the grounding run read on one page it was given.
+
+    Deliberately **not** a :class:`Source`. A ``Source`` is an attribution
+    attached to a claim in an artefact an operator approves; this is an
+    intermediate reading, and it is never persisted or shown to anyone. The
+    distinction matters because the two are trusted differently: ``url`` here
+    is the model's own account of which page it is describing, and it is
+    checked against the runtime's ``annotations`` before it is carried
+    anywhere — a note whose URL was never retrieved is dropped rather than
+    forwarded (``pipeline.retrieved_evidence``).
+    """
+
+    url: str = Field(
+        min_length=1,
+        description=(
+            "The URL of the retrieved page this note is about, copied exactly from the "
+            "material you were given."
+        ),
+    )
+    note: str = Field(
+        description=(
+            "What this page actually says about where this audience converts — the "
+            "figure, the comparable campaign, the observed intent. Quote the number "
+            "where there is one."
+        )
+    )
+
+
+class ChannelEvidenceSet(BaseModel):
+    """The grounding run's full output: one note per retrieved page.
+
+    ``evidence`` is a REQUIRED key that may legitimately be empty, for exactly
+    the reason :attr:`ResearchSynthesis.findings` is — a default would make it
+    optional in the generated tool schema, and a model that can omit the
+    question will. An empty list is an honest answer here ("nothing I was given
+    says anything about conversion"), and it is a *different* answer from the
+    runtime having recorded no retrieval at all.
+    """
+
+    evidence: list[RetrievedPageNote] = Field(
+        description=(
+            "One entry per retrieved page that says something about where this audience "
+            "converts. Do not include a page you were not given, and do not pad the list."
+        )
+    )
 
 
 # ── Campaign motion (#67) ────────────────────────────────────────────────────
@@ -788,39 +848,87 @@ empty lists rather than inventing content to fill them.
 {_UNTRUSTED_INPUT_RULE}
 {return_via_tool(POSITIONING_TOOL_NAME)}"""
 
-CHANNEL_PLAN_INSTRUCTIONS = f"""\
-You are the campaign studio's channel strategist. You are given one
-**approved** positioning artefact — audience segments, message pillars and
-calls to action, each carrying the sources that support it — a
-`campaign_motion` (`organic`, `paid` or `both`), and one **channel
-taxonomy**: a list of `{{channel_key, label, motion, category}}` entries.
-
-**Live conversion evidence has already been retrieved for you, and it is
-what you decide from.** The positioning you were given answers a different
-question from yours. It was researched to establish who this audience is and
-what competitors say to them; you are deciding where this audience actually
-converts. Its sources cannot answer that, and a channel plan justified
-entirely by them is the failure this stage was rebuilt to end.
-
-## The retrieval in front of you is about conversion, not description
+#: What the grounding run is told (issue #65, second increment).
+#:
+#: This prompt has exactly one job — read the pages the provider retrieved and
+#: say what each one contains — and it deliberately does NOT ask for a
+#: recommendation. Deciding and citing in the same turn is what the single-run
+#: stage did, and on dev 2026-08-14 it produced six recommendations whose every
+#: source came from the positioning: the model had ten deep, relevant pages in
+#: context and did not treat them as citable, because nothing enumerated them
+#: while the positioning's sources arrived as structured objects it could see.
+#:
+#: Reading is therefore split off and asked for as its own structured answer,
+#: one entry per page. That output is a convenience — it is what lets the
+#: planning run write a rationale from a page rather than from a URL string —
+#: while the **citable set** is taken from ``annotations``, which the runtime
+#: records independently of anything the model says.
+CHANNEL_EVIDENCE_INSTRUCTIONS = f"""\
+You are the campaign studio's channel researcher. Pages about where this
+campaign's audience actually converts have already been retrieved for you and
+are in the material in front of you. Reading them is your whole job — you are
+not choosing channels, and nothing you write here is shown to an operator.
 
 {RETRIEVAL_ALREADY_RAN_RULE}
 That query was aimed at the numbers a media planner would ask for, so those
 are what to look for in the pages you were given:
 
-- Where this audience demonstrably **converts** — not where it merely has
-  attention. Intent expressed beats attention observed.
 - Reported **conversion rates, cost per acquisition, cost per click or lead
   cost** for this kind of buyer, on these channels, in this market.
 - What **comparable campaigns** report — case studies, published results,
   benchmark reports for this sector and geography.
 - Channel **economics and saturation** for this segment: what it costs to be
   seen there now, and what that buys.
+- Where this audience demonstrably **converts** — not where it merely has
+  attention. Intent expressed beats attention observed.
 
-Among the pages you were given, prefer the specific one carrying the number —
-a benchmark report, a results write-up, a case study — over a vendor home
-page or an agency's "top 10 channels" listicle. A retrieved page of generic
-channel wisdom is still generic channel wisdom; it has simply been fetched.
+You are also given the approved `positioning` and the `channel_taxonomy` this
+campaign may plan against. Both are context for what is worth noticing; they
+are not what you report on. The positioning was researched to establish who
+this audience is and what competitors say to them, which is a different
+question from yours.
+
+For every page worth reporting, give:
+
+- `url` — copied EXACTLY from the material you were given, character for
+  character. Do not tidy it, do not shorten it, and do not report a link you
+  saw quoted *inside* a page rather than in the material itself.
+- `note` — what THAT page says about conversion for this audience. Quote the
+  figure where there is one, and name the channel it belongs to. One page, one
+  note: do not summarise across pages, because the next step reads these one
+  at a time against the page they came from.
+
+Skip a page that says nothing about where this audience converts. A page of
+generic channel wisdom is still generic channel wisdom; it has simply been
+fetched, and reporting it as evidence is worse than leaving it out.
+
+{_UNTRUSTED_INPUT_RULE}
+{return_via_tool(CHANNEL_EVIDENCE_TOOL_NAME)}"""
+
+CHANNEL_PLAN_INSTRUCTIONS = f"""\
+You are the campaign studio's channel strategist. You are given
+`retrieved_evidence` — the conversion evidence gathered for this campaign — one
+**approved** positioning artefact (audience segments, message pillars and calls
+to action, each carrying the sources that support it), a `campaign_motion`
+(`organic`, `paid` or `both`), and one **channel taxonomy**: a list of
+`{{channel_key, label, motion, category}}` entries.
+
+## `retrieved_evidence` is the list you decide from, and cite from
+
+It is a list of pages that were fetched for this campaign, each with its `url`,
+its `title` and `what_it_says` — what a researcher reading that page recorded
+about where this audience converts. Every entry is a real page that was
+actually retrieved; the list is complete, and nothing outside it was fetched.
+
+**The positioning you were given answers a different question from yours.** It
+was researched to establish who this audience is and what competitors say to
+them; you are deciding where this audience actually converts. Its sources
+cannot answer that, and a channel plan justified entirely by them is the
+failure this stage was rebuilt to end.
+
+Among the entries you were given, prefer the specific one carrying the number —
+a benchmark report, a results write-up, a case study — over a vendor home page
+or an agency's "top 10 channels" listicle.
 
 **The taxonomy you are given is not the whole taxonomy.** It is the set of
 channels the operator selected for this campaign, already narrowed to the
@@ -858,12 +966,12 @@ around checking the list first, and never to re-propose a channel the
 operator has already left out for a reason you cannot see.
 
 Rank the channels within each motion (1 = highest priority) and give each a
-rationale an operator can disagree with: name the conversion evidence in the
-retrieval — the figure, the comparable campaign, the observed intent — and name
-which segment, pillar or CTA it serves. Rank on what the evidence says
-converts, not on what is conventionally listed first. A channel recommendation
-with no evidence behind it is the most confident-sounding fabrication in this
-pipeline —
+rationale an operator can disagree with: name the conversion evidence from
+`retrieved_evidence` — the figure, the comparable campaign, the observed intent
+— and name which segment, pillar or CTA it serves. Rank on what the evidence
+says converts, not on what is conventionally listed first. A channel
+recommendation with no evidence behind it is the most confident-sounding
+fabrication in this pipeline —
 "run paid social" or "post on LinkedIn" reads as correct whether or not
 anyone researched it, so generic channel wisdom is not an acceptable
 rationale.
@@ -873,37 +981,39 @@ rationale.
 Every recommendation must carry `sources`, and a `url` may come from exactly
 two places:
 
-1. **The retrieval you were given** — the pages returned for this run's
-   `search_query`, copied exactly as they appear, character for character. Do
-   not tidy a URL, do not shorten it, and do not cite a link you saw quoted
-   *inside* a page rather than in the retrieval itself.
+1. **`retrieved_evidence`** — copy the `url` of an entry in that list exactly
+   as it appears, character for character. Do not tidy a URL, do not shorten
+   it, do not cite a link that appears inside `what_it_says` rather than as an
+   entry's own `url`, and do not cite a page from memory because you expect it
+   to exist. If it is not in the list, it was not retrieved.
 2. **The positioning you were given** — the `url` of a `Source` on a segment,
    pillar or CTA, again exactly as written.
 
-Both are checked mechanically, against the runtime's own record of what the
+Both are checked mechanically, against the runtime's own record of what
 retrieval actually returned and against the positioning you were given. A
 `url` in neither is rejected and the whole plan fails with it, so a
 plausible-looking source you did not read is worse than a recommendation you
 leave out.
 
-**Every recommendation needs at least one source from this run's own
-retrieval.** This is checked per recommendation, not across the plan: a
-channel justified only by positioning's sources is justified by evidence
-about a different question, and is rejected along with the whole plan. If the
-retrieval in front of you says nothing about a channel's performance for this
-audience, do not recommend that channel — leave it out rather than reach for
-the positioning to dress it up.
+**Every recommendation needs at least one source from `retrieved_evidence`.**
+This is checked per recommendation, not across the plan: a channel justified
+only by positioning's sources is justified by evidence about a different
+question, and is rejected along with the whole plan. If nothing in
+`retrieved_evidence` speaks to a channel's performance for this audience, do
+not recommend that channel — leave it out rather than reach for the
+positioning to dress it up.
 
 For `note`, do not paste the positioning item's note verbatim — your
 `rationale` already says why this channel follows from the evidence, so repeat
 only what a `note` genuinely adds beyond that, or leave it empty.
 
-If the retrieval supports no recommendation in a motion, return fewer channels
-(or none) for that motion rather than inventing content to fill it — a channel
-plan that recommends nothing beats one that recommends plausibly. And if it
-supports nothing at all, return an empty plan **by calling the tool**, exactly
-as the closing rule below says: an empty plan tells the operator the retrieval
-came back thin, whereas no tool call tells them only that the stage broke.
+If `retrieved_evidence` supports no recommendation in a motion, return fewer
+channels (or none) for that motion rather than inventing content to fill it — a
+channel plan that recommends nothing beats one that recommends plausibly. And
+if it supports nothing at all, return an empty plan **by calling the tool**,
+exactly as the closing rule below says: an empty plan tells the operator the
+evidence came back thin, whereas no tool call tells them only that the stage
+broke.
 
 {_UNTRUSTED_INPUT_RULE}
 {return_via_tool(CHANNEL_PLAN_TOOL_NAME)}"""
@@ -1246,35 +1356,40 @@ DEFAULT_RESEARCH_MODEL = "anthropic/claude-sonnet-4:online"
 #: given — so neither needs `:online`.
 DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-opus-5"
 DEFAULT_POSITIONING_MODEL = "anthropic/claude-opus-5"
-#: Channel planning **does** search (issue #65), so it carries `:online` — and
-#: therefore lands on the same route research does, for the same measured
-#: reason rather than a stylistic one.
-#:
-#: **This is a deliberate tier downgrade, and the trade is worth stating.**
-#: Every artefact-producing stage runs on Opus above, because a
-#: confident-sounding fabrication is their failure mode. Channel planning is
-#: the stage where that is *least* visible — "run paid social" reads as
-#: correct whether or not anyone researched it — so the Opus tier was doing
-#: real work here. It is given up because the alternative is worse: the
-#: question this stage has to answer ("where does this audience convert") is
-#: not answerable from weights at all, and #136's table says plainly that a
-#: Claude 5 route with `:online` attached returns **zero** annotations. A
-#: better model that cannot retrieve produces a more persuasive version of
-#: exactly the defect #65 was filed about.
-#:
-#: What replaces the tier is mechanical rather than aspirational, which is the
-#: only kind of replacement worth having: provenance is now checked against
-#: the union of the approved parent's citations and the run's OWN
-#: `annotations` (so an invented URL is still refused), and every single
-#: recommendation must cite at least one URL the runtime recorded this run
-#: retrieving (`pipeline.UngroundedRecommendationError`). A plan resting on
-#: positioning's carried-over sources fails whatever tier produced it.
+#: The channel stage's **grounding** run searches (issue #65), so it carries
+#: `:online` — and therefore lands on the same route research does, for the
+#: same measured reason rather than a stylistic one. This is the pin #155 put
+#: on `DEFAULT_CHANNEL_PLAN_MODEL`, moved to the run that actually retrieves
+#: rather than removed: `:online` still only demonstrably grounds on
+#: `sonnet-4` in this estate (#136), and that has not changed.
 #:
 #: Revisit exactly as `DEFAULT_RESEARCH_MODEL` says to: run the stage against
 #: a fact that post-dates training, read `annotations`, and move it only on
 #: that evidence. Not because a model is newer — that is what #108 did, and it
 #: cost a day.
-DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-sonnet-4:online"
+DEFAULT_CHANNEL_EVIDENCE_MODEL = "anthropic/claude-sonnet-4:online"
+#: Channel **planning** does not retrieve — it is handed what the grounding run
+#: above retrieved, enumerated (`pipeline.retrieved_evidence`) — so it needs no
+#: `:online`, and adding one would be actively wrong: `:online` bills per
+#: result, and a second retrieval would inject a second *unenumerated* set into
+#: the context, which is the precise condition the two-step exists to remove.
+#:
+#: **The tier downgrade #155 took here is therefore given back.** That
+#: downgrade was forced, not chosen: every artefact-producing stage runs on
+#: Opus because a confident-sounding fabrication is its failure mode, and
+#: channel planning is the stage where that is *least* visible ("run paid
+#: social" reads as correct whether or not anyone researched it) — but a stage
+#: that had to retrieve could only run on the one route that grounds. Splitting
+#: retrieval into its own run removes the constraint, so this returns to the
+#: family every other artefact-producing stage uses.
+#:
+#: The mechanical guards that replaced the tier are all still in force and none
+#: of them trusts the model: provenance is checked against the approved
+#: parent's citations UNION the runtime's own record of what the grounding run
+#: retrieved, and every recommendation must cite at least one URL from that
+#: record (`pipeline.UngroundedRecommendationError`). A plan resting on
+#: positioning's carried-over sources fails whatever tier produced it.
+DEFAULT_CHANNEL_PLAN_MODEL = "anthropic/claude-opus-5"
 #: Copy reasons over what it is given, same as positioning and channel
 #: planning — no `:online` needed.
 DEFAULT_COPY_MODEL = "anthropic/claude-opus-5"
@@ -1287,11 +1402,12 @@ RESEARCH_MAX_TURNS = 8
 # headroom for a retried tool call.
 SYNTHESIS_MAX_TURNS = 3
 POSITIONING_MAX_TURNS = 3
-# Channel planning searches (issue #65), so it needs research's budget rather
-# than a reasoning stage's: at 3 turns it could search once and then had to
-# answer, which is not a stage that researches anything. Matched to
-# `RESEARCH_MAX_TURNS` deliberately — same retrieval shape, same provider,
-# same wall clock — so the two move together rather than drifting apart.
+# The channel stage's grounding run retrieves (issue #65), so it needs
+# research's budget rather than a reasoning stage's: at 3 turns it could take
+# one retrieval and then had to answer, which is not a stage that researches
+# anything. Matched to `RESEARCH_MAX_TURNS` deliberately — same retrieval
+# shape, same provider, same wall clock — so the two move together rather than
+# drifting apart.
 #
 # **This makes the stage materially more expensive**, and that is the accepted
 # trade: `:online` bills per result, every turn can carry a retrieval, and the
@@ -1301,8 +1417,14 @@ POSITIONING_MAX_TURNS = 3
 # generated per. What it does NOT buy is more wall clock: every agent is
 # already at `AGENT_TIMEOUT_SECONDS` = the runtime ceiling, so these turns
 # have to fit in the same 240s research's do, and raising that is an instance
-# change (see `RUNTIME_TIMEOUT_CEILING_SECONDS`), not a plugin one.
-CHANNEL_PLAN_MAX_TURNS = RESEARCH_MAX_TURNS
+# change (see `RUNTIME_TIMEOUT_CEILING_SECONDS`), not a plugin one. The two
+# runs get 240s EACH — the ceiling is per run, and this stage is advanced by
+# polling rather than held open across both.
+CHANNEL_EVIDENCE_MAX_TURNS = RESEARCH_MAX_TURNS
+# Channel planning no longer retrieves: it reasons over the evidence it is
+# handed, exactly as positioning and copy reason over the artefact they are
+# handed. One turn to answer, plus headroom for a retried tool call.
+CHANNEL_PLAN_MAX_TURNS = 3
 COPY_MAX_TURNS = 3
 
 #: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_SECONDS` — the
@@ -1421,17 +1543,32 @@ def positioning_definition(*, model: str, instructions: str) -> dict[str, Any]:
     }
 
 
-def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
-    """The channel-plan agent's run definition.
+def channel_evidence_definition(*, model: str, instructions: str) -> dict[str, Any]:
+    """The channel stage's grounding run definition (issue #65).
 
-    ``tools`` is empty and that is **not** because this agent does not search —
-    since issue #65 it does. It reaches the web the same way research does,
-    through OpenRouter's ``:online`` model suffix rather than a registry tool,
-    for the reason ``research_definition`` records: a registered-but-
-    unconfigured ``web_search`` is silently dropped rather than failed, so an
-    agent that declared it would return no findings with no error anywhere —
-    which is the exact shape of failure this stage is least able to survive.
+    ``tools`` is empty and that is **not** because this agent does not
+    retrieve — it is the only agent in this stage that does. It reaches the web
+    the same way research does, through OpenRouter's ``:online`` model suffix
+    rather than a registry tool, for the reason ``research_definition``
+    records: a registered-but-unconfigured ``web_search`` is silently dropped
+    rather than failed, so an agent that declared it would return no findings
+    with no error anywhere — which is the exact shape of failure this stage is
+    least able to survive.
     """
+    return {
+        "instructions": instructions,
+        "model": model,
+        "tools": [],
+        "max_turns": CHANNEL_EVIDENCE_MAX_TURNS,
+        "timeout_seconds": AGENT_TIMEOUT_SECONDS,
+    }
+
+
+def channel_plan_definition(*, model: str, instructions: str) -> dict[str, Any]:
+    """The channel-plan agent's run definition — no tools, and since issue
+    #65's second increment no ``:online`` either: it reasons over the
+    ``retrieved_evidence`` the grounding run above produced, in the same way
+    positioning reasons over the research artefact it is given."""
     return {
         "instructions": instructions,
         "model": model,
@@ -1488,6 +1625,21 @@ def positioning_tool_schema() -> dict[str, Any]:
             "name": POSITIONING_TOOL_NAME,
             "description": "Submit the audience segments, message pillars and CTAs.",
             "parameters": Positioning.model_json_schema(),
+        },
+    }
+
+
+def channel_evidence_tool_schema() -> dict[str, Any]:
+    """The output tool the grounding run calls to return one note per
+    retrieved page."""
+    return {
+        "type": "function",
+        "function": {
+            "name": CHANNEL_EVIDENCE_TOOL_NAME,
+            "description": (
+                "Submit what each retrieved page says about where this audience converts."
+            ),
+            "parameters": ChannelEvidenceSet.model_json_schema(),
         },
     }
 
@@ -1561,7 +1713,7 @@ def copy_tool_schema() -> dict[str, Any]:
 # asserted too. Bump ``_EXPECTED_DEFINITION_FACTORY_COUNT`` deliberately
 # whenever a factory is added, removed or renamed; that is a one-line, loud,
 # reviewable diff, not silent drift.
-_EXPECTED_DEFINITION_FACTORY_COUNT = 5
+_EXPECTED_DEFINITION_FACTORY_COUNT = 6
 
 
 def discover_definition_factories() -> tuple[Callable[..., dict[str, Any]], ...]:

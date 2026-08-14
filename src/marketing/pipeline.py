@@ -57,6 +57,9 @@ from aws_lambda_powertools import Logger
 from pydantic import BaseModel, ValidationError
 
 from .definitions import (
+    CHANNEL_EVIDENCE_AGENT_NAME,
+    CHANNEL_EVIDENCE_INSTRUCTIONS,
+    CHANNEL_EVIDENCE_TOOL_NAME,
     CHANNEL_PLAN_AGENT_NAME,
     CHANNEL_PLAN_INSTRUCTIONS,
     CHANNEL_PLAN_TOOL_NAME,
@@ -65,6 +68,7 @@ from .definitions import (
     COPY_LENGTH_BUDGET,
     COPY_LENGTH_CEILING_MULTIPLE,
     COPY_TOOL_NAME,
+    DEFAULT_CHANNEL_EVIDENCE_MODEL,
     DEFAULT_CHANNEL_PLAN_MODEL,
     DEFAULT_COPY_MODEL,
     DEFAULT_POSITIONING_MODEL,
@@ -80,6 +84,7 @@ from .definitions import (
     RESEARCH_SYNTHESIS_INSTRUCTIONS,
     RESEARCH_SYNTHESIS_TOOL_NAME,
     ChannelCopy,
+    ChannelEvidenceSet,
     ChannelPlan,
     CopySet,
     LengthOverage,
@@ -87,6 +92,8 @@ from .definitions import (
     ResearchFindingSet,
     ResearchSynthesis,
     Source,
+    channel_evidence_definition,
+    channel_evidence_tool_schema,
     channel_plan_definition,
     channel_plan_search_query,
     channel_plan_tool_schema,
@@ -654,6 +661,100 @@ def annotation_source_urls(annotations: list[dict[str, Any]] | None) -> list[str
     return urls
 
 
+#: How much of a retrieved page's recorded text is carried into the planning
+#: run's payload, per page.
+#:
+#: Bounded for the reason ``SEARCH_QUERY_BRIEF_CHARS`` is: the planning run has
+#: to fit ten pages, the whole positioning body and the taxonomy inside one
+#: payload and still answer inside ``AGENT_TIMEOUT_SECONDS``. The excerpt is a
+#: fallback, not the main channel — the grounding run's own ``note`` is what
+#: carries the reading — so it is sized to identify the page and support a
+#: figure, not to reproduce it.
+EVIDENCE_EXCERPT_CHARS = 1200
+
+
+def extract_channel_evidence(messages: list[dict[str, Any]]) -> ChannelEvidenceSet:
+    """The grounding run's per-page notes, or :class:`MalformedOutputError`.
+
+    No citation guard of its own, deliberately, and the two reasons are worth
+    separating:
+
+    - **This is not an artefact.** Nothing here is persisted, approved or shown
+      to an operator; it is an intermediate reading handed to the planning run.
+      The guards exist to stop an unevidenced *artefact* reaching a human, and
+      the artefact this stage produces is the plan, which is guarded exactly as
+      before.
+    - **Its `url`s are not trusted anyway.** :func:`retrieved_evidence` keeps
+      only the notes whose URL the runtime independently recorded, so a page
+      the model invented here cannot reach the planning run at all — let alone
+      be citable by it.
+
+    A missing tool call IS fatal, for the reason issue #159 records: without
+    the notes the planning run would be handed URLs and titles and asked to
+    write a rationale about pages it has no reading of, which is a fabrication
+    invitation dressed as grounding. Better to fail with the #159 sentence an
+    operator can act on.
+    """
+    data = _tool_call_arguments(messages, CHANNEL_EVIDENCE_TOOL_NAME)
+    if data is None:
+        raise MalformedOutputError(
+            f"the channel-evidence run produced no {CHANNEL_EVIDENCE_TOOL_NAME} tool call"
+        )
+    try:
+        return ChannelEvidenceSet.model_validate(data)
+    except ValidationError as exc:
+        raise MalformedOutputError(str(exc)) from exc
+
+
+def retrieved_evidence(
+    annotations: list[dict[str, Any]] | None, *, notes: Mapping[str, str] | None = None
+) -> list[dict[str, str]] | None:
+    """The enumerated evidence set the planning run is handed (issue #65), or
+    ``None`` when there is no record of what was retrieved.
+
+    **This is the whole two-step, in one function: which URLs the planning run
+    may cite is decided by the runtime, not by the model.** The spine is
+    ``annotations`` — Core's record of what ``:online`` actually returned,
+    written independently of anything the model said (:class:`AgentRunView`,
+    issue #82). ``notes`` is the grounding run's own reading, keyed by
+    :func:`_url_key` and merged onto that spine, so:
+
+    - a page the runtime recorded and the model wrote nothing about is still
+      handed over — it was retrieved, so it is citable, it simply arrives with
+      an empty reading;
+    - a page the model wrote about but the runtime never recorded is **not**
+      handed over at all, so it cannot be cited, and cannot then satisfy the
+      per-recommendation grounding check by having been invented one step
+      earlier. Trusting the model's account of what it read would reintroduce
+      exactly the trust every other check in this module refuses.
+
+    ``None`` in, ``None`` out: the tri-state is preserved rather than collapsed
+    into an empty list, because "the runtime recorded nothing" and "the runtime
+    recorded that retrieval found nothing" lead to opposite decisions in
+    :func:`extract_channel_plan`.
+    """
+    if annotations is None:
+        return None
+    by_url = notes or {}
+    handed: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in annotations:
+        fields = _annotation_fields(entry)
+        url = fields.get("url")
+        if not isinstance(url, str) or not url or url in seen:
+            continue
+        seen.add(url)
+        item = {"url": url, "what_it_says": by_url.get(_url_key(url), "")}
+        title = fields.get("title")
+        if isinstance(title, str) and title:
+            item["title"] = title
+        content = fields.get("content")
+        if isinstance(content, str) and content:
+            item["excerpt"] = content[:EVIDENCE_EXCERPT_CHARS]
+        handed.append(item)
+    return handed
+
+
 def _require_retrieved_evidence(
     plan: ChannelPlan, *, retrieved_source_urls: Collection[str]
 ) -> None:
@@ -714,7 +815,11 @@ def extract_channel_plan(
     issue #3): a channel recommendation is exactly as fabricable as a
     positioning claim, and arguably the most confident-sounding one in the
     whole pipeline, because channel advice reads as generic wisdom whether or
-    not anyone researched it. ``annotations`` — see
+    not anyone researched it.
+
+    ``annotations`` here is the **grounding run's**, not the planning run's —
+    see :func:`advance_channel_plan` for why that distinction is the whole
+    guard rather than a detail of plumbing. Otherwise as
     :func:`extract_research_synthesis`.
 
     ## What provenance means for a stage that retrieves (issue #65 vs #22/#113)
@@ -1282,8 +1387,8 @@ def _aggregate_research_annotations(
     return []
 
 
-def _annotation_url(entry: Any) -> str | None:
-    """The URL inside one ``annotations`` entry, whichever shape it arrived in.
+def _annotation_fields(entry: Any) -> Mapping[str, Any]:
+    """The fields of one ``annotations`` entry, whichever shape it arrived in.
 
     Core stores what the runtime recorded, and OpenRouter's ``url_citation``
     annotation has been seen both flattened (``{"type": "url_citation",
@@ -1292,13 +1397,23 @@ def _annotation_url(entry: Any) -> str | None:
     upstream OpenAI-compatible form). Reading only one of them would make the
     breadth measurement below silently report zero the day the other appears,
     which is exactly the kind of quiet blindness issue #101 was filed about.
+
+    Split out from :func:`_annotation_url` when the two-step started carrying
+    ``title`` and page text forward as well (issue #65): one place that knows
+    which shape an annotation is in, rather than one per field.
     """
     if not isinstance(entry, dict):
-        return None
-    url = entry.get("url")
-    if not isinstance(url, str) or not url:
-        nested = entry.get("url_citation")
-        url = nested.get("url") if isinstance(nested, dict) else None
+        return {}
+    if isinstance(entry.get("url"), str) and entry["url"]:
+        return entry
+    nested = entry.get("url_citation")
+    return nested if isinstance(nested, dict) else entry
+
+
+def _annotation_url(entry: Any) -> str | None:
+    """The URL inside one ``annotations`` entry — see :func:`_annotation_fields`
+    for why the entry's shape is not assumed."""
+    url = _annotation_fields(entry).get("url")
     return url if isinstance(url, str) and url else None
 
 
@@ -1362,6 +1477,45 @@ def evidence_profile(views: Collection[AgentRunView | None]) -> EvidenceProfile:
     )
 
 
+#: The run sets whose breadth this process has already reported (issue #65
+#: follow-up), and the bound past which it forgets the oldest of them.
+#:
+#: **The line is once per run; the function that emits it is called once per
+#: poll.** Reading is what advances this pipeline, so a terminal run that
+#: cannot be advanced past — a channel plan whose recommendations were refused,
+#: a research chain that failed — is re-read, and re-measured, for as long as
+#: anyone leaves the page open. Measured live on 2026-08-14: the identical
+#: breadth line at 13:26:22, :24, :26, :28 and :30. Nothing was wrong with the
+#: numbers; the count of lines simply stopped meaning the count of runs, which
+#: is the one thing an instrument like this is read for.
+#:
+#: What this does and does not promise, stated plainly because it is process
+#: state in a Lambda: within one warm container, one line per run set. A cold
+#: start, or a run set evicted by the bound below, produces a second line for a
+#: run already reported — a duplicate, never a wrong measurement. The
+#: alternative (persisting "already logged" on the artefact) would buy exactness
+#: for a Core write on a failure path, which is a worse trade for a log line.
+_BREADTH_REPORTED: set[str] = set()
+_BREADTH_REPORTED_MAX = 1024
+
+
+def _breadth_already_reported(
+    *, chain_id: str | None, stage: str, views: Collection[AgentRunView | None]
+) -> bool:
+    """True when this exact run set's breadth has already been logged here.
+
+    Keyed on the runs measured, not on the chain alone: a stage measures its
+    own runs, and two stages of one campaign legitimately report separately.
+    """
+    key = f"{stage}:{chain_id}:" + ",".join(sorted(v.id for v in views if v is not None))
+    if key in _BREADTH_REPORTED:
+        return True
+    if len(_BREADTH_REPORTED) >= _BREADTH_REPORTED_MAX:
+        _BREADTH_REPORTED.clear()
+    _BREADTH_REPORTED.add(key)
+    return False
+
+
 def _log_evidence_profile(
     *, chain_id: str | None, views: Collection[AgentRunView | None], stage: str = "research"
 ) -> None:
@@ -1391,7 +1545,15 @@ def _log_evidence_profile(
     the same day of archaeology a second time. One implementation rather than
     a near-copy, so a fix to the tri-state reasoning below cannot apply to one
     stage and not the other.
+
+    Emitted **once per run set**, not once per call: this function is reached
+    from a polled advance, and a terminal run that cannot be advanced past is
+    re-read for as long as an operator leaves the page open. See
+    :data:`_BREADTH_REPORTED` for what that de-duplication does and does not
+    promise.
     """
+    if _breadth_already_reported(chain_id=chain_id, stage=stage, views=views):
+        return
     label = stage.replace("_", " ")
     try:
         profile = evidence_profile(views)
@@ -1749,17 +1911,89 @@ async def advance_positioning(
     )
 
 
-async def start_channel_plan(
+def channel_plan_input(
+    *,
+    positioning_body: dict[str, Any],
+    taxonomy: list[dict[str, Any]],
+    campaign_motion: str,
+) -> dict[str, Any]:
+    """Everything the planning run needs beyond the evidence itself.
+
+    One definition of the shape, two users: :func:`start_channel_evidence`'s
+    caller stashes this on the pending artefact at start time, and
+    :func:`advance_channel_plan` spreads it into the planning run's payload one
+    or more polls later. Stashed rather than re-fetched for the reason
+    ``channel_taxonomy`` already is — it must be what THIS stage was started
+    against, not whatever the positioning or the taxonomy has been changed to
+    by the time the grounding run finishes.
+    """
+    return {
+        "positioning": positioning_body,
+        "channel_taxonomy": taxonomy,
+        "campaign_motion": campaign_motion,
+    }
+
+
+@dataclass(frozen=True)
+class ChannelPlanAdvance:
+    """What one poll of the two-step channel stage did (issue #65).
+
+    Three states, and the caller has to be able to tell them apart because one
+    of them requires it to persist something:
+
+    - ``plan is None``, ``started_plan_run_id is None`` — nothing to do yet.
+      The grounding run or the planning run is still in flight.
+    - ``started_plan_run_id`` set — the grounding run finished and its evidence
+      has just been handed to a freshly-started planning run. **The caller must
+      record that id**, or the next poll starts a second planning run and pays
+      for it: "the grounding run is terminal" is true on every subsequent poll,
+      and only the recorded id makes the transition happen once.
+    - ``plan`` set — the stage is finished and this is the artefact.
+    """
+
+    plan: ChannelPlan | None = None
+    started_plan_run_id: str | None = None
+
+
+async def start_channel_evidence(
     gateway: AgentGateway,
     *,
     positioning_body: dict[str, Any],
     taxonomy: list[dict[str, Any]],
     campaign_motion: str,
-    channel_plan_model: str = DEFAULT_CHANNEL_PLAN_MODEL,
+    channel_evidence_model: str = DEFAULT_CHANNEL_EVIDENCE_MODEL,
 ) -> tuple[str, str]:
-    """Request the single channel-plan agent (M4), given the *approved*
-    positioning artefact's body AND the channels this campaign may plan
-    against as input.
+    """Start the channel stage by starting its **grounding** run (M4, issues
+    #3/#65), given the *approved* positioning artefact's body AND the channels
+    this campaign may plan against as input.
+
+    ## Why the stage starts with a run that recommends nothing
+
+    Until now this stage was one ``:online`` run that retrieved and decided in
+    the same turn, and on tabsii dev, 2026-08-14, that run retrieved **ten deep
+    pages, zero site roots** — and then justified all six of its
+    recommendations with sources carried over from the approved positioning.
+    :class:`UngroundedRecommendationError` refused them, correctly.
+
+    The gap that leaves is citation behaviour, not grounding. ``:online``
+    injects retrieved pages into the context and records them on
+    ``annotations``, but nothing in the payload ever presented those URLs to
+    the model *as a set to cite from* — while the positioning's sources arrive
+    as structured ``Source`` objects it can see and copy. It cited the list it
+    could see.
+
+    So retrieval and structuring are two runs. This one grounds and reads;
+    :func:`advance_channel_plan` hands what the **runtime** recorded to a
+    second run as an enumerated list. Sequential rather than fanned out, and
+    deliberately so: research's fan-out exists to wait for N siblings and fans
+    in through the orchestration engine, which passes the children's *outputs*
+    — it has no way to pass ``annotations``, which is the one input here that
+    is worth having precisely because the model did not write it. There is also
+    only one sibling to wait for. Reading is what advances this pipeline
+    already (``admin_app._advance_artefact``), so the second run is started
+    from the poll that observes the first finishing — no second orchestration
+    pattern, no second seeded workflow, and one ``causation_id`` across both so
+    spend and the breadth line still join.
 
     ``taxonomy`` (#76 increment 2) is a list of
     ``{channel_key, label, motion, category}`` dicts — the tenant's
@@ -1783,17 +2017,17 @@ async def start_channel_plan(
     rejected. That is an efficiency, not the enforcement — see
     :func:`extract_channel_plan` for where the motion is actually enforced.
 
-    Mirrors :func:`start_positioning` otherwise, one stage further down the
-    chain: a single-run chain, not fanned out, because nothing fans in on it.
+    Mirrors :func:`start_positioning` otherwise: its own chain, started here
+    rather than discovered, because nothing fans in on it.
     """
     causation_id = str(uuid.uuid4())
     run_id = await gateway.request_agent_run(
-        agent_name=CHANNEL_PLAN_AGENT_NAME,
-        definition=channel_plan_definition(
-            model=channel_plan_model,
-            instructions=CHANNEL_PLAN_INSTRUCTIONS,
+        agent_name=CHANNEL_EVIDENCE_AGENT_NAME,
+        definition=channel_evidence_definition(
+            model=channel_evidence_model,
+            instructions=CHANNEL_EVIDENCE_INSTRUCTIONS,
         ),
-        output_tool=channel_plan_tool_schema(),
+        output_tool=channel_evidence_tool_schema(),
         # `search_query` FIRST, exactly as `start_research`'s payload is and
         # for exactly the same reason (issue #101, now #65): this is an
         # `:online` run, so the provider searches from the payload BEFORE the
@@ -1808,9 +2042,11 @@ async def start_channel_plan(
                 taxonomy=taxonomy,
                 campaign_motion=campaign_motion,
             ),
-            "positioning": positioning_body,
-            "channel_taxonomy": taxonomy,
-            "campaign_motion": campaign_motion,
+            **channel_plan_input(
+                positioning_body=positioning_body,
+                taxonomy=taxonomy,
+                campaign_motion=campaign_motion,
+            ),
         },
         causation_id=causation_id,
     )
@@ -1820,49 +2056,109 @@ async def start_channel_plan(
 async def advance_channel_plan(
     gateway: AgentGateway,
     *,
-    run_id: str,
+    evidence_run_id: str,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    plan_run_id: str | None = None,
+    plan_input: Mapping[str, Any] | None = None,
     causation_id: str | None = None,
     allowed_motions: Collection[str] | None = None,
     allowed_source_urls: Collection[str] | None = None,
-) -> ChannelPlan | None:
-    """Read the channel-plan run, advancing nothing else — mirrors
-    :func:`advance_positioning`: a single run, not a chain, so there is no
-    fan-in to discover. ``taxonomy`` is ``{channel_key: motion}`` for exactly
-    what :func:`start_channel_plan` gave this run, and ``allowed_motions``
-    the campaign motion it was started under (#67) — see
-    :func:`extract_channel_plan` for how they and ``allowed_source_urls`` are
-    used.
+    channel_plan_model: str = DEFAULT_CHANNEL_PLAN_MODEL,
+) -> ChannelPlanAdvance:
+    """Drive the two-step channel stage forward by one poll (issue #65).
 
-    Since #65 this stage retrieves, so its breadth is measured and logged on
-    every terminal path exactly as :func:`advance_research`'s is — including
-    the failed one, which is where the measurement is worth most: "the
-    retrieval was thin" and "the run died" produce the same dead artefact and
-    this line is the only thing that separates them. It is a report, never a
-    gate; it changes nothing this function returns or raises.
+    Three things can happen, and :class:`ChannelPlanAdvance` says which:
+    nothing yet, the planning run has just been started (**the caller must
+    persist its id**), or the plan is finished.
 
-    ``causation_id`` is the chain this run belongs to, carried only so the
-    breadth line can be joined to the rest of the campaign's runs. Optional
-    because it is diagnostic: a caller that has not got one still gets the
-    measurement, with the id reading as unknown rather than the measurement
-    being withheld.
+    ``evidence_run_id`` is the grounding run :func:`start_channel_evidence`
+    started; ``plan_run_id`` is the planning run this function started on an
+    earlier poll, passed back from wherever the caller stashed it.
+    ``plan_input`` is :func:`channel_plan_input`'s dict, stashed at start time
+    for the reason that function's docstring gives. ``taxonomy`` is
+    ``{channel_key: motion}`` for exactly the taxonomy the stage was started
+    against, and ``allowed_motions`` the campaign motion it was started under
+    (#67) — see :func:`extract_channel_plan` for how they and
+    ``allowed_source_urls`` are used.
+
+    ## The guard's subject is the run that RETRIEVED
+
+    ``annotations`` is read off the **grounding** run and handed to
+    :func:`extract_channel_plan`, never off the planning run. This is not a
+    convenience: the planning run is not an ``:online`` run, so its own
+    ``annotations`` can only ever be the "not a grounded run" state — which
+    skips both evidence checks. Reading it would leave
+    :class:`UngroundedRecommendationError` structurally unable to fire, without
+    a line of it being deleted. That is exactly the defect issue #90 found in
+    :func:`advance_research`, where the guard was reading the synthesis run
+    rather than the research runs that retrieved, and
+    :func:`_aggregate_research_annotations` is the same fix one stage up.
+
+    The grounding run's breadth is measured and logged on every terminal path,
+    including the failed one, which is where the measurement is worth most:
+    "the retrieval was thin" and "the run died" produce the same dead artefact
+    and this line is the only thing that separates them. It is a report, never
+    a gate. ``causation_id`` is carried only so it can be joined to the rest of
+    the campaign's runs, and is what the planning run is started on.
     """
-    view = await gateway.get_agent_run(run_id=run_id)
-    if view is None or not view.is_terminal:
-        return None
-    # Once, here, before either branch: emitted exactly one time per terminal
-    # advance, on the success and failure paths alike, and never while the run
-    # is still in flight (this function is polled, so that would be a stream of
-    # partial snapshots rather than one measurement).
-    _log_evidence_profile(chain_id=causation_id, views=[view], stage="channel_plan")
-    if not view.succeeded:
+    evidence_view = await gateway.get_agent_run(run_id=evidence_run_id)
+    if evidence_view is None or not evidence_view.is_terminal:
+        return ChannelPlanAdvance()
+    # Once, here, before any branch: the grounding run is the only run in this
+    # stage that retrieves, so it is the only one there is a breadth to measure
+    # for — and it is measured on the success and failure paths alike, never
+    # while it is still in flight.
+    _log_evidence_profile(chain_id=causation_id, views=[evidence_view], stage="channel_plan")
+    if not evidence_view.succeeded:
+        raise RunNotSucceededError("The channel-plan evidence run did not complete successfully.")
+
+    if plan_run_id is None:
+        evidence_set = extract_channel_evidence(evidence_view.messages)
+        handed = retrieved_evidence(
+            evidence_view.annotations,
+            notes={_url_key(item.url): item.note for item in evidence_set.evidence},
+        )
+        if handed is None:
+            # No record of what was retrieved. The planning run still runs —
+            # stranding a campaign because the runtime did not write a column
+            # is the failure mode this module refuses everywhere else — but it
+            # is handed nothing to cite, and `extract_channel_plan` will say
+            # out loud that it cannot adjudicate the result.
+            logger.warning(
+                "channel plan evidence hand-over is empty: the grounding run reported no "
+                "annotations, so there is no record of what it retrieved to hand on",
+                extra={"causation_id": causation_id},
+            )
+            handed = []
+        started = await gateway.request_agent_run(
+            agent_name=CHANNEL_PLAN_AGENT_NAME,
+            definition=channel_plan_definition(
+                model=channel_plan_model, instructions=CHANNEL_PLAN_INSTRUCTIONS
+            ),
+            output_tool=channel_plan_tool_schema(),
+            # `retrieved_evidence` FIRST, for the reason `search_query` leads
+            # the grounding run's payload: JSON key order is preserved, and the
+            # evidence is the thing this run decides and cites from. Leading
+            # with `positioning` is how the single-run stage came to justify
+            # every recommendation from the positioning's sources.
+            input_payload={"retrieved_evidence": handed, **(plan_input or {})},
+            causation_id=causation_id or str(uuid.uuid4()),
+        )
+        return ChannelPlanAdvance(started_plan_run_id=started)
+
+    plan_view = await gateway.get_agent_run(run_id=plan_run_id)
+    if plan_view is None or not plan_view.is_terminal:
+        return ChannelPlanAdvance()
+    if not plan_view.succeeded:
         raise RunNotSucceededError("The channel-plan run did not complete successfully.")
-    return extract_channel_plan(
-        view.messages,
-        taxonomy=taxonomy,
-        allowed_motions=allowed_motions,
-        allowed_source_urls=allowed_source_urls,
-        annotations=view.annotations,
+    return ChannelPlanAdvance(
+        plan=extract_channel_plan(
+            plan_view.messages,
+            taxonomy=taxonomy,
+            allowed_motions=allowed_motions,
+            allowed_source_urls=allowed_source_urls,
+            annotations=evidence_view.annotations,
+        )
     )
 
 
