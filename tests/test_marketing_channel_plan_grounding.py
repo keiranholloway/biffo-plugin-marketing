@@ -203,10 +203,22 @@ def test_the_prompt_no_longer_tells_the_agent_it_has_no_web_access() -> None:
 def test_the_prompt_asks_for_conversion_evidence_specifically() -> None:
     """Not "search the web" — the whole point is *which* question the search
     answers. Generic channel wisdom retrieved live is still generic channel
-    wisdom."""
+    wisdom.
+
+    The second assertion used to read ``"search results" in lowered``, when
+    the prompt spoke of "your own search results". Issue #159 changed the
+    *mood*, not the requirement: the agent has no search tool and never had
+    one (``tools: []``; the provider searches from the payload before the
+    model is invoked, #101), so a prompt phrased as though it could go and
+    search left it with an unsatisfiable precondition — and on dev
+    2026-08-14 it answered in prose and called no tool at all. The evidence
+    the plan must rest on is unchanged; it is now named as the retrieval this
+    run was *handed*. See ``tests/test_marketing_output_tool_call.py`` for
+    the sweep that keeps the imperative from coming back.
+    """
     lowered = CHANNEL_PLAN_INSTRUCTIONS.lower()
     assert "convert" in lowered
-    assert "search results" in lowered
+    assert "retrieval" in lowered
 
 
 def test_the_turn_budget_leaves_room_to_search_and_then_answer() -> None:

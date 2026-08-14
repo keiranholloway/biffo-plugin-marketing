@@ -598,6 +598,41 @@ finding on your angle, say so by returning nothing; but if a source does
 support one, it must appear with its URL.
 """
 
+#: What EVERY grounded (``:online``) stage is told about its own retrieval
+#: (issue #159), stated in the past tense because that is what is true.
+#:
+#: No agent in this plugin has a search tool — every ``*_definition`` below
+#: returns ``tools: []``, deliberately (a registered-but-unconfigured
+#: ``web_search`` is silently dropped rather than failed). Retrieval, where it
+#: happens at all, is the ``:online`` suffix: the provider searches **once**,
+#: from the run's input payload, **before** the model is invoked (#101). An
+#: agent therefore cannot search on purpose at any point, on any turn.
+#:
+#: **A prompt that orders one anyway has cost this plugin two live defects.**
+#: ``_EVIDENCE_RULE`` below records the first: research was told to "search the
+#: web for current material", could not, and took the escape hatch that
+#: followed — 10 sources retrieved on every run, none cited, twice
+#: consecutively (dev, 2026-08-12). Issue #155 then wrote the same shape into
+#: ``CHANNEL_PLAN_INSTRUCTIONS`` ("**you also have live web search, and you
+#: are expected to use it**", "search before you decide"), and the second
+#: instance was worse than the first: on dev 2026-08-14 the run completed in
+#: 16.6s of a 240s budget, billed $0.1344, and called no tool at all —
+#: ``the channel-plan run produced no submit_channel_plan tool call`` (#159).
+#:
+#: So this is one shared constant rather than a sentence each prompt is
+#: trusted to remember, and
+#: ``tests/test_marketing_output_tool_call.py`` sweeps every ``:online``
+#: stage for it — and every stage, grounded or not, for the imperative mood
+#: that caused both incidents.
+RETRIEVAL_ALREADY_RAN_RULE = """\
+Your input begins with a `search_query`: the text the retrieval you were
+given was derived from. **That search has already run.** Its results are in
+the material in front of you, and there is no search tool on this run — you
+cannot issue another search, and nothing you write will trigger one. So
+"let me search first" is not a step available to you, and "I need to search
+before I can answer" is not an answer this run is able to deliver.
+"""
+
 #: What each research agent is told about the retrieval it was handed.
 #:
 #: The two angles used to be expressed ONLY in these instructions, which the
@@ -612,14 +647,52 @@ support one, it must appear with its URL.
 #: and sent as the *first* key of the payload, so the two agents genuinely
 #: search different things. This rule tells the model that, so it does not
 #: re-derive the other angle's ground from its own material.
-_RETRIEVAL_SCOPE_RULE = """\
-Your input begins with a `search_query`: the text the retrieval you were
-given was derived from. It is scoped to YOUR angle and deliberately differs
-from the other researcher's, so the pages in front of you are not the pages
-in front of them. Work your own angle from your own material — the other
-angle is covered by someone else, and restating the market's top-level facts
+_RETRIEVAL_SCOPE_RULE = f"""\
+{RETRIEVAL_ALREADY_RAN_RULE}
+That query is scoped to YOUR angle and deliberately differs from the other
+researcher's, so the pages in front of you are not the pages in front of
+them. Work your own angle from your own material — the other angle is
+covered by someone else, and restating the market's top-level facts
 duplicates their work instead of adding to it.
 """
+
+
+def return_via_tool(tool_name: str) -> str:
+    """The closing rule every agent in this pipeline ends on (issue #159).
+
+    Each stage already ended with "Return your answer by calling the `X` tool
+    exactly once. Do not answer in prose." What none of them said is what
+    happens when the model decides it has **nothing** to return — and four of
+    the six explicitly invite exactly that ("return empty lists rather than
+    inventing content", "return fewer channels (or none)", "return an empty
+    findings list", "say so in the summary").
+
+    An operator cannot tell those two outcomes apart, because both are a 502.
+    But one of them carries a sentence they can act on ("The research run
+    fetched zero URLs... try running research again") and the other carries
+    only ``produced no submit_channel_plan tool call`` — a stage that ran, and
+    billed, and left nothing behind. The difference between them is a single
+    tool call, so the prompt now says in as many words that the empty answer
+    travels the same way every other answer does.
+
+    Generated per tool rather than written out five times so a stage cannot
+    end up naming another stage's tool, which would be worse than silence.
+    """
+    return f"""\
+Return your answer by calling the `{tool_name}` tool exactly once, and answer
+only that way. Do not reply in prose — not to explain what you would need,
+not to report that what you were given was too thin, and not to ask for
+anything before you begin.
+
+**Having nothing to report is still an answer, and it is delivered the same
+way.** If the material in front of you supports nothing, call `{tool_name}`
+with empty lists and let that be the answer; the operator is shown an empty
+artefact and can act on it. A run that ends without calling `{tool_name}`
+produces no artefact at all — the operator sees a failed stage and a sentence
+about a missing tool call, and every word you wrote instead is discarded
+unread.
+"""
+
 
 AUDIENCE_RESEARCH_INSTRUCTIONS = f"""\
 You are the campaign studio's audience researcher. Your angle is who this
@@ -637,9 +710,7 @@ Prioritise:
 {_RETRIEVAL_SCOPE_RULE}
 {_EVIDENCE_RULE}
 {_UNTRUSTED_INPUT_RULE}
-Return your findings by calling the `{FINDINGS_TOOL_NAME}` tool exactly once.
-Do not answer in prose.
-"""
+{return_via_tool(FINDINGS_TOOL_NAME)}"""
 
 COMPETITIVE_RESEARCH_INSTRUCTIONS = f"""\
 You are the campaign studio's competitive researcher. Your angle is what
@@ -656,9 +727,7 @@ Prioritise:
 {_RETRIEVAL_SCOPE_RULE}
 {_EVIDENCE_RULE}
 {_UNTRUSTED_INPUT_RULE}
-Return your findings by calling the `{FINDINGS_TOOL_NAME}` tool exactly once.
-Do not answer in prose.
-"""
+{return_via_tool(FINDINGS_TOOL_NAME)}"""
 
 RESEARCH_SYNTHESIS_INSTRUCTIONS = f"""\
 You are the campaign studio's research analyst. You are given the campaign
@@ -681,9 +750,7 @@ invent findings to fill the gap; an operator reviewing this artefact needs to
 know the research came back empty, not read a summary that hides it.
 
 {_UNTRUSTED_INPUT_RULE}
-Return your answer by calling the `{RESEARCH_SYNTHESIS_TOOL_NAME}` tool
-exactly once. Do not answer in prose.
-"""
+{return_via_tool(RESEARCH_SYNTHESIS_TOOL_NAME)}"""
 
 POSITIONING_INSTRUCTIONS = f"""\
 You are the campaign studio's positioning strategist. You are given one
@@ -719,9 +786,7 @@ If the research is too thin to support any segment, pillar or CTA, return
 empty lists rather than inventing content to fill them.
 
 {_UNTRUSTED_INPUT_RULE}
-Return your answer by calling the `{POSITIONING_TOOL_NAME}` tool exactly
-once. Do not answer in prose.
-"""
+{return_via_tool(POSITIONING_TOOL_NAME)}"""
 
 CHANNEL_PLAN_INSTRUCTIONS = f"""\
 You are the campaign studio's channel strategist. You are given one
@@ -730,17 +795,18 @@ calls to action, each carrying the sources that support it — a
 `campaign_motion` (`organic`, `paid` or `both`), and one **channel
 taxonomy**: a list of `{{channel_key, label, motion, category}}` entries.
 
-**You also have live web search, and you are expected to use it.** The
-positioning you were given answers a different question from yours. It was
-researched to establish who this audience is and what competitors say to
-them; you are deciding where this audience actually converts. Its sources
-cannot answer that, and a channel plan justified entirely by them is the
-failure this stage was rebuilt to end.
+**Live conversion evidence has already been retrieved for you, and it is
+what you decide from.** The positioning you were given answers a different
+question from yours. It was researched to establish who this audience is and
+what competitors say to them; you are deciding where this audience actually
+converts. Its sources cannot answer that, and a channel plan justified
+entirely by them is the failure this stage was rebuilt to end.
 
-## Search for conversion evidence, not for description
+## The retrieval in front of you is about conversion, not description
 
-Search before you decide, and search for the numbers a media planner would
-ask for:
+{RETRIEVAL_ALREADY_RAN_RULE}
+That query was aimed at the numbers a media planner would ask for, so those
+are what to look for in the pages you were given:
 
 - Where this audience demonstrably **converts** — not where it merely has
   attention. Intent expressed beats attention observed.
@@ -751,10 +817,10 @@ ask for:
 - Channel **economics and saturation** for this segment: what it costs to be
   seen there now, and what that buys.
 
-Prefer the specific page carrying the number — a benchmark report, a results
-write-up, a case study — over a vendor home page or an agency's "top 10
-channels" listicle. A retrieved page of generic channel wisdom is still
-generic channel wisdom; it has simply been fetched.
+Among the pages you were given, prefer the specific one carrying the number —
+a benchmark report, a results write-up, a case study — over a vendor home
+page or an agency's "top 10 channels" listicle. A retrieved page of generic
+channel wisdom is still generic channel wisdom; it has simply been fetched.
 
 **The taxonomy you are given is not the whole taxonomy.** It is the set of
 channels the operator selected for this campaign, already narrowed to the
@@ -792,8 +858,8 @@ around checking the list first, and never to re-propose a channel the
 operator has already left out for a reason you cannot see.
 
 Rank the channels within each motion (1 = highest priority) and give each a
-rationale an operator can disagree with: name the conversion evidence you
-found — the figure, the comparable campaign, the observed intent — and name
+rationale an operator can disagree with: name the conversion evidence in the
+retrieval — the figure, the comparable campaign, the observed intent — and name
 which segment, pillar or CTA it serves. Rank on what the evidence says
 converts, not on what is conventionally listed first. A channel recommendation
 with no evidence behind it is the most confident-sounding fabrication in this
@@ -807,38 +873,40 @@ rationale.
 Every recommendation must carry `sources`, and a `url` may come from exactly
 two places:
 
-1. **Your own search results** — copied exactly as the result gives it,
-   character for character. Do not tidy a URL, do not shorten it, and do not
-   cite a link you saw quoted *inside* a page rather than in your results.
+1. **The retrieval you were given** — the pages returned for this run's
+   `search_query`, copied exactly as they appear, character for character. Do
+   not tidy a URL, do not shorten it, and do not cite a link you saw quoted
+   *inside* a page rather than in the retrieval itself.
 2. **The positioning you were given** — the `url` of a `Source` on a segment,
    pillar or CTA, again exactly as written.
 
-Both are checked mechanically, against the runtime's own record of what your
-search actually returned and against the positioning you were given. A `url`
-in neither is rejected and the whole plan fails with it, so a plausible-looking
-source you did not read is worse than a recommendation you leave out.
+Both are checked mechanically, against the runtime's own record of what the
+retrieval actually returned and against the positioning you were given. A
+`url` in neither is rejected and the whole plan fails with it, so a
+plausible-looking source you did not read is worse than a recommendation you
+leave out.
 
-**Every recommendation needs at least one source from your own search
-results.** This is checked per recommendation, not across the plan: a channel
-justified only by positioning's sources is justified by evidence about a
-different question, and is rejected along with the whole plan. If you searched
-and found nothing about a channel's performance for this audience, do not
-recommend that channel — say nothing rather than reach for the positioning to
-dress it up.
+**Every recommendation needs at least one source from this run's own
+retrieval.** This is checked per recommendation, not across the plan: a
+channel justified only by positioning's sources is justified by evidence
+about a different question, and is rejected along with the whole plan. If the
+retrieval in front of you says nothing about a channel's performance for this
+audience, do not recommend that channel — leave it out rather than reach for
+the positioning to dress it up.
 
 For `note`, do not paste the positioning item's note verbatim — your
 `rationale` already says why this channel follows from the evidence, so repeat
 only what a `note` genuinely adds beyond that, or leave it empty.
 
-If your search turns up nothing that supports any recommendation in a motion,
-return fewer channels (or none) for that motion rather than inventing content
-to fill it — a channel plan that recommends nothing beats one that recommends
-plausibly.
+If the retrieval supports no recommendation in a motion, return fewer channels
+(or none) for that motion rather than inventing content to fill it — a channel
+plan that recommends nothing beats one that recommends plausibly. And if it
+supports nothing at all, return an empty plan **by calling the tool**, exactly
+as the closing rule below says: an empty plan tells the operator the retrieval
+came back thin, whereas no tool call tells them only that the stage broke.
 
 {_UNTRUSTED_INPUT_RULE}
-Return your answer by calling the `{CHANNEL_PLAN_TOOL_NAME}` tool exactly
-once. Do not answer in prose.
-"""
+{return_via_tool(CHANNEL_PLAN_TOOL_NAME)}"""
 
 # Bound to short names purely so the length rules read as numbers inside
 # `COPY_INSTRUCTIONS`'s f-string. The values are `COPY_LENGTH_BUDGET`'s — the
@@ -922,9 +990,7 @@ plan you were given: a `url` that appears in neither is rejected and the
 whole copy set fails with it.
 
 {_UNTRUSTED_INPUT_RULE}
-Return your answer by calling the `{COPY_TOOL_NAME}` tool exactly once. Do
-not answer in prose.
-"""
+{return_via_tool(COPY_TOOL_NAME)}"""
 
 #: Keyed by research agent name, in ``RESEARCH_AGENT_NAMES`` order — the
 #: pipeline looks each one up rather than duplicating the pairing.

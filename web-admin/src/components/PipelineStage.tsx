@@ -22,6 +22,13 @@ interface PipelineStageProps {
    * anything wrong with the choice they made. Offers "Reload" instead of
    * leaving them to retry the exact request that just failed. */
   stale?: boolean
+  /** True when this stage's agent run reached a terminal state and produced
+   * nothing usable — `StageRunFailedError`, the advance route's 502 (issue
+   * #159). The artefact is still `pending`, because nothing ever moved it on,
+   * so "Check for result" re-reads the same dead run and returns the same
+   * reason for as long as anyone keeps pressing it. This is what turns the
+   * stage from stuck into restartable. */
+  failed?: boolean
   /** Whether the upstream gate this stage needs is satisfied. */
   canStart: boolean
   /** Human reason `canStart` is false, shown instead of a start button that
@@ -76,6 +83,7 @@ export function PipelineStage({
   loading,
   error,
   stale = false,
+  failed = false,
   canStart,
   blockedReason,
   busy,
@@ -150,9 +158,37 @@ export function PipelineStage({
           )}
 
           {status === 'pending' && (
-            <button type="button" onClick={onRefresh} disabled={busy}>
-              {busy ? 'Checking…' : 'Check for result'}
-            </button>
+            <>
+              <button type="button" onClick={onRefresh} disabled={busy}>
+                {busy ? 'Checking…' : 'Check for result'}
+              </button>
+              {/* Issue #159. A `pending` artefact whose run has already
+                  failed is not waiting for anything — the run is terminal and
+                  what it returned cannot become an artefact, so every further
+                  read produces the same 502 (see `StageRunFailedError`). An
+                  operator whose channel plan failed on tabsii dev had "Check
+                  for result" and nothing else, for ever.
+
+                  This deliberately does NOT reuse the `null`/`rejected` branch
+                  above. #85/#86 established that a failed stage must keep its
+                  badge and its reason rather than silently reverting to
+                  "startable", because reverting is what hid the reason. So the
+                  reason stays, the badge stays, and what is added is a
+                  separately-labelled re-run — the same label a `rejected`
+                  stage offers, since it is the same action.
+
+                  Gated by `canStart` like every other start: an upstream
+                  approval that has since been withdrawn would make a re-run
+                  422, and the hint says which. */}
+              {failed && (
+                <>
+                  {blockedReason !== null && <p className="hint">{blockedReason}</p>}
+                  <button type="button" onClick={onStart} disabled={!canStart || busy}>
+                    {busy ? 'Starting…' : `Run ${title.toLowerCase()} again`}
+                  </button>
+                </>
+              )}
+            </>
           )}
 
           {(status === 'proposed' || status === 'approved' || status === 'rejected') && children}
