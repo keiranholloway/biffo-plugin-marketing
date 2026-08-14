@@ -329,7 +329,12 @@ async def get_paid_pack_route(
             detail="The copy artefact must be approved before this can proceed.",
         )
 
-    copy_body = admin_app._parse_artefact_body(approved_copy.get("body"))
+    # Narrowed to the operator's approved subset (issue #145) — see
+    # `pack_routes.get_pack_route`'s identical comment for the reasoning.
+    copy_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_copy.get("body")),
+        admin_app._artefact_selection(approved_copy),
+    )
     channels = copy_body.get("channels") or []
     try:
         pipeline.require_channel_keyed_copy(channels)
@@ -364,7 +369,12 @@ async def get_paid_pack_route(
             detail="The positioning artefact must be approved before this can proceed.",
         )
 
-    positioning_body = admin_app._parse_artefact_body(approved_positioning.get("body"))
+    # Narrowed to the operator's approved subset (issue #145) — a
+    # dropped/rejected segment must not reach the targeting brief.
+    positioning_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_positioning.get("body")),
+        admin_app._artefact_selection(approved_positioning),
+    )
     raw_segments = positioning_body.get("segments") or []
     if not raw_segments:
         raise HTTPException(

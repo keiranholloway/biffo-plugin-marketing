@@ -75,13 +75,24 @@ async def start_channel_plan_route(
             detail="The positioning artefact must be approved before this can proceed.",
         )
 
-    positioning_body = admin_app._parse_artefact_body(approved_positioning.get("body"))
-    # The closed set of URLs this run is being shown (issue #22): exactly the
-    # approved positioning's own citations. Read at start time and stashed on
-    # the pending artefact below for the same reason `taxonomy_motions` is —
-    # it must be what THIS run saw, not what positioning has been re-run to by
+    # Narrowed to the operator's approved subset (issue #145) — `None` means
+    # "everything", the backwards-compatible reading every pre-#145 approved
+    # positioning artefact gets. This is BOTH what the agent is shown (a
+    # dropped segment/pillar/CTA must not reach it as input) and what the
+    # citation check below is derived from.
+    positioning_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(approved_positioning.get("body")),
+        admin_app._artefact_selection(approved_positioning),
+    )
+    # The closed set of URLs this run is being shown (issue #22), recomputed
+    # from the approved SUBSET rather than read off the parent's unfiltered
+    # `citations` column — see `pipeline.source_urls_from_body` for why a
+    # fresh union, not a subtraction, is what makes this narrow correctly when
+    # two elements share a source. Read at start time and stashed on the
+    # pending artefact below for the same reason `taxonomy_motions` is — it
+    # must be what THIS run saw, not what positioning has been re-run to by
     # the time the run completes. See `pipeline.extract_channel_plan`.
-    allowed_source_urls = pipeline.citation_source_urls(approved_positioning.get("citations"))
+    allowed_source_urls = pipeline.source_urls_from_body(positioning_body)
 
     channels_resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin.token)
     channels_resp.raise_for_status()
@@ -121,10 +132,12 @@ async def start_channel_plan_route(
             # proposed — same shape `start_research_route` already uses for
             # `research_run_ids`.
             "body": json.dumps(
-                {
-                    "channel_taxonomy": taxonomy_motions,
-                    "allowed_source_urls": allowed_source_urls,
-                }
+                pipeline.with_element_ids(
+                    {
+                        "channel_taxonomy": taxonomy_motions,
+                        "allowed_source_urls": allowed_source_urls,
+                    }
+                )
             ),
         },
     )

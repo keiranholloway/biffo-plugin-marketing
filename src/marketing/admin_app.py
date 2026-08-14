@@ -62,7 +62,7 @@ from typing import Any
 import httpx
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -529,6 +529,30 @@ def _parse_artefact_body(raw: Any) -> dict[str, Any]:
     return json.loads(raw) if isinstance(raw, str) else (raw or {})
 
 
+def _artefact_selection(artefact: dict[str, Any]) -> list[str] | None:
+    """The `element_ids` an operator approved this artefact with, or `None`
+    for "everything" (issue #145) — `marketing_artefact.approved_selection`,
+    read tri-shaped exactly like `body`/`citations` (Core's persisted JSON
+    *text*, an already-parsed value, or genuinely absent — see
+    `_parse_artefact_body`'s own docstring for why every artefact-reading
+    route needs the same normalisation).
+
+    `NULL`/unreadable both read as `None` — "everything" — rather than
+    raising or defaulting to "nothing": every artefact approved before this
+    column existed has no selection at all, and must keep behaving exactly as
+    it did before this change, not lose every element the moment it ships.
+    """
+    raw = artefact.get("approved_selection")
+    if isinstance(raw, str):
+        if not raw:
+            return None
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    return raw if isinstance(raw, list) else None
+
+
 def _require_known_kind(kind: str) -> None:
     if kind not in _PIPELINE_ARTEFACT_KINDS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown artefact kind.")
@@ -639,7 +663,10 @@ async def _advance_artefact(
         token,
         json={
             "status": "proposed",
-            "body": json.dumps(result.model_dump()),
+            # `with_element_ids` (issue #145) — server-assigned ids, stamped
+            # here because this is the one place every artefact kind's real
+            # content is actually persisted (`_advance_artefact`'s docstring).
+            "body": json.dumps(pipeline.with_element_ids(result.model_dump())),
             "citations": json.dumps(pipeline.flatten_citations(result)),
         },
     )
@@ -689,7 +716,7 @@ async def start_research_route(
             # needs them to detect "every research agent failed, so the engine
             # never fired synthesis" (idea-scout's own reasoning for tracking
             # them). Overwritten with the real synthesis output once proposed.
-            "body": json.dumps({"research_run_ids": research_run_ids}),
+            "body": json.dumps(pipeline.with_element_ids({"research_run_ids": research_run_ids})),
         },
     )
     created.raise_for_status()
@@ -723,13 +750,54 @@ async def get_artefact_route(
         raise _pipeline_error_to_http(exc) from exc
 
 
+class ApproveArtefactBody(BaseModel):
+    """The operator's chosen subset of a `proposed` artefact's elements
+    (issue #145).
+
+    `element_ids=None` — the default, and what a request with no body at all
+    parses to — means approve everything, preserving the pre-#145 behaviour
+    exactly: today's UI, and every other existing caller, sends no body and
+    must keep working unchanged.
+    """
+
+    element_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "The element ids to approve out of this artefact's body. Omit entirely to "
+            "approve everything (today's behaviour). An empty list is rejected — see "
+            "approve_artefact_route's docstring — because 'nothing is usable' is what the "
+            "reject route is for, not an empty selection here."
+        ),
+    )
+
+
 @router.post("/campaigns/{campaign_id}/artefacts/{kind}/approve")
 async def approve_artefact_route(
-    campaign_id: str, kind: str, admin: Any = Depends(require_admin)
+    campaign_id: str,
+    kind: str,
+    body: ApproveArtefactBody | None = Body(default=None),
+    admin: Any = Depends(require_admin),
 ) -> dict[str, Any]:
-    """`proposed` -> `approved`. Only a human calls this route — there is no
-    other caller in this plugin — which is the approval gate itself, not
-    ceremony around it."""
+    """`proposed` -> `approved`, optionally narrowed to a subset of the
+    artefact's elements (issue #145). Only a human calls this route — there
+    is no other caller in this plugin — which is the approval gate itself,
+    not ceremony around it.
+
+    **An empty `element_ids` is rejected outright, not treated as "approve
+    nothing".** Every artefact is a list, so an operator who genuinely finds
+    none of it usable has a distinct action already — `reject_artefact_route`
+    — and letting an empty selection through here would make "approve
+    nothing" silently equivalent to "reject", without the operator having
+    chosen reject, and without whatever downstream already read this
+    artefact's status noticing the difference.
+
+    **Unknown ids are rejected too**, against the artefact's OWN persisted
+    element ids (`pipeline.known_element_ids`) — not the ids a stale admin
+    page happened to render. A page that has been open since before a
+    re-run must not be able to silently approve nothing (every requested id
+    unknown) or a different element than the one the operator actually
+    looked at.
+    """
     _require_known_kind(kind)
     campaign_id = _validated_campaign_id(campaign_id)
 
@@ -747,11 +815,35 @@ async def approve_artefact_route(
             ),
         )
 
+    element_ids = body.element_ids if body is not None else None
+    update: dict[str, Any] = {"status": "approved"}
+    if element_ids is not None:
+        if not element_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    "An empty selection is not a valid approval — it is indistinguishable "
+                    "from approving nothing by accident. Use the reject route if none of "
+                    "this artefact is usable."
+                ),
+            )
+        known = pipeline.known_element_ids(_parse_artefact_body(artefact.get("body")))
+        unknown = sorted(set(element_ids) - known)
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Unknown element id(s): {', '.join(unknown)}. This selection may be "
+                    "stale — refresh the artefact and try again."
+                ),
+            )
+        update["approved_selection"] = json.dumps(element_ids)
+
     updated = await _core(
         "PATCH",
         f"{_INTERNAL_PREFIX}/artefacts/{artefact['id']}",
         admin.token,
-        json={"status": "approved"},
+        json=update,
     )
     updated.raise_for_status()
     return updated.json()
@@ -827,15 +919,27 @@ async def start_positioning_route(
             detail="The research artefact must be approved before this can proceed.",
         )
 
-    research_body = _parse_artefact_body(approved_research.get("body"))
+    # Narrowed to the operator's approved subset (issue #145) — `None` means
+    # "everything", the backwards-compatible reading every pre-#145 approved
+    # research artefact gets. This is BOTH what the agent is shown (a dropped
+    # finding must not reach it as input) and what the citation check below is
+    # derived from — the two must agree, or a run could cite something it was
+    # never actually shown.
+    research_body = pipeline.selected_body(
+        _parse_artefact_body(approved_research.get("body")),
+        _artefact_selection(approved_research),
+    )
 
-    # The closed set of URLs this run is actually being shown: the approved
-    # research's own citations (issue #22). Read HERE, at start time, and
-    # stashed below — not re-read when the run completes, since research can
-    # be re-run and re-approved in between, and validating against a set this
-    # run never saw would fail an honest positioning run (and pass a
+    # The closed set of URLs this run is actually being shown (issue #22),
+    # recomputed from the approved SUBSET rather than read off the parent's
+    # unfiltered `citations` column — see `pipeline.source_urls_from_body` for
+    # why a fresh union, not a subtraction, is what makes this narrow
+    # correctly when two findings share a source. Read HERE, at start time,
+    # and stashed below — not re-read when the run completes, since research
+    # can be re-run and re-approved in between, and validating against a set
+    # this run never saw would fail an honest positioning run (and pass a
     # dishonest one).
-    allowed_source_urls = pipeline.citation_source_urls(approved_research.get("citations"))
+    allowed_source_urls = pipeline.source_urls_from_body(research_body)
 
     causation_id, run_id = await pipeline.start_positioning(gateway, research_body=research_body)
 
@@ -853,7 +957,9 @@ async def start_positioning_route(
             # once proposed — the same shape `start_research_route` uses for
             # `research_run_ids` and `start_channel_plan_route` for
             # `channel_taxonomy`.
-            "body": json.dumps({"allowed_source_urls": allowed_source_urls}),
+            "body": json.dumps(
+                pipeline.with_element_ids({"allowed_source_urls": allowed_source_urls})
+            ),
         },
     )
     created.raise_for_status()

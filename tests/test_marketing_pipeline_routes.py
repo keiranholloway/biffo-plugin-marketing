@@ -897,3 +897,223 @@ def test_copy_artefact_can_be_approved(ctx) -> None:
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
+
+
+# ── partial approval / selection (issue #145) ─────────────────────────────────
+#
+# `approve_artefact_route` used to flip an artefact's whole body `proposed ->
+# approved` in one move. Every artefact is a LIST, so an operator who wanted 8
+# of 9 channel recommendations had to accept the ninth or reject the whole
+# run. These tests exercise the fix end to end over the HTTP routes; the pure
+# functions it is built from (`with_element_ids`/`selected_body`/
+# `source_urls_from_body`/`known_element_ids`) have their own unit tests in
+# `tests/test_marketing_element_ids.py`.
+
+
+def _synthesis_call_two_findings(
+    url_a: str = "https://example.com/a", url_b: str = "https://example.com/b"
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "submit_research_synthesis",
+                        "arguments": {
+                            "summary": "Two signals.",
+                            "findings": [
+                                {
+                                    "signal": "A",
+                                    "why_it_matters": "m",
+                                    "sources": [{"url": url_a, "note": "n"}],
+                                },
+                                {
+                                    "signal": "B",
+                                    "why_it_matters": "m",
+                                    "sources": [{"url": url_b, "note": "n"}],
+                                },
+                            ],
+                        },
+                    }
+                }
+            ],
+        }
+    ]
+
+
+def _propose_research_two_findings(client, core, gateway) -> dict[str, Any]:
+    started = client.post(f"/campaigns/{_CAMPAIGN}/research").json()
+    for run_id in list(gateway._runs):
+        gateway.complete(run_id)
+    gateway.fire_chain_run(
+        chain_id=started["causation_id"],
+        agent_name=RESEARCH_SYNTHESIS_AGENT_NAME,
+        messages=_synthesis_call_two_findings(),
+    )
+    return client.get(f"/campaigns/{_CAMPAIGN}/artefacts/research").json()
+
+
+def test_approve_stamps_ids_on_every_element_of_a_proposed_artefact(ctx) -> None:
+    """Issue #145's core requirement, at the HTTP boundary: ids are assigned
+    at persist time, so every element already has one by the time an operator
+    could even try to select by it."""
+    client, core, gateway = ctx
+    proposed = _propose_research_two_findings(client, core, gateway)
+
+    ids = [f["id"] for f in json.loads(proposed["body"])["findings"]]
+
+    assert all(isinstance(i, str) and i for i in ids)
+    assert len(set(ids)) == len(ids)
+
+
+def test_approve_rejects_an_empty_selection(ctx) -> None:
+    """Design decision #6: an empty `element_ids` is not a distinct way to
+    approve nothing — that is what the reject route is for."""
+    client, core, gateway = ctx
+    proposed = _propose_research(client, core, gateway)
+
+    resp = client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve", json={"element_ids": []}
+    )
+
+    assert resp.status_code == 422
+    assert core.artefacts[proposed["id"]]["status"] == "proposed"
+
+
+def test_approve_rejects_an_unknown_element_id(ctx) -> None:
+    """A stale page selecting a since-regenerated element must not silently
+    approve nothing — it must be told the selection is stale."""
+    client, core, gateway = ctx
+    proposed = _propose_research(client, core, gateway)
+
+    resp = client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve",
+        json={"element_ids": ["not-a-real-id"]},
+    )
+
+    assert resp.status_code == 422
+    assert "not-a-real-id" in resp.json()["detail"]
+    assert core.artefacts[proposed["id"]]["status"] == "proposed"
+
+
+def test_approve_with_no_body_leaves_the_selection_null(ctx) -> None:
+    """Today's no-body approve — every existing caller, including the UI,
+    which sends no body at all — keeps working unchanged, and NULL is what
+    makes a downstream read treat it as "everything"."""
+    client, core, gateway = ctx
+    proposed = _propose_research(client, core, gateway)
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "approved"
+    assert core.artefacts[proposed["id"]].get("approved_selection") is None
+
+
+def test_approve_with_a_subset_stores_it(ctx) -> None:
+    client, core, gateway = ctx
+    proposed = _propose_research_two_findings(client, core, gateway)
+    keep_id = json.loads(proposed["body"])["findings"][0]["id"]
+
+    resp = client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve", json={"element_ids": [keep_id]}
+    )
+
+    assert resp.status_code == 200
+    assert json.loads(core.artefacts[proposed["id"]]["approved_selection"]) == [keep_id]
+
+
+def test_null_selection_behaves_as_everything_against_a_pre_change_artefact(ctx) -> None:
+    """The explicit backwards-compatibility case (issue #145): an artefact
+    approved before this change has a body with no `id` on any element at all
+    (never passed through `with_element_ids`) and `approved_selection` is
+    NULL. It must keep flowing into the next stage's input whole, not empty."""
+    client, core, gateway = ctx
+    proposed = _propose_research(client, core, gateway)
+    # Simulate a pre-#145 row: strip the ids `with_element_ids` stamped, as a
+    # deployment's existing approved research would never have had them.
+    legacy_body = json.loads(proposed["body"])
+    for finding in legacy_body["findings"]:
+        finding.pop("id", None)
+    core.artefacts[proposed["id"]]["body"] = json.dumps(legacy_body)
+
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/research/approve")  # no body -> NULL selection
+    assert core.artefacts[proposed["id"]].get("approved_selection") is None
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/positioning")
+
+    assert resp.status_code == 201
+    positioning_requests = [
+        r for r in gateway.requested if r["agent_name"] == "marketing-positioning"
+    ]
+    assert len(positioning_requests[0]["input_payload"]["research"]["findings"]) == 1
+
+
+def test_a_subset_narrows_what_the_next_stage_sees(ctx) -> None:
+    """The behaviour the whole issue exists for: approving fewer than every
+    element removes the rest from what the next stage is shown, not just from
+    what an operator sees on screen — and the provenance check narrows WITH
+    the selection (issue #145's most quietly-breakable requirement)."""
+    client, core, gateway = ctx
+    proposed = _propose_research_two_findings(client, core, gateway)
+    keep = next(f for f in json.loads(proposed["body"])["findings"] if f["signal"] == "A")
+
+    client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve", json={"element_ids": [keep["id"]]}
+    )
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+
+    positioning_requests = [
+        r for r in gateway.requested if r["agent_name"] == "marketing-positioning"
+    ]
+    sent_findings = positioning_requests[0]["input_payload"]["research"]["findings"]
+    assert [f["signal"] for f in sent_findings] == ["A"]
+    pending = json.loads(started["body"])
+    assert pending["allowed_source_urls"] == ["https://example.com/a"]
+
+
+def test_a_legitimate_citation_of_a_surviving_finding_still_passes(ctx) -> None:
+    """Provenance narrows CORRECTLY, not merely narrows: a positioning run
+    that cites exactly what survived the selection must still be accepted —
+    proving this isn't a check that fails closed on every real citation the
+    moment any selection at all is applied."""
+    client, core, gateway = ctx
+    proposed = _propose_research_two_findings(client, core, gateway)
+    keep = next(f for f in json.loads(proposed["body"])["findings"] if f["signal"] == "A")
+    client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve", json={"element_ids": [keep["id"]]}
+    )
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+
+    gateway.complete(
+        started["agent_run_id"], messages=_positioning_call(url="https://example.com/a")
+    )
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "proposed"
+
+
+def test_citing_a_dropped_findings_url_now_fails(ctx) -> None:
+    """The other half of "narrows correctly": a positioning run that cites
+    the URL belonging to the finding the operator did NOT approve is treated
+    exactly like any other uncited source — even though that URL was
+    perfectly legitimate before the selection was applied. This is the case
+    issue #145 says is "the one most likely to break quietly" if the
+    provenance check does not narrow along with the selection."""
+    client, core, gateway = ctx
+    proposed = _propose_research_two_findings(client, core, gateway)
+    keep = next(f for f in json.loads(proposed["body"])["findings"] if f["signal"] == "A")
+    client.post(
+        f"/campaigns/{_CAMPAIGN}/artefacts/research/approve", json={"element_ids": [keep["id"]]}
+    )
+    started = client.post(f"/campaigns/{_CAMPAIGN}/positioning").json()
+
+    gateway.complete(
+        started["agent_run_id"], messages=_positioning_call(url="https://example.com/b")
+    )
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/artefacts/positioning")
+
+    assert resp.status_code == 502
+    assert core.artefacts[started["id"]]["status"] == "pending"

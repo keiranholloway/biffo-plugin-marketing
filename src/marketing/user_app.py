@@ -125,7 +125,7 @@ from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import require_group
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 
-from . import admin_app, principal_client
+from . import admin_app, pipeline, principal_client
 from .config import public_base_url_for
 from .links import tracked_url
 
@@ -295,7 +295,12 @@ async def get_pack_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No approved copy for this campaign yet.",
         )
-    copy_body = admin_app._parse_artefact_body(copy_artefact.get("body"))
+    # Narrowed to the operator's approved subset (issue #145) — a founder
+    # must not be shown a channel the operator did not approve.
+    copy_body = pipeline.selected_body(
+        admin_app._parse_artefact_body(copy_artefact.get("body")),
+        admin_app._artefact_selection(copy_artefact),
+    )
     channels = copy_body.get("channels") or []
 
     asset_rows = await _list_all(
