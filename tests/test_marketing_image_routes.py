@@ -104,6 +104,9 @@ class _FakeCoreClient:
         ledger_status: int | None = None,
         ledger_missing_id: bool = False,
         confirm_missing_id: bool = False,
+        confirm_status: int | None = None,
+        url_status: int | None = None,
+        url_missing: bool = False,
     ) -> None:
         self.calls: list[tuple[str, str, Any]] = []
         self._max_bytes = max_bytes
@@ -111,6 +114,9 @@ class _FakeCoreClient:
         self._ledger_status = ledger_status
         self._ledger_missing_id = ledger_missing_id
         self._confirm_missing_id = confirm_missing_id
+        self._confirm_status = confirm_status
+        self._url_status = url_status
+        self._url_missing = url_missing
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         self.calls.append(("POST", path, json))
@@ -131,6 +137,8 @@ class _FakeCoreClient:
                 "expires_in": 900,
             }
         if path == f"{image_routes._STORAGE_PATH}/confirm":
+            if self._confirm_status is not None:
+                raise BiffoAPIError(self._confirm_status, "storage confirm unavailable")
             if self._confirm_missing_id:
                 return {
                     "owner_plugin": "system:marketing",
@@ -152,6 +160,10 @@ class _FakeCoreClient:
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         self.calls.append(("GET", path, params))
         if path == f"{image_routes._STORAGE_PATH}/{_MEDIA_ID}/url":
+            if self._url_status is not None:
+                raise BiffoAPIError(self._url_status, "signed url unavailable")
+            if self._url_missing:
+                return {"expires_in": 300}
             return {"url": "https://s3.example.invalid/signed-get", "expires_in": 300}
         raise AssertionError(f"unexpected GET {path}")
 
@@ -261,6 +273,27 @@ def _s3_upload_failing(monkeypatch: pytest.MonkeyPatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, text="access denied")
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    class _PatchedClient(real_async_client):  # type: ignore[misc]
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _PatchedClient)
+
+
+@pytest.fixture
+def _s3_upload_network_error(monkeypatch: pytest.MonkeyPatch):
+    """As `_s3_upload_failing`, but the connection itself fails — no HTTP
+    response ever comes back at all, distinct from S3 responding with a
+    refusal status. `_upload`'s `except httpx.HTTPError` around this POST is
+    what stands between this and a bare, uncommitted-state-losing crash."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection reset by peer", request=request)
 
     transport = httpx.MockTransport(handler)
     real_async_client = httpx.AsyncClient
@@ -599,6 +632,85 @@ def test_a_malformed_confirm_response_names_the_ledger(_s3_upload_ok) -> None:
     assert resp.status_code == 502
     detail = resp.json()["detail"]
     assert _LEDGER_ID in detail, f"the error must name the ledger entry: {detail!r}"
+
+
+def test_a_network_level_upload_failure_names_the_ledger(_s3_upload_network_error) -> None:
+    """`_upload`'s `except httpx.HTTPError` — a connection failure reaching
+    S3 at all, distinct from `test_the_charge_survives_an_upload_failure_and_
+    the_error_names_the_ledger` above (S3 responding with a refusal status).
+    The charge has already ledgered by this point and the error must still
+    say so, the same as an HTTP-status upload failure does."""
+    core = _FakeCoreClient()
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    ledger_calls = [c for c in core.calls if c[1] == image_routes._LEDGER_PATH]
+    assert len(ledger_calls) == 1, (
+        "the charge must be ledgered even though the upload never completed"
+    )
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail, (
+        f"the error must name the ledger entry so a retry is not blind: {detail!r}"
+    )
+
+
+def test_a_failed_confirm_call_names_the_ledger(_s3_upload_ok) -> None:
+    """`_upload`'s SECOND `except BiffoAPIError` — the storage `/confirm`
+    POST itself failing (Core answered, but with an error), distinct from
+    `test_a_malformed_confirm_response_names_the_ledger` (confirm succeeds
+    with a shape Core response drift left incomplete). The upload has
+    already reached S3 and the ledger already recorded the charge, so the
+    502 must still name the ledger."""
+    core = _FakeCoreClient(confirm_status=502)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail, f"the error must name the ledger entry: {detail!r}"
+
+
+def test_a_failed_signed_url_fetch_names_everything_already_committed(_s3_upload_ok) -> None:
+    """The route's final `except BiffoAPIError` (fetching the signed GET
+    URL) — by this point the charge, the upload AND the asset row have all
+    committed, so the 502 must name all three: nothing left to retry that
+    isn't purely local bookkeeping, per the route's own docstring."""
+    core = _FakeCoreClient(url_status=502)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail
+    assert _MEDIA_ID in detail
+
+
+def test_a_malformed_signed_url_response_names_everything_already_committed(_s3_upload_ok) -> None:
+    """As above, one field-shape step later: Core's `/url` GET succeeds but
+    the response is missing `url` itself — the route's LAST `except
+    HTTPException`, wrapping `_required_field`. Same committed-state
+    guarantee: the charge, upload and asset row are all already durable."""
+    core = _FakeCoreClient(url_missing=True)
+    client = TestClient(
+        _app(provider=_FakeImageProvider(), core_client=core, campaign_client=_FakeCampaignClient())
+    )
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/stills", json={"prompt": "anything"})
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert _LEDGER_ID in detail
+    assert _MEDIA_ID in detail
 
 
 def test_a_non_numeric_max_bytes_is_a_diagnosable_502_not_a_crash() -> None:

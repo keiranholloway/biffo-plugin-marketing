@@ -8,6 +8,8 @@ same rationale as idea-scout's `test_idea_scout_seed_fan_in_workflow.py`.
 
 from __future__ import annotations
 
+import io
+
 import pytest
 from _scripts import load_script
 
@@ -318,6 +320,39 @@ def test_a_seeding_run_stays_quiet_when_the_deployment_is_in_step(
     listed = _deployed(definition()["action_config"])
 
     assert _run_main(monkeypatch, [], listed) == 0
+
+
+def test_a_failed_create_reports_the_core_error_and_exits_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The SECOND `except urllib.error.HTTPError` — the write itself (here, a
+    POST since nothing is seeded yet) failing, distinct from
+    `test_check_exits_two_when_core_cannot_be_read` above (the initial GET
+    that lists existing workflows failing). A write failure is a real,
+    non-`--check` failure — exit 1, not 2 — and must name what Core said,
+    not raise the raw `HTTPError` out of `main()`."""
+    monkeypatch.setenv("CORE_API_URL", "https://core.example")
+    monkeypatch.setenv("ADMIN_BEARER_TOKEN", "t")
+    monkeypatch.setattr(_seed.sys, "argv", ["seed_fan_in_workflow.py"])
+
+    def _fake_request(method: str, url: str, token: str, body: dict | None = None) -> object:
+        del url, token, body
+        if method == "GET":
+            return []
+        raise _seed.urllib.error.HTTPError(
+            "u",
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(b"upstream refused"),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(_seed, "_request", _fake_request)
+
+    assert _seed.main() == 1
+    err = capsys.readouterr().err
+    assert "Failed" in err
+    assert "502" in err
 
 
 def test_replace_puts_over_the_existing_definition_rather_than_creating_a_second(

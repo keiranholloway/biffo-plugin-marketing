@@ -17,7 +17,9 @@ nothing else proves them:
 
 from __future__ import annotations
 
+import io
 import re
+import urllib.error
 from typing import Any
 
 from _scripts import load_script
@@ -199,15 +201,26 @@ class _FakeCore:
     DELETEs or PUTs at all, and the only PATCH it may issue is a fill-if-null
     backfill of a DEFAULT channel's never-set field (#103b)."""
 
-    def __init__(self, initial: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, initial: list[dict[str, Any]] | None = None, *, fail_on: str | None = None
+    ) -> None:
         self.rows: list[dict[str, Any]] = [dict(row) for row in (initial or [])]
         self.methods_used: list[str] = []
         #: (row_id, body) for every PATCH, so a test can assert exactly which
         #: rows were touched and with what — not merely that a PATCH happened.
         self.patches: list[tuple[str, dict]] = []
+        #: A method ("GET"/"POST"/"PATCH") that should raise
+        #: `urllib.error.HTTPError` instead of completing, standing in for
+        #: Core rejecting or being unreachable for that call.
+        self._fail_on = fail_on
 
     def request(self, method: str, url: str, token: str, body: dict | None = None) -> Any:
         self.methods_used.append(method)
+        if method == self._fail_on:
+            hdrs: Any = {}
+            raise urllib.error.HTTPError(
+                url, 502, "Bad Gateway", hdrs, io.BytesIO(b"upstream refused")
+            )
         if method == "GET":
             return list(self.rows)
         if method == "POST":
@@ -304,6 +317,57 @@ def test_an_upgrade_adding_a_default_channel_reaches_an_existing_install(monkeyp
     keys_after = {row["key"] for row in fake.rows}
     assert "podcast_sponsorship" in keys_after
     assert keys_after == {c["key"] for c in CHANNELS} | {"podcast_sponsorship"}
+
+
+def test_a_failed_list_call_reports_the_core_error_and_exits_one(monkeypatch, capsys) -> None:
+    """`main()`'s FIRST `except urllib.error.HTTPError` — Core refusing (or
+    being unreachable for) the initial GET that lists existing channels, the
+    call every idempotency decision below it depends on. Must report what
+    Core said and exit 1, not raise the raw `HTTPError` out of `main()`."""
+    fake = _FakeCore(fail_on="GET")
+
+    rc = _run_seed(monkeypatch, fake)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Could not list channels" in err
+    assert "502" in err
+
+
+def test_a_failed_create_reports_which_channel_and_exits_one(monkeypatch, capsys) -> None:
+    """`main()`'s SECOND `except urllib.error.HTTPError` — a POST creating a
+    still-missing default channel failing. Distinct from the GET failure
+    above: the listing succeeded, so the script knows exactly which channel
+    it was trying to create, and the error must name it."""
+    fake = _FakeCore(fail_on="POST")
+
+    rc = _run_seed(monkeypatch, fake)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Failed on" in err
+    assert "502" in err
+    assert CHANNELS[0]["key"] in err
+
+
+def test_a_failed_backfill_patch_is_reported_and_skipped_not_fatal(monkeypatch, capsys) -> None:
+    """`_backfill_null_fields`'s own `except urllib.error.HTTPError` — a
+    single channel's fill-if-null PATCH failing must not abort the whole
+    seeding run (every channel already exists at this point; the run's own
+    job is done). It logs the failure and moves on to the next channel,
+    rather than losing every OTHER channel's backfill over one PATCH."""
+    seeded = [
+        {**channel, "id": f"row-{i}", "publish_url": None} for i, channel in enumerate(CHANNELS)
+    ]
+    fake = _FakeCore(initial=seeded, fail_on="PATCH")
+
+    rc = _run_seed(monkeypatch, fake)
+
+    assert rc == 0, "a backfill failure must not fail the whole run"
+    err = capsys.readouterr().err
+    assert "Could not backfill" in err
+    assert "502" in err
+    assert fake.patches == [], "the fake raises before recording the PATCH as applied"
 
 
 def test_missing_credentials_is_a_clear_failure_not_a_silent_noop(monkeypatch) -> None:

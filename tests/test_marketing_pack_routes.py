@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 import pytest
+from biffo_plugin_sdk import BiffoAPIError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -163,13 +164,19 @@ class _FakeStorageClient:
     """Stands in for the SigV4-signed internal client: only the one route
     this file's route now calls — minting a GET url for an existing media id."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, url_status: int | None = None) -> None:
         self.calls: list[tuple[str, str, Any]] = []
+        #: When set, every `.../url` GET raises `BiffoAPIError` with this
+        #: status instead of returning a URL — `_asset_with_url`'s own
+        #: `except BiffoAPIError`.
+        self._url_status = url_status
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         self.calls.append(("GET", path, params))
         prefix = f"{pack_routes._STORAGE_PATH}/"
         if path.startswith(prefix) and path.endswith("/url"):
+            if self._url_status is not None:
+                raise BiffoAPIError(self._url_status, "signed url unavailable")
             media_id = path[len(prefix) : -len("/url")]
             return {
                 "url": f"https://bucket.s3.eu-west-1.amazonaws.com/signed-get-{media_id}",
@@ -765,6 +772,29 @@ def test_assets_route_404s_an_unknown_campaign(monkeypatch: pytest.MonkeyPatch) 
     resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
 
     assert resp.status_code == 404
+
+
+def test_assets_route_surfaces_a_signed_url_failure_as_a_named_gateway_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_asset_with_url`'s own `except BiffoAPIError` — Core answering the
+    signed-URL GET with a real failure (not a network error, an HTTP error
+    status), mapped through `_core_error` the same way every other Core
+    failure in this module is, rather than an unhandled `BiffoAPIError`
+    reaching the caller as a bare 500 with no diagnosable status/detail."""
+    core = _FakeCore(copy_artefact=None)
+    monkeypatch.setattr(admin_app, "_core", core)
+    campaign_client = _FakeCampaignClient(assets=[_source_asset()])
+    client = TestClient(
+        _app(
+            core_client=_FakeStorageClient(url_status=502),
+            campaign_client=campaign_client,
+        )
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/assets")
+
+    assert resp.status_code == 502
 
 
 def test_assets_route_applies_the_same_newest_source_wins_dedup_as_the_pack(

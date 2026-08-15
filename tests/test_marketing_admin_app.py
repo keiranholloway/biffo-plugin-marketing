@@ -129,3 +129,39 @@ def test_parse_artefact_body_treats_none_and_an_empty_dict_as_empty() -> None:
     behaviour the duplicated ternary already had, unchanged by this refactor."""
     assert admin_app._parse_artefact_body(None) == {}
     assert admin_app._parse_artefact_body({}) == {}
+
+
+# ── _artefact_selection: NULL/unreadable both mean "everything" (issue #145) ──
+
+
+def test_artefact_selection_parses_a_json_array_string() -> None:
+    """The shape Core actually persists once #145 writes a selection."""
+    artefact = {"approved_selection": '["el-1", "el-2"]'}
+    assert admin_app._artefact_selection(artefact) == ["el-1", "el-2"]
+
+
+def test_artefact_selection_treats_an_empty_string_as_everything() -> None:
+    """`""` — distinct from the column genuinely being `NULL`, but must read
+    identically: an artefact approved before #145 has never written anything
+    else here, and losing every element on a formatting quirk of the empty
+    case would be strictly worse than the pre-#145 behaviour it replaces."""
+    assert admin_app._artefact_selection({"approved_selection": ""}) is None
+
+
+def test_artefact_selection_treats_unparseable_json_as_everything() -> None:
+    """A corrupt/non-JSON string in the column must not 500 an artefact read
+    — it degrades to the same "everything" reading a `NULL` gets, per this
+    helper's own docstring, rather than raising `json.JSONDecodeError` out of
+    a route that never expected this column to fail to parse."""
+    assert admin_app._artefact_selection({"approved_selection": "{not valid json"}) is None
+
+
+def test_artefact_selection_treats_a_missing_key_as_everything() -> None:
+    assert admin_app._artefact_selection({}) is None
+
+
+def test_artefact_selection_treats_a_non_list_parsed_value_as_everything() -> None:
+    """Valid JSON that is not a list (e.g. an object) is not a selection
+    either — `raw if isinstance(raw, list) else None` covers it, distinct
+    from the string-shaped cases above."""
+    assert admin_app._artefact_selection({"approved_selection": '{"not": "a list"}'}) is None

@@ -896,6 +896,55 @@ def test_start_copy_refuses_when_no_channel_plan_exists(ctx) -> None:
     assert resp.status_code == 404
 
 
+def test_start_copy_409s_a_pre_migration_channel_plan_without_spending_a_run(ctx) -> None:
+    """`start_copy_route`'s own `except pipeline.StaleChannelPlanError` (#152),
+    the route-level twin of `test_channel_plan_channel_map_raises_on_a_pre_migration_plan`
+    in `test_marketing_pipeline.py`. That test covers only the helper; nothing
+    before this exercised the HTTP translation PR #153 added — the actual
+    behaviour an operator sees when their approved channel plan predates
+    channel taxonomy ids (#76 increment 2): every entry the old free-text
+    shape, none carrying a `channel_key`. This must come back as a named,
+    actionable 409 telling them to re-run channel planning, not a bare
+    `KeyError`/500 out of the copy agent's own extraction, and it must be
+    caught BEFORE an agent run is requested — a stale plan is not something
+    more agent spend can fix."""
+    client, core, gateway = ctx
+    _propose_and_approve_positioning(client, core, gateway)
+    core.artefacts["artefact-pre-migration-plan"] = {
+        "id": "artefact-pre-migration-plan",
+        "campaign_id": _CAMPAIGN,
+        "kind": "channel_plan",
+        "status": "approved",
+        "created_at": "2026-08-10T00:00:99Z",
+        "agent_run_id": "run-pre-migration",
+        "citations": None,
+        "approved_selection": None,
+        "body": json.dumps(
+            {
+                "channels": [
+                    {
+                        "channel": "Google Search ads (non-brand: franchise management)",
+                        "motion": "paid",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/y", "note": "n"}],
+                    }
+                ]
+            }
+        ),
+    }
+
+    resp = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "channel_key" in detail
+    assert "re-run" in detail.lower()
+    assert not [r for r in gateway.requested if r["agent_name"] == "marketing-copy"], (
+        "a known-stale plan must not spend an agent run before failing"
+    )
+
+
 def test_start_copy_runs_once_both_upstream_artefacts_are_approved(ctx) -> None:
     client, core, gateway = ctx
     _propose_and_approve_channel_plan(client, core, gateway)
