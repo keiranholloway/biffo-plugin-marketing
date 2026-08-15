@@ -73,7 +73,8 @@ not assumed:
   would still leave the limits frozen here.
 
 So the snapshot stays, and what changes instead is that its staleness is no
-longer silent, in three places that each read a different document:
+longer silent, in three places that each read a different document — and, since
+#160, is no longer something only a shell can fix:
 
 1. :func:`config_fingerprint` / :data:`SEEDED_CONFIG_FINGERPRINT` — a pin over
    the whole ``action_config`` this checkout would seed, asserted by
@@ -90,12 +91,27 @@ longer silent, in three places that each read a different document:
    ``definition_snapshot`` of the synthesis run that **actually ran** and
    reports drift on every terminal research chain. No token, no operator: it
    fires by itself, in the environment where it is wrong.
+
+**And the fourth thing, which is not a detector.** Every one of the three above
+ends by naming this script, and for months that was the problem: applying the
+fix needed a checkout, a shell and a real Cognito admin token pasted into an
+environment variable, so the reports accumulated and the re-seed did not
+happen. The plugin's admin UI now shows the same drift **and applies it**
+(``web-admin``'s ``FanInWorkflow``, served by ``admin_app``'s
+``GET /fan-in-workflow``), using the admin session the operator already has —
+Core's workflow routes take a Cognito token, which a browser has and this
+plugin's SigV4-signing Lambda never can.
+
+This script keeps its job. An environment with no browser, a first seed during
+provisioning, and ``--check`` in an ops runbook all still want a CLI, and
+``--dry-run`` is still the only way to read the config without a Core at all.
+What it no longer is, is the *only* way. The declaration it writes lives in
+``marketing.fan_in_workflow`` so that both callers seed the same document.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -112,16 +128,16 @@ from typing import Any
 # with `uv run python scripts/seed_fan_in_workflow.py` from the checkout.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from marketing.definitions import (  # noqa: E402
-    DEFAULT_SYNTHESIS_MODEL,
-    RESEARCH_AGENT_NAMES,
-    RESEARCH_SYNTHESIS_AGENT_NAME,
-    RESEARCH_SYNTHESIS_INSTRUCTIONS,
-    research_synthesis_definition,
-    research_synthesis_tool_schema,
+# The declared configuration itself lives in the package, not here, so that the
+# admin UI can serve and act on the same declaration this script seeds — see
+# `marketing.fan_in_workflow`'s docstring for why that seam exists (#160).
+from marketing.fan_in_workflow import (  # noqa: E402
+    SEEDED_CONFIG_FINGERPRINT,  # noqa: F401 — re-exported for the CI fingerprint test
+    WORKFLOW_NAME,
+    config_drift,
+    config_fingerprint,
+    definition,
 )
-
-WORKFLOW_NAME = "Marketing — synthesise research once both angles complete"
 
 #: Core mounts the orchestration router at `/api/v1/orchestration`, NOT under
 #: `/api/v1/admin`. This carried a stray `admin/` segment until 2026-08-11,
@@ -131,108 +147,6 @@ WORKFLOW_NAME = "Marketing — synthesise research once both angles complete"
 #: `/api/v1/orchestration/workflows` answers 200 and the `admin/` variant
 #: answers 404, indistinguishable from a route that does not exist.
 _DEFINITIONS_PATH = "/api/v1/orchestration/workflows"
-
-
-def definition(*, synthesis_model: str = DEFAULT_SYNTHESIS_MODEL) -> dict:
-    """The workflow this plugin needs in order to finish a research run on its
-    own.
-
-    Triggered by every ``agent.run.completed``: the fan-in action itself
-    decides whether the event belongs to a chain it cares about, and no-ops
-    otherwise. Filtering by agent name in the trigger would still fire twice
-    per research run (once per angle); the action's own
-    all-siblings-terminal check is what collapses those two into one.
-    """
-    run_definition = research_synthesis_definition(
-        model=synthesis_model, instructions=RESEARCH_SYNTHESIS_INSTRUCTIONS
-    )
-    return {
-        "name": WORKFLOW_NAME,
-        "trigger_source": "biffo.core",
-        "trigger_detail_type": "agent.run.completed",
-        "action_type": "agent_fan_in",
-        "action_config": {
-            # The set to wait for. These names must match what the plugin
-            # actually requests — see marketing.pipeline.start_research.
-            "expect_agents": ",".join(RESEARCH_AGENT_NAMES),
-            "agent_name": RESEARCH_SYNTHESIS_AGENT_NAME,
-            **run_definition,
-            "output_tools": [research_synthesis_tool_schema()],
-        },
-        "enabled": True,
-    }
-
-
-#: A value that can never be compared, because Core masks it on read
-#: (``schemas/orchestration.py``'s ``redact_secrets``, where it is called
-#: ``SECRET_SENTINEL``): a credential-bearing config field comes back as this
-#: placeholder rather than its stored value. ``agent_fan_in`` declares no such
-#: field today, so this is a guard against a future one being reported as
-#: permanent, unfixable drift rather than as "cannot tell".
-REDACTED_SENTINEL = "••••••••"
-
-
-def config_fingerprint(config: dict[str, Any]) -> str:
-    """A stable digest of the whole ``action_config`` this checkout would seed.
-
-    **The whole config, not the model.** #62 recorded its lesson as "synthesis
-    is stuck on an old model", so #131's timeout change sailed past it two days
-    later on the same mechanism. Every key here is a copy that a deploy does
-    not update — the prompt, the tool schema, the turn budget and the wall
-    clock exactly as much as the model — so the thing that gets pinned is the
-    snapshot, and a change to any part of it has to be acknowledged.
-
-    Truncated to 16 hex characters: long enough that a change cannot collide
-    with the pinned value in practice, short enough to read in a diff.
-    """
-    return (
-        "sha256:"
-        + hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()[:16]
-    )
-
-
-#: The fingerprint of the ``action_config`` this checkout seeds.
-#:
-#: **This is a tripwire, not a record of what is deployed.** It goes red in CI
-#: the moment anyone changes the synthesis model, prompt, tool schema, turn
-#: budget or wall clock — which is the moment someone can still act on it,
-#: rather than two days later while reading a table in the portal. Updating it
-#: is the acknowledgement that the deployed workflow now needs
-#: ``--replace`` run against every environment.
-#:
-#: What it deliberately does NOT claim: that anybody actually re-seeded
-#: anything. Nothing inside this repo can know that — only ``--check`` against
-#: a live Core, or ``marketing.pipeline.synthesis_config_drift`` reading a real
-#: run's ``definition_snapshot``, can.
-SEEDED_CONFIG_FINGERPRINT = "sha256:31883429cd45ebe4"
-
-
-def config_drift(
-    deployed: dict[str, Any] | None, desired: dict[str, Any] | None = None
-) -> dict[str, tuple[Any, Any]]:
-    """``{key: (deployed, desired)}`` for every key that differs, empty if none.
-
-    Compares the **whole** ``action_config``, including keys the deployed copy
-    has and this checkout does not (reported with a desired value of ``None``)
-    — a leftover key from an older seed is drift too.
-
-    A key Core has masked as a secret is skipped rather than reported: its real
-    value cannot be read back, so calling it drift would mean permanent,
-    unfixable red. ``deployed`` of ``None`` — nothing seeded at all — is not
-    expressible as a per-key diff and is the caller's job to report.
-    """
-    desired = definition()["action_config"] if desired is None else desired
-    if deployed is None:
-        return {}
-    drift: dict[str, tuple[Any, Any]] = {}
-    for key in sorted(set(desired) | set(deployed)):
-        deployed_value = deployed.get(key)
-        if deployed_value == REDACTED_SENTINEL:
-            continue
-        desired_value = desired.get(key)
-        if deployed_value != desired_value:
-            drift[key] = (deployed_value, desired_value)
-    return drift
 
 
 def _short(value: Any) -> str:

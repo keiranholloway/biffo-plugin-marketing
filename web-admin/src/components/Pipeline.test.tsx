@@ -1,4 +1,4 @@
-import { act, render, screen, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -22,6 +22,35 @@ function stubSession(jwt = 'test-jwt') {
 }
 
 const CAMPAIGN = 'c1'
+
+/** One stage, once its first fetch has landed (#158).
+ *
+ * **`findByTestId` on its own is not enough, and the gap is a real flake.**
+ * `PipelineStage` renders its `<section data-testid="stage-…">` immediately,
+ * with `<p class="empty">Loading…</p>` inside it and no controls at all; the
+ * badge, the buttons and the body arrive only when the artefact fetch
+ * resolves. So a bare `await screen.findByTestId('stage-research')` resolves
+ * against the *skeleton*, and every synchronous `within(stage).getBy…` is a
+ * race against a promise — one that the stub usually, but not always, wins.
+ *
+ * It failed in CI on 2026-08-15 (`Pipeline.test.tsx:316`, "Unable to find an
+ * accessible element with the role button and name /check for result/i", with
+ * the printed DOM showing the stage holding nothing but `Loading…`) and passed
+ * on the same commit locally, which is exactly what #158 reports and exactly
+ * why it reads as a regression in whatever change happens to be in flight.
+ *
+ * Waiting for the loading line to go is the honest wait: it is the component's
+ * own statement that it has nothing to show yet. Asserting on the controls
+ * directly with `findByRole` would fix one call site and leave the next one
+ * to be written wrong.
+ */
+async function findLoadedStage(kind: string): Promise<HTMLElement> {
+  const stage = await screen.findByTestId(`stage-${kind}`)
+  await waitFor(() => {
+    expect(within(stage).queryByText('Loading…')).not.toBeInTheDocument()
+  })
+  return stage
+}
 
 // None of these tests exercise a rendered channel — `useChannelTaxonomy`
 // itself is `CampaignDetail`'s concern, not `Pipeline`'s (see
@@ -80,7 +109,7 @@ describe('Pipeline', () => {
 
     render(<Pipeline campaignId={CAMPAIGN} hasBrief={false} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-    const research = await screen.findByTestId('stage-research')
+    const research = await findLoadedStage('research')
     expect(within(research).getByRole('button', { name: /start research/i })).toBeDisabled()
     expect(within(research).getByText(/no brief yet/i)).toBeInTheDocument()
   })
@@ -100,7 +129,7 @@ describe('Pipeline', () => {
 
     render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={false} channelLookup={EMPTY_LOOKUP} />)
 
-    const plan = await screen.findByTestId('stage-channel_plan')
+    const plan = await findLoadedStage('channel_plan')
     // Approved positioning is no longer enough on its own — the operator's
     // own two decisions come first, and `start_channel_plan_route` 422s
     // without them, so the button must not offer to make that call.
@@ -123,7 +152,7 @@ describe('Pipeline', () => {
 
     render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-    const plan = await screen.findByTestId('stage-channel_plan')
+    const plan = await findLoadedStage('channel_plan')
     expect(within(plan).getByRole('button', { name: /start channel plan/i })).toBeEnabled()
   })
 
@@ -196,7 +225,7 @@ describe('Pipeline', () => {
     const user = userEvent.setup()
     render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-    const research = await screen.findByTestId('stage-research')
+    const research = await findLoadedStage('research')
     await user.click(within(research).getByRole('button', { name: /^approve$/i }))
 
     expect(await within(research).findByText('Approved')).toBeInTheDocument()
@@ -220,7 +249,7 @@ describe('Pipeline', () => {
 
     render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-    const copy = await screen.findByTestId('stage-copy')
+    const copy = await findLoadedStage('copy')
     expect(await within(copy).findByText(/approve the channel plan stage first/i)).toBeInTheDocument()
     expect(within(copy).queryByText(/positioning/i)).not.toBeInTheDocument()
   })
@@ -266,6 +295,9 @@ describe('Pipeline', () => {
     }
 
     it('picks up a finished run on its own, with no click on "Check for result"', async () => {
+      // Fake timers BEFORE render — see `findLoadedStage` and the #147 test
+      // below for the two halves of why (#158).
+      vi.useFakeTimers()
       stubSession()
       const fetchMock = pollingFetchStub({
         ok: true,
@@ -284,10 +316,15 @@ describe('Pipeline', () => {
 
       render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-      const research = await screen.findByTestId('stage-research')
+      // Let mount's fetches settle under fake timers, so the assertion below
+      // runs against a loaded stage rather than racing one.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      const research = screen.getByTestId('stage-research')
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
 
-      vi.useFakeTimers()
       // The fast-window cadence is 2s — nobody clicked anything.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000)
@@ -302,6 +339,8 @@ describe('Pipeline', () => {
     })
 
     it('surfaces a failed run\'s own reason instead of returning the stage to startable', async () => {
+      // Fake timers BEFORE render (#158) — this is the test CI failed on.
+      vi.useFakeTimers()
       stubSession()
       const fetchMock = pollingFetchStub({
         ok: false,
@@ -312,10 +351,13 @@ describe('Pipeline', () => {
 
       render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
 
-      const research = await screen.findByTestId('stage-research')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      const research = screen.getByTestId('stage-research')
       expect(within(research).getByRole('button', { name: /check for result/i })).toBeInTheDocument()
 
-      vi.useFakeTimers()
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000)
       })
@@ -553,7 +595,7 @@ describe('Pipeline', () => {
       const user = userEvent.setup()
 
       render(<Pipeline campaignId={CAMPAIGN} hasBrief={true} hasTargets={true} channelLookup={EMPTY_LOOKUP} />)
-      const stage = await screen.findByTestId('stage-channel_plan')
+      const stage = await findLoadedStage('channel_plan')
 
       await user.click(await within(stage).findByRole('button', { name: /check for result/i }))
       await user.click(await within(stage).findByRole('button', { name: /run channel plan again/i }))

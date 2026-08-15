@@ -1209,3 +1209,32 @@ a:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
+
+/* ── The fan-in workflow panel (#160) ─────────────────────────────────────
+ *
+ * Carded like `form` above, because it is the same kind of thing to the eye:
+ * a bordered block on the campaign list that asks for an action. It sits
+ * above the campaign list rather than beside a campaign — the workflow is
+ * per-deployment, and when it is stale nothing in the list can finish
+ * researching.
+ */
+
+.fan-in-workflow {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.25rem 1.5rem 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.fan-in-workflow table {
+  margin-top: 0.75rem;
+}
+
+/* The drift table's values are configuration, not prose — a model id, a
+ * timeout, a truncated prompt — so they read as the literals they are. */
+.fan-in-workflow td {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  word-break: break-word;
+}
