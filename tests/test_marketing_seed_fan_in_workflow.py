@@ -20,6 +20,13 @@ from marketing.definitions import (
     RESEARCH_SYNTHESIS_TOOL_NAME,
 )
 
+# The declaration and its comparison helpers moved into the package for #160,
+# so the admin UI can serve and act on the same document the script seeds. The
+# script re-exports them, so everything below still reads the script's own
+# contract; only the sentinel — which the script no longer references itself —
+# is imported from its new home.
+from marketing.fan_in_workflow import REDACTED_SENTINEL
+
 _seed = load_script("seed_fan_in_workflow")
 WORKFLOW_NAME = _seed.WORKFLOW_NAME
 definition = _seed.definition
@@ -192,7 +199,7 @@ def test_config_drift_skips_a_value_core_masked_as_a_secret() -> None:
     stored value cannot be compared. Reporting the sentinel as drift would be
     permanent red no re-seed could clear — an alarm nobody can silence gets
     ignored, which is how the real one gets missed."""
-    deployed = {**definition()["action_config"], "model": _seed.REDACTED_SENTINEL}
+    deployed = {**definition()["action_config"], "model": REDACTED_SENTINEL}
 
     assert _seed.config_drift(deployed) == {}
 

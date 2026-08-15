@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { CampaignDetail } from './components/CampaignDetail'
+import { FanInWorkflow } from './components/FanInWorkflow'
 import { MintLinks } from './components/MintLinks'
 import { createCampaign, listCampaigns, type Campaign } from './lib/api'
 import { campaignUrl, readCampaignParam } from './lib/campaignLink'
@@ -143,6 +144,13 @@ export default function App() {
     <main>
       <h1>Campaign studio</h1>
       <p className="lede">Campaigns for this tenant, and the tracked links minted from them.</p>
+
+      {/* On the list rather than inside a campaign (#160). The workflow is
+          per-deployment, not per-campaign — it decides whether research can
+          finish for every campaign here — and the operator who needs to see
+          it stale is the one arriving at the studio, not the one already
+          three stages into one run. */}
+      <FanInWorkflow />
 
       <form onSubmit={submit} aria-label="Create a campaign">
         <h2>New campaign</h2>
