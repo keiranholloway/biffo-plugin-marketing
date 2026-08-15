@@ -29,6 +29,7 @@ import json
 from typing import Any
 
 import pytest
+from biffo_plugin_sdk import BiffoAPIError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -46,12 +47,18 @@ def _founder_user() -> Any:
 class _FakeCoreClient:
     """Stands in for `get_core_client()` — the SigV4-only storage-URL client."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, url_status: int | None = None) -> None:
         self.calls: list[tuple[str, dict[str, Any] | None]] = []
+        #: When set, every `.../url` GET raises `BiffoAPIError` with this
+        #: status instead of returning a URL — `_resolve_asset_url`'s own
+        #: `except BiffoAPIError`.
+        self._url_status = url_status
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         self.calls.append((path, params))
         if path.endswith("/url"):
+            if self._url_status is not None:
+                raise BiffoAPIError(self._url_status, "signed url unavailable")
             media_id = path.split("/")[-2]
             return {"url": f"https://s3.example.invalid/{media_id}"}
         raise AssertionError(f"unexpected GET {path}")
@@ -342,6 +349,48 @@ def test_pack_survives_a_storage_response_with_no_url_key(fake_signed_client) ->
             "url": None,
         }
     ]
+
+
+def test_pack_surfaces_a_signed_url_failure_as_a_named_gateway_error(
+    fake_signed_client,
+) -> None:
+    """`_resolve_asset_url`'s own `except BiffoAPIError` — Core answering the
+    signed-URL GET with a real failure status, distinct from
+    `test_pack_survives_a_storage_response_with_no_url_key` above (a 200
+    with an unexpected shape, which this route deliberately tolerates). A
+    genuine Core failure must map through `_core_error` like every other
+    Core failure in this module, not reach a founder as a bare 500."""
+    fake_signed_client(
+        {
+            f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
+                200,
+                json.dumps(_campaign_row()).encode(),
+            ),
+            f"{user_app._INTERNAL_PREFIX}/artefacts": (
+                200,
+                json.dumps([_approved_copy_artefact()]).encode(),
+            ),
+        }
+    )
+    campaign_client = _FakeCampaignClient(
+        assets=[
+            {
+                "id": "asset-1",
+                "campaign_id": _CAMPAIGN,
+                "media_kind": "image",
+                "placement": None,
+                "media_id": "media-1",
+                "is_source": True,
+            }
+        ]
+    )
+    client = TestClient(
+        _app(core_client=_FakeCoreClient(url_status=502), campaign_client=campaign_client)
+    )
+
+    resp = client.get(f"/campaigns/{_CAMPAIGN}/pack")
+
+    assert resp.status_code == 502
 
 
 def test_pack_404s_a_campaign_that_is_not_ready_or_live(fake_signed_client) -> None:

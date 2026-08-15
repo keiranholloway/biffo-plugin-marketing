@@ -91,6 +91,23 @@ def test_a_non_client_transport_error_is_none(monkeypatch: pytest.MonkeyPatch) -
     assert ssm.read_parameter("/some/parameter", purpose=_PURPOSE) is None
 
 
+def test_boto3_being_unimportable_is_none_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_parameter`'s FIRST `except Exception` — the deferred `import
+    boto3` itself failing, distinct from every case above (all of which
+    assume boto3 imported fine and then the SSM *call* failed). A Lambda
+    package that somehow ships without boto3 (or a botocore ABI mismatch)
+    must degrade to "could not ask, try again" the same as a network error,
+    not raise `ImportError` out of a module whose whole contract is
+    returning `str | None`."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "boto3", None)
+
+    assert ssm.read_parameter("/some/parameter", purpose=_PURPOSE) is None
+
+
 def test_the_purpose_reaches_the_log_line(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -119,6 +119,43 @@ async def test_generate_still_raises_when_b64_json_is_missing() -> None:
         await _provider(handler).generate_still(prompt="anything")
 
 
+async def test_generate_still_wraps_a_transport_level_failure() -> None:
+    """`except httpx.HTTPError` — a connection failure/timeout reaching
+    OpenAI at all, distinct from `test_generate_still_raises_on_a_non_200`
+    (which is a completed HTTP exchange, just an error status). Must not
+    escape as a raw `httpx` exception a caller has never imported."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(ImageProviderError, match="OpenAI request failed"):
+        await _provider(handler).generate_still(prompt="anything")
+
+
+async def test_generate_still_raises_when_the_response_body_is_not_json() -> None:
+    """`except ValueError` around `response.json()` — a 200 whose body is not
+    parseable JSON at all (an upstream proxy error page, say), distinct from
+    a well-formed JSON body missing the fields this adapter expects."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    with pytest.raises(ImageProviderError, match="not valid JSON"):
+        await _provider(handler).generate_still(prompt="anything")
+
+
+async def test_generate_still_raises_when_b64_json_does_not_decode() -> None:
+    """`except (ValueError, TypeError)` around `base64.b64decode(...,
+    validate=True)` — a `b64_json` field that is present but not valid
+    base64, distinct from it being entirely absent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"b64_json": "not-base64!!!"}]})
+
+    with pytest.raises(ImageProviderError, match="did not decode"):
+        await _provider(handler).generate_still(prompt="anything")
+
+
 async def test_generate_still_raises_without_a_configured_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

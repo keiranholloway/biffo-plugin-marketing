@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from biffo_plugin_sdk import BiffoAPIError
 
 from marketing import admin_app
 
@@ -37,6 +38,19 @@ class _FakeClient:
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         del path, params
         return self._response
+
+
+class _RaisingClient:
+    """A `.get` that always raises the queued `BiffoAPIError`, standing in
+    for Core actually refusing/lacking the run — the counterpart to
+    `_FakeClient` above, which only ever returns a JSON body."""
+
+    def __init__(self, error: BiffoAPIError) -> None:
+        self._error = error
+
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        del path, params
+        raise self._error
 
 
 _BASE_RUN: dict[str, Any] = {
@@ -108,6 +122,51 @@ async def test_get_agent_run_defaults_a_missing_annotations_key_to_none() -> Non
 
     assert view is not None
     assert view.annotations is None
+
+
+# ── a run Core cannot produce at all ──────────────────────────────────────────
+#
+# `get_agent_run`'s own `except BiffoAPIError`: a 404 means "this run id does
+# not exist (yet, or ever)" and must read as `None` — the same "not known yet"
+# a caller like `get_artefact_route` already treats as "still pending, poll
+# again" — never as a crash. Anything else Core sends back (a 500, a 403) is
+# a genuine failure this seam has no business swallowing, so it must propagate
+# unchanged rather than also collapsing to `None` and reading as "not run yet".
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_returns_none_on_a_404_from_core() -> None:
+    gateway = admin_app._CoreAgentGateway(_RaisingClient(BiffoAPIError(404, "not found")))  # type: ignore[arg-type]
+
+    view = await gateway.get_agent_run(run_id="run-does-not-exist")
+
+    assert view is None
+
+
+@pytest.mark.asyncio
+async def test_find_chain_run_returns_none_when_core_has_no_matching_run() -> None:
+    """`find_chain_run`'s own `if not rows: return None` — the "this chain
+    has not reached this agent yet" reading `advance_research` (and every
+    other fan-in caller) relies on to know a stage genuinely has not started,
+    as opposed to a run existing that just has not completed."""
+    gateway = admin_app._CoreAgentGateway(_FakeClient([]))  # type: ignore[arg-type]
+
+    view = await gateway.find_chain_run(chain_id="chain-1", agent_name="marketing-research")
+
+    assert view is None
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_reraises_a_non_404_core_error() -> None:
+    """A 500 from Core is not "this run doesn't exist" — collapsing it to
+    `None` would make a real outage read as an ordinary still-pending poll."""
+    error = BiffoAPIError(500, "internal error")
+    gateway = admin_app._CoreAgentGateway(_RaisingClient(error))  # type: ignore[arg-type]
+
+    with pytest.raises(BiffoAPIError) as excinfo:
+        await gateway.get_agent_run(run_id="run-1")
+
+    assert excinfo.value is error
 
 
 # ── definition_snapshot: what the run ACTUALLY ran with (issue #160) ──────────
