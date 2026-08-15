@@ -869,3 +869,91 @@ export interface ResultsResponse {
 export async function getResults(): Promise<ResultsResponse> {
   return request<ResultsResponse>('GET', '/results', undefined, ADMIN_BASE, 'load results')
 }
+
+// ── The fan-in workflow, and re-seeding it from here (issue #160) ────────────
+//
+// Two different APIs, on purpose. The DECLARED definition comes from the
+// plugin's own admin app, which reads it straight out of `definitions.py`. The
+// DEPLOYED one comes from Core's orchestration API, which is admin-Cognito
+// gated — and that gate is exactly why this lives in the browser: the plugin's
+// Lambda signs its Core calls with SigV4, which those routes do not accept, so
+// the operator's own session is the only credential in the system that can
+// both read and replace a workflow definition.
+
+/** Core's workflow-definition CRUD. NOT under `/admin` — that variant 404s,
+ * indistinguishable from a route that does not exist, which is how the seed
+ * script silently never seeded anything until 2026-08-11. */
+const CORE_ORCHESTRATION_BASE = '/api/v1/orchestration'
+
+/** The fan-in workflow definition this build declares. */
+export interface DeclaredWorkflow {
+  name: string
+  definition: {
+    name: string
+    trigger_source: string
+    trigger_detail_type: string
+    action_type: string
+    action_config: Record<string, unknown>
+    enabled: boolean
+  }
+  fingerprint: string
+}
+
+/** One workflow definition as Core holds it. Only the fields this panel reads
+ * are declared; Core returns more. */
+export interface DeployedWorkflow {
+  id: string
+  name: string
+  action_config: Record<string, unknown> | null
+}
+
+export async function getDeclaredFanInWorkflow(): Promise<DeclaredWorkflow> {
+  return request<DeclaredWorkflow>(
+    'GET',
+    '/fan-in-workflow',
+    undefined,
+    ADMIN_BASE,
+    'read the declared fan-in workflow',
+  )
+}
+
+export async function listCoreWorkflows(): Promise<DeployedWorkflow[]> {
+  const body = await request<unknown>(
+    'GET',
+    '/workflows',
+    undefined,
+    CORE_ORCHESTRATION_BASE,
+    'list the deployed workflows',
+  )
+  return Array.isArray(body) ? (body as DeployedWorkflow[]) : []
+}
+
+/** Write the declared definition to Core — replacing the existing one when
+ * `id` is given, creating it when it is not.
+ *
+ * The create/replace split is the seed script's, kept because the two are not
+ * interchangeable: POSTing over an existing name is what produces two
+ * definitions firing on the same trigger, and the engine would then run
+ * synthesis twice per chain. */
+export async function seedFanInWorkflow(
+  declared: DeclaredWorkflow,
+  existingId: string | null,
+): Promise<void> {
+  if (existingId) {
+    await request<unknown>(
+      'PUT',
+      `/workflows/${existingId}`,
+      declared.definition,
+      CORE_ORCHESTRATION_BASE,
+      're-seed the fan-in workflow',
+    )
+    return
+  }
+  await request<unknown>(
+    'POST',
+    '/workflows',
+    declared.definition,
+    CORE_ORCHESTRATION_BASE,
+    'seed the fan-in workflow',
+  )
+}

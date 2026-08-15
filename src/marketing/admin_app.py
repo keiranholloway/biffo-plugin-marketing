@@ -69,6 +69,8 @@ from pydantic import BaseModel, Field
 from . import pipeline, principal_client
 from .config import public_base_url_for
 from .definitions import ARTEFACT_KINDS, MEDIA_KINDS, PIPELINE_STAGES, PLACEMENTS
+from .fan_in_workflow import WORKFLOW_NAME, config_fingerprint
+from .fan_in_workflow import definition as fan_in_definition
 from .image_routes import router as image_router
 from .links import destination_with_utms, mint_token, tracked_url
 
@@ -112,6 +114,30 @@ async def config() -> dict[str, Any]:
         "media_kinds": list(MEDIA_KINDS),
         "placements": list(PLACEMENTS),
         "pipeline_stages": list(PIPELINE_STAGES),
+    }
+
+
+@router.get("/fan-in-workflow")
+async def fan_in_workflow() -> dict[str, Any]:
+    """The fan-in workflow definition **this build declares** (issue #160).
+
+    Read-only, and deliberately so: this route reports what ought to be
+    deployed, and the admin UI compares it against what Core actually holds.
+    Applying the difference is a separate act, performed by the browser
+    against Core's own admin API with the operator's Cognito token — not by
+    this Lambda, which has no credential that Core's workflow-definition
+    routes accept (see ``marketing.fan_in_workflow``).
+
+    Serving the declaration rather than restating it in TypeScript is the same
+    argument as ``/config`` above, with more at stake: a hand-copied
+    ``action_config`` in the UI would be a *fourth* copy of the thing whose
+    copies going stale is the entire subject of #160.
+    """
+    declared = fan_in_definition()
+    return {
+        "name": WORKFLOW_NAME,
+        "definition": declared,
+        "fingerprint": config_fingerprint(declared["action_config"]),
     }
 
 

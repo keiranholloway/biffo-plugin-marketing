@@ -1716,7 +1716,18 @@ async def _log_evidence_profile_for(
 #: The exact command that re-seeds the workflow definition, quoted verbatim
 #: anywhere this repo reports drift. Anyone reading a drift report is one
 #: command away from fixing it and should never have to go and find which one.
-RESEED_COMMAND = "uv run python scripts/seed_fan_in_workflow.py --replace"
+#:
+#: It now names the browser route first (#160). Whoever reads this line is by
+#: definition looking at a *deployed* environment that is stale, and the
+#: campaign studio's own panel re-seeds it from the admin session they are
+#: already in — where the command below first needs a checkout of this repo,
+#: and a Cognito admin token in an environment variable, which is the friction
+#: that kept the re-seed from happening for two days while all three detectors
+#: reported it correctly.
+RESEED_COMMAND = (
+    "the campaign studio's 'Research fan-in workflow' panel → Re-seed it now, "
+    "or uv run python scripts/seed_fan_in_workflow.py --replace"
+)
 
 #: The keys of the frozen copy this plugin can compare a *run* against.
 #:
