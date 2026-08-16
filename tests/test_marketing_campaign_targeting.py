@@ -236,13 +236,20 @@ def _approve_positioning(client: TestClient, gateway: _FakeGateway, core: _FakeC
     }
 
 
-def _plan_call(channels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _plan_call(
+    channels: list[dict[str, Any]], proposals: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """The planning run's answer. `proposals` is the model's own filing of what
+    it thinks is a proposal — which `extract_channel_plan` re-derives rather
+    than believes, so several tests below pass entries in the WRONG list
+    deliberately."""
+    arguments: dict[str, Any] = {"channels": channels}
+    if proposals is not None:
+        arguments["proposals"] = proposals
     return [
         {
             "role": "assistant",
-            "tool_calls": [
-                {"function": {"name": "submit_channel_plan", "arguments": {"channels": channels}}}
-            ],
+            "tool_calls": [{"function": {"name": "submit_channel_plan", "arguments": arguments}}],
         }
     ]
 
@@ -497,7 +504,11 @@ def test_a_proposal_within_the_campaign_motion_is_kept(
 ) -> None:
     """#67 keeps the agent able to propose outside the operator's selection —
     the constraint is the motion and the taxonomy, not the ability to
-    suggest."""
+    suggest.
+
+    It lands in `proposals`, not `channels`, even though the model put it in
+    `channels`: the plan is what the campaign will run, and a proposal is not
+    part of it until an operator accepts it."""
     core = _FakeCore(motion="organic")
     gateway = _FakeGateway()
     client = _client(core, gateway, monkeypatch)
@@ -519,9 +530,11 @@ def test_a_proposal_within_the_campaign_motion_is_kept(
     )
 
     assert resp.status_code == 200
-    (channel,) = json.loads(resp.json()["body"])["channels"]
-    assert channel["suggested_label"] == "Regional franchise forum"
-    assert channel["channel_key"] is None
+    body = json.loads(resp.json()["body"])
+    assert body["channels"] == []
+    (proposal,) = body["proposals"]
+    assert proposal["suggested_label"] == "Regional franchise forum"
+    assert proposal["channel_key"] is None
 
 
 def test_extract_channel_plan_rejects_a_taxonomy_row_outside_the_allowed_motions() -> None:
@@ -572,6 +585,289 @@ def test_a_legacy_pending_artefact_still_advances(monkeypatch: pytest.MonkeyPatc
     )
 
     assert resp.status_code == 200
+
+
+# ── The agent may PROPOSE from what the operator deselected (#67) ────────────
+#
+# #67's section 2 is headed "shortlist, with the agent able to add", and until
+# now the "able to add" half could not reach a taxonomy channel at all: the run
+# is shown only the selected rows, so it had no way to name `linkedin_organic`
+# to argue for it, and the only outside route left was free text for a channel
+# the taxonomy did not cover.
+#
+# The middle option #67's last comment describes is what these tests pin. The
+# deselected rows are shown in a SEPARATE block the run may only propose from,
+# so:
+#
+# - the selection is still an enforcement, not a request — the plan-from set is
+#   unchanged, and nothing here relaxes it;
+# - "is this a plan entry or a proposal?" is answered by which LIST the entry
+#   comes back in, never by whether it carries a `channel_key`. That inversion
+#   is the whole risk of this change: a proposal now carries a perfectly real
+#   key, and every downstream reader was written when "carries a key" meant
+#   "approved channel".
+
+
+def _selected_only(*keys: str) -> _FakeCore:
+    return _FakeCore(target_channel_keys=",".join(keys))
+
+
+def _payload_of(gateway: _FakeGateway, agent_name: str) -> dict[str, Any]:
+    """The one run of `agent_name` this gateway was asked for, by name.
+
+    By name rather than by "which payload has a `channel_taxonomy` key", which
+    is what the older tests in this module filter on: BOTH runs of the channel
+    stage carry that key, and so — for `brief` — does every research run.
+    """
+    (run,) = [r for r in gateway.requested if r["agent_name"] == agent_name]
+    return run["input_payload"]
+
+
+def test_the_planning_run_is_shown_the_deselected_rows_in_their_own_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two blocks, disjoint, and the plan-from block is still exactly the
+    selection. A single flagged list would have put the deselected rows where
+    the run reads its plan-from set."""
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    # The planning run is started by the FIRST advance, not by the route (#65),
+    # so drive the grounding run to done before reading its payload.
+    gateway.complete(started["agent_run_id"], messages=_evidence_call())
+    client.get(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan")
+
+    payload = _payload_of(gateway, definitions.CHANNEL_PLAN_AGENT_NAME)
+    assert [c["channel_key"] for c in payload["channel_taxonomy"]] == ["instagram_organic"]
+    assert [c["channel_key"] for c in payload["proposable_taxonomy"]] == [
+        "linkedin_organic",
+        "google_search_paid",
+    ]
+    # Stashed on the pending artefact at START time, not re-fetched when the
+    # run comes back — an operator selecting `linkedin_organic` while this run
+    # is in flight must not turn its PROPOSAL of that channel into a plan
+    # entry, exactly as widening the motion must not legalise a paid one.
+    stashed = json.loads(started["body"])
+    assert stashed["channel_taxonomy"] == {"instagram_organic": "organic"}
+    assert stashed["proposable_taxonomy"] == {
+        "linkedin_organic": "organic",
+        "google_search_paid": "paid",
+    }
+
+
+def test_the_grounding_run_is_not_shown_the_deselected_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#65 measured that everything in an `:online` run's payload steers what
+    comes back, and #67 is explicit that search budget must not be spent on
+    channels that were never available. So the proposable block rides in the
+    PLANNING run's payload only."""
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+
+    client.post(f"/campaigns/{_CAMPAIGN}/channel-plan")
+
+    payload = _payload_of(gateway, definitions.CHANNEL_EVIDENCE_AGENT_NAME)
+    assert "proposable_taxonomy" not in payload
+    assert [c["channel_key"] for c in payload["channel_taxonomy"]] == ["instagram_organic"]
+
+
+def test_a_deselected_channel_comes_back_as_a_proposal_not_a_plan_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clause #67 was held open for, and the sharp edge of building it.
+
+    The run names a real `channel_key` the operator deselected. Before this
+    increment that was an `UnknownChannelError`; it must now be a proposal —
+    and it must NOT be in `channels`, because everything downstream of the
+    approval gate reads that list as the campaign's approved channels.
+    """
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call(
+            [_recommendation()],
+            [_recommendation(channel_key="linkedin_organic", rank=2)],
+        ),
+    )
+
+    assert resp.status_code == 200
+    body = json.loads(resp.json()["body"])
+    assert [c["channel_key"] for c in body["channels"]] == ["instagram_organic"]
+    (proposal,) = body["proposals"]
+    assert proposal["channel_key"] == "linkedin_organic"
+    # Motion is derived from the proposable snapshot, exactly as a plan entry's
+    # is from the selected one — the model asserts neither.
+    assert proposal["motion"] == "organic"
+
+
+def test_the_snapshot_decides_which_list_an_entry_lands_in_not_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#128: a constraint the model is merely asked to respect is not one. So
+    the model's own filing is thrown away and both lists are rebuilt from the
+    two snapshots — here from an answer that got both entries backwards."""
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call(
+            # A DESELECTED channel filed as a plan entry...
+            [_recommendation(channel_key="linkedin_organic")],
+            # ...and a SELECTED one filed as a proposal.
+            [_recommendation(channel_key="instagram_organic", rank=2)],
+        ),
+    )
+
+    assert resp.status_code == 200
+    body = json.loads(resp.json()["body"])
+    assert [c["channel_key"] for c in body["channels"]] == ["instagram_organic"]
+    assert [c["channel_key"] for c in body["proposals"]] == ["linkedin_organic"]
+
+
+def test_a_key_in_neither_block_is_still_an_unknown_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third case, unchanged. Widening what the run may name must not
+    become "the run may name anything" — an invented or mangled key is still
+    fatal to the whole plan."""
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call([_recommendation()], [_recommendation(channel_key="tiktok_organic", rank=2)]),
+    )
+
+    assert resp.status_code == 502
+    assert "tiktok_organic" in resp.json()["detail"]
+    assert core.artefacts[started["id"]]["status"] == "pending"
+
+
+def test_a_deselected_row_outside_the_campaign_motion_is_not_proposable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection is relaxed into "proposable"; the MOTION is not.
+
+    #67 settles motion as a campaign-strategy property that copy and both packs
+    read, so an organic campaign has no use for an argument to run a paid
+    channel — accepting it would mean changing the campaign's strategy, not its
+    channel list. A deselected channel of the RIGHT motion is a decision new
+    evidence can legitimately reopen, and it is proposable.
+    """
+    core = _FakeCore(motion="organic", target_channel_keys="instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+
+    assert json.loads(started["body"])["proposable_taxonomy"] == {"linkedin_organic": "organic"}
+
+
+def test_a_proposal_never_becomes_a_channel_the_copy_stage_writes_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The guard this whole change turns on.**
+
+    A proposal carries a real `channel_key` now, and `pipeline.channel_key_motions`
+    — the chokepoint copy and, through copy, both packs go through — used to
+    mean "every entry with a key". If a proposal stayed in `channels`, the copy
+    stage would write publish-ready copy for a channel the operator never
+    selected and the packs would carry it.
+
+    Driven through the real approval and copy routes rather than asserted on
+    the helper, because the helper being right is not the claim — the claim is
+    that nothing between the plan and the copy run puts it back.
+    """
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    plan = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call(
+            [_recommendation()],
+            [_recommendation(channel_key="linkedin_organic", rank=2)],
+        ),
+    ).json()
+    assert plan["status"] == "proposed"
+    client.post(f"/campaigns/{_CAMPAIGN}/artefacts/channel_plan/approve")
+
+    copy_started = client.post(f"/campaigns/{_CAMPAIGN}/copy")
+
+    assert copy_started.status_code == 201
+    # What `extract_copy` will validate the copy run's answer against.
+    stashed = json.loads(copy_started.json()["body"])
+    assert stashed["channel_plan_channels"] == {"instagram_organic": "organic"}
+    # And the copy run is not shown the proposal at all — #67's own lever,
+    # applied one stage down: a model that cannot see a channel cannot write
+    # for it, so nothing here rests on the prompt asking it not to.
+    shown = _payload_of(gateway, definitions.COPY_AGENT_NAME)["channel_plan"]
+    assert [c["channel_key"] for c in shown["channels"]] == ["instagram_organic"]
+    assert "proposals" not in shown
+
+
+def test_a_pending_artefact_from_before_proposals_still_advances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run started before this increment stashed no `proposable_taxonomy`,
+    and was genuinely shown nothing proposable — so an unrecognised key stays
+    an `UnknownChannelError` rather than becoming a proposal by default.
+
+    Unlike `allowed_motions`, absence here is not a rule being skipped: there
+    is no tri-state to preserve, because an empty proposable set is the honest
+    description of that run.
+    """
+    core = _selected_only("instagram_organic")
+    gateway = _FakeGateway()
+    client = _client(core, gateway, monkeypatch)
+    _approve_positioning(client, gateway, core)
+    started = client.post(f"/campaigns/{_CAMPAIGN}/channel-plan").json()
+    legacy = json.loads(core.artefacts[started["id"]]["body"])
+    legacy.pop("proposable_taxonomy", None)
+    core.artefacts[started["id"]]["body"] = json.dumps(legacy)
+
+    resp = _plan_through_both_runs(
+        client,
+        core,
+        gateway,
+        started,
+        _plan_call([_recommendation(), _recommendation(channel_key="linkedin_organic", rank=2)]),
+    )
+
+    assert resp.status_code == 502
+    assert "linkedin_organic" in resp.json()["detail"]
 
 
 def test_channel_plan_still_404s_an_unknown_campaign(monkeypatch: pytest.MonkeyPatch) -> None:

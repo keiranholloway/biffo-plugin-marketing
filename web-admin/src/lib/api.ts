@@ -449,9 +449,13 @@ export interface PositioningBody {
 }
 
 /** #76 increment 2: exactly one of `channel_key`/`suggested_label` is set —
- * a `channel_key` from the taxonomy, or a free-text proposal for a channel
- * outside it (#67). Never both, never neither — enforced server-side by
- * `definitions.ChannelRecommendation`'s own validator, not re-checked here. */
+ * a `channel_key` from a taxonomy the run was shown, or a free-text proposal
+ * for a channel in neither of them (#67). Never both, never neither —
+ * enforced server-side by `definitions.ChannelRecommendation`'s own
+ * validator, not re-checked here.
+ *
+ * Nothing on this object says whether it is a plan entry or a proposal, and
+ * that is deliberate — see {@link ChannelPlanBody}. */
 export interface ChannelRecommendation {
   id?: string
   channel_key: string | null
@@ -462,8 +466,24 @@ export interface ChannelRecommendation {
   sources: Source[]
 }
 
+/** Two lists, because "plan entry or proposal?" is answered by which one an
+ * entry is in (#67) — never by a field on the entry.
+ *
+ * A proposal may now carry a real `channel_key`: the agent is shown the
+ * taxonomy rows the operator DESELECTED, in their own block, and may argue
+ * for one of them. So `channel_key !== null` no longer means "an approved
+ * channel", and every reader that used to ask that question has to read
+ * `channels` instead. `pipeline.extract_channel_plan` partitions the two
+ * server-side, from the snapshots the run was shown, so the model has no say
+ * in which list its answer lands in.
+ *
+ * `proposals` is optional because every channel-plan artefact proposed before
+ * this shipped has no such key — those bodies put a `suggested_label`
+ * proposal in `channels` with a null `channel_key`, which is why
+ * `ChannelName` still treats a null key as a proposal in its own right. */
 export interface ChannelPlanBody {
   channels: ChannelRecommendation[]
+  proposals?: ChannelRecommendation[]
 }
 
 /** #76 increment 2: `channel` → `channel_key`, always a real taxonomy key —

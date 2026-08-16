@@ -13,11 +13,18 @@
 import type { Artefact } from './api'
 import { parseArtefactBody } from './api'
 
-/** Same four field names `pipeline.ELEMENT_LIST_KEYS` (Python) lists —
+/** Same field names `pipeline.ELEMENT_LIST_KEYS` (Python) lists —
  * `findings` (research), `segments`/`pillars`/`ctas` (positioning),
  * `channels` (channel_plan AND copy, which share the field name but not the
- * item shape; nothing here needs to tell them apart). */
-const ELEMENT_LIST_KEYS = ['findings', 'segments', 'pillars', 'ctas', 'channels'] as const
+ * item shape; nothing here needs to tell them apart), and `proposals`
+ * (channel_plan's outside-the-selection entries, #67).
+ *
+ * A proposal is selectable for the same reason a channel is — an operator
+ * approving a stage says which of its elements carry forward, and a proposal
+ * they want to keep on the record should survive that. It carrying forward
+ * still does not make it a channel: everything downstream of the gate reads
+ * `channels` alone (`pipeline.channel_key_motions`). */
+const ELEMENT_LIST_KEYS = ['findings', 'segments', 'pillars', 'ctas', 'channels', 'proposals'] as const
 
 /** One operator-selectable element, generic across every artefact kind — an
  * `id` to select/deselect by, and a short human-readable `label` for the

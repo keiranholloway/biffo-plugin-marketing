@@ -41,6 +41,35 @@ describe('ChannelName', () => {
     expect(screen.getByText(/outside selection/i)).toBeInTheDocument()
   })
 
+  /** The #67 regression this component would otherwise have shipped.
+   *
+   * "Is this a proposal?" used to be derivable here from `channelKey ===
+   * null`, and that was sound while a proposal could only ever be free text.
+   * Since the agent may propose a TAXONOMY channel the operator deselected, a
+   * proposal carries a perfectly real key — so inferring from the key renders
+   * it as an ordinary planned channel: proper label, no badge, indistinguishable
+   * from something the operator actually chose. #67 requires the opposite in
+   * as many words ("nothing downstream can mistake a proposal for an approved
+   * channel"), and this is the one place an operator would see it.
+   */
+  it('badges a proposed taxonomy channel while still showing its real label (#67)', () => {
+    render(
+      <ChannelName channelKey="linkedin_paid" suggestedLabel={null} proposed lookup={fakeLookup([LINKEDIN_PAID])} />,
+    )
+
+    expect(screen.getByText(/outside selection/i)).toBeInTheDocument()
+    // The label, not the key — a proposal is a real taxonomy row, so #77's
+    // "never pass a machine key off as a label" applies to it too.
+    expect(screen.getByText('LinkedIn ads')).toBeInTheDocument()
+    expect(screen.queryByText('linkedin_paid')).not.toBeInTheDocument()
+  })
+
+  it('does not badge a planned channel', () => {
+    render(<ChannelName channelKey="linkedin_paid" suggestedLabel={null} lookup={fakeLookup([LINKEDIN_PAID])} />)
+
+    expect(screen.queryByText(/outside selection/i)).not.toBeInTheDocument()
+  })
+
   /** #84/#85's decision on existing free-text rows: minted before the
    * picker existed (e.g. `"totally made up channel"`, minted on dev during
    * #84's own repro), these have no taxonomy row and are NOT migrated or

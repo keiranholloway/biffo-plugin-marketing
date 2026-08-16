@@ -472,6 +472,56 @@ def test_the_grounding_check_is_skipped_when_retrieval_is_not_known() -> None:
     assert plan.channels[0].channel_key == "google_search_paid"
 
 
+def test_an_ungrounded_proposal_fails_the_plan_exactly_as_a_channel_does() -> None:
+    """#67's third increment gave the run a second list to answer in, and a
+    guard that only walked the first would have exempted it.
+
+    A proposal is where an ungrounded recommendation costs most, not least:
+    the operator already decided against this channel, so the ONLY thing that
+    justifies putting it back in front of them is evidence they have not seen.
+    `all_recommendations` is what makes the guard span both lists.
+    """
+    messages = _tool_call(
+        {
+            "channels": [_channel("google_search_paid", _RETRIEVED_URL)],
+            "proposals": [_channel("linkedin_organic", _PARENT_URL)],
+        }
+    )
+
+    with pytest.raises(pipeline.UngroundedRecommendationError) as excinfo:
+        pipeline.extract_channel_plan(
+            messages,
+            taxonomy={"google_search_paid": "paid"},
+            proposable={"linkedin_organic": "organic"},
+            allowed_source_urls=[_PARENT_URL],
+            annotations=_ANNOTATIONS,
+        )
+
+    assert "linkedin_organic" in str(excinfo.value)
+
+
+def test_a_proposals_fabricated_source_is_refused_like_any_other() -> None:
+    """The provenance half of the same point. A URL in neither the parent nor
+    the runtime's retrieval record was read by nothing, and that sentence does
+    not become less true because the recommendation carrying it is only a
+    proposal."""
+    messages = _tool_call(
+        {
+            "channels": [_channel("google_search_paid", _RETRIEVED_URL)],
+            "proposals": [_channel("linkedin_organic", _FABRICATED_URL)],
+        }
+    )
+
+    with pytest.raises(pipeline.UncitedSourceError):
+        pipeline.extract_channel_plan(
+            messages,
+            taxonomy={"google_search_paid": "paid"},
+            proposable={"linkedin_organic": "organic"},
+            allowed_source_urls=[_PARENT_URL],
+            annotations=_ANNOTATIONS,
+        )
+
+
 def test_an_ungrounded_recommendation_is_a_pipeline_error() -> None:
     """`admin_app._pipeline_error_to_http` maps the BASE class, so a new error
     type that missed it would fall through as a bare 500 rather than the 502

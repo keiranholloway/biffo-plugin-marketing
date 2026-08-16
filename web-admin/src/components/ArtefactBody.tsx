@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 
 import type {
   ChannelPlanBody as ChannelPlanBodyT,
+  ChannelRecommendation,
   CopySetBody,
   LengthOverage,
   PositioningBody as PositioningBodyT,
@@ -337,26 +338,57 @@ export function ChannelPlanArtefact({
   selection?: ElementSelection
 }) {
   const byRank = [...body.channels].sort((a, b) => a.rank - b.rank)
+  const proposals = [...(body.proposals ?? [])].sort((a, b) => a.rank - b.rank)
+  const items = (channels: ChannelRecommendation[], proposed: boolean) =>
+    channels.map((c, i) => ({
+      key: `${proposed ? 'proposal' : 'plan'}-${c.channel_key ?? c.suggested_label ?? ''}-${i}`,
+      id: c.id,
+      label: c.channel_key ?? c.suggested_label ?? 'this channel',
+      heading: (
+        <h4>
+          #{c.rank}{' '}
+          <ChannelName
+            channelKey={c.channel_key}
+            suggestedLabel={c.suggested_label}
+            proposed={proposed}
+            lookup={channelLookup}
+          />{' '}
+          <span className={`motion motion-${c.motion}`}>{c.motion}</span>
+        </h4>
+      ),
+      body: <p>{c.rationale}</p>,
+      sources: c.sources,
+    }))
+
   return (
     <div className="artefact-body">
       <FindingGroup
-        items={byRank.map((c, i) => ({
-          key: `${c.channel_key ?? c.suggested_label ?? 'proposal'}-${i}`,
-          id: c.id,
-          label: c.channel_key ?? c.suggested_label ?? 'this channel',
-          heading: (
-            <h4>
-              #{c.rank}{' '}
-              <ChannelName channelKey={c.channel_key} suggestedLabel={c.suggested_label} lookup={channelLookup} />{' '}
-              <span className={`motion motion-${c.motion}`}>{c.motion}</span>
-            </h4>
-          ),
-          body: <p>{c.rationale}</p>,
-          sources: c.sources,
-        }))}
+        items={items(byRank, false)}
         renderSources={(sources) => <SourceRefs sources={sources} />}
         selection={selection}
       />
+      {/* #67 asks that an outside-selection proposal be "visually and
+          structurally distinct — a separate field or flag, not merely a note
+          in the rationale". It is now structurally separate server-side
+          (`ChannelPlanBody.proposals`), and this is the visual half: its own
+          heading, its own block, and a sentence saying what an operator is
+          being asked. Rendered only when there are proposals, so a plan with
+          none looks exactly as it did. */}
+      {proposals.length > 0 && (
+        <section className="channel-proposals">
+          <h4>Outside your selection — proposed</h4>
+          <p className="channel-proposals-note">
+            Not part of this plan. The channel-plan agent found evidence for {proposals.length} channel
+            {proposals.length === 1 ? '' : 's'} you did not select. Nothing is written for {proposals.length === 1 ? 'it' : 'them'} unless you add{' '}
+            {proposals.length === 1 ? 'it' : 'them'} to this campaign’s target channels and plan again.
+          </p>
+          <FindingGroup
+            items={items(proposals, true)}
+            renderSources={(sources) => <SourceRefs sources={sources} />}
+            selection={selection}
+          />
+        </section>
+      )}
     </div>
   )
 }

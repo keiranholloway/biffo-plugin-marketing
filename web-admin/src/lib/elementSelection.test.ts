@@ -85,6 +85,45 @@ describe('elementsOf', () => {
     ])
   })
 
+  it('offers a proposal a checkbox too, so a partial approval can keep one (#67)', () => {
+    const result = elementsOf(
+      artefact({
+        channels: [
+          {
+            id: 'ch1',
+            channel_key: 'linkedin_organic',
+            suggested_label: null,
+            motion: 'organic',
+            rank: 1,
+            rationale: 'x',
+            sources: [],
+          },
+        ],
+        proposals: [
+          {
+            id: 'pr1',
+            channel_key: 'google_search_paid',
+            suggested_label: null,
+            motion: 'paid',
+            rank: 1,
+            rationale: 'x',
+            sources: [],
+          },
+        ],
+      }),
+    )
+    // Mirrors `pipeline.ELEMENT_LIST_KEYS`, which gained `proposals` for the
+    // same reason: an id-less element is dropped by `selected_body` the
+    // moment ANY selection is submitted, so a proposal outside this list
+    // would silently vanish from an artefact the operator narrowed. Being
+    // selectable does not make it a channel — everything downstream of the
+    // gate reads `channels` alone.
+    expect(result).toEqual([
+      { id: 'ch1', label: 'linkedin_organic' },
+      { id: 'pr1', label: 'google_search_paid' },
+    ])
+  })
+
   it('labels a piece of copy with its channel and headline together, distinct from a channel-plan entry', () => {
     const result = elementsOf(
       artefact({

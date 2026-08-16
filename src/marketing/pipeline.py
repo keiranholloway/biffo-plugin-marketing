@@ -86,6 +86,7 @@ from .definitions import (
     ChannelCopy,
     ChannelEvidenceSet,
     ChannelPlan,
+    ChannelRecommendation,
     CopyField,
     CopySet,
     LengthOverage,
@@ -781,6 +782,24 @@ def retrieved_evidence(
     return handed
 
 
+def all_recommendations(plan: ChannelPlan) -> list[ChannelRecommendation]:
+    """Every recommendation the run produced, planned or proposed (#67).
+
+    The one place this module flattens :class:`~marketing.definitions.ChannelPlan`'s
+    two lists, and it exists so that the flattening is a deliberate act with a
+    name rather than a `[*plan.channels, *plan.proposals]` someone writes from
+    memory. The lists are separate precisely so that a reader who wants only
+    the plan gets only the plan by default (see :class:`ChannelPlan`); the
+    questions that legitimately span both are the ones asked of the run rather
+    than of the campaign — is every recommendation grounded, and what did this
+    artefact cite — and they are asked here.
+
+    Order is plan-then-proposals, so an error naming the first offender names a
+    real plan entry before a proposal when both are wrong.
+    """
+    return [*plan.channels, *plan.proposals]
+
+
 def _require_retrieved_evidence(
     plan: ChannelPlan, *, retrieved_source_urls: Collection[str]
 ) -> None:
@@ -804,7 +823,7 @@ def _require_retrieved_evidence(
     allowed = {_url_key(url) for url in retrieved_source_urls}
     ungrounded = [
         recommendation.channel_key or recommendation.suggested_label or "(unnamed channel)"
-        for recommendation in plan.channels
+        for recommendation in all_recommendations(plan)
         if not any(_url_key(source.url) in allowed for source in recommendation.sources)
     ]
     if not ungrounded:
@@ -832,6 +851,7 @@ def extract_channel_plan(
     messages: list[dict[str, Any]],
     *,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    proposable: Mapping[str, Literal["organic", "paid"]] | None = None,
     allowed_motions: Collection[str] | None = None,
     allowed_source_urls: Collection[str] | None = None,
     annotations: list[dict[str, Any]] | None = None,
@@ -904,6 +924,51 @@ def extract_channel_plan(
     the agent stops asserting motion independently for a real channel, full
     stop, regardless of what it put in the field.
 
+    ## Where this function decides plan-versus-proposal (#67, third increment)
+
+    ``proposable`` is the second ``{channel_key: motion}`` snapshot — the
+    taxonomy rows the operator **deselected**, which this run was shown in a
+    separate block it may only propose from. It is stashed at start time for
+    the identical reason ``taxonomy`` is, and an operator re-selecting a
+    channel mid-flight must no more retroactively promote a proposal than a
+    widened motion may retroactively legalise a paid channel.
+
+    Every recommendation, from **either** of the model's two lists, is then
+    re-partitioned here, by which snapshot its key is in:
+
+    - key in ``taxonomy`` — a plan entry, in ``plan.channels``.
+    - key in ``proposable`` — a **proposal**, in ``plan.proposals``, whatever
+      list the model put it in and whatever it wrote in ``motion``.
+    - key in neither — :class:`UnknownChannelError`, unchanged.
+    - no key at all (``suggested_label``) — a proposal, unchanged.
+
+    **The model does not get a vote on which list an entry lands in**, and
+    that is the point. #128 is this estate's evidence that a constraint the
+    model is merely asked to respect is not one, and this is the same lever
+    ``motion`` already uses one paragraph up: derived from the snapshot, never
+    read back from what the model asserted. A model that puts a deselected
+    channel in ``channels`` gets it moved, not honoured — so the operator's
+    selection remains an enforcement even though the deselected rows are now
+    visible to the run.
+
+    Why this partition is what makes showing the deselected rows safe at all:
+    before it, "carries a ``channel_key``" meant "is an approved channel", and
+    every downstream reader was written on that basis
+    (:func:`channel_key_motions` and everything through it). A proposal
+    carrying a real key would have flowed straight into the copy stage and the
+    packs — publish-ready copy for a channel the operator never selected. The
+    two lists move that distinction out of a field's nullness and into the
+    shape of the body, where a reader cannot fail to observe it by forgetting
+    to look. See :class:`~marketing.definitions.ChannelPlan` for why a flag
+    was rejected.
+
+    ``proposable=None`` — a run started before this increment — means "this
+    run was shown no proposable rows", so nothing can be in that set and every
+    unrecognised key is still an :class:`UnknownChannelError`. Unlike
+    ``allowed_motions``, there is no tri-state to preserve: an empty proposable
+    set is not a rule being skipped, it is the honest description of a run that
+    was only ever shown one list.
+
     ``allowed_motions`` is the campaign's own motion widened to channel
     motions (#67) — ``{"organic"}``, ``{"paid"}`` or both, from
     :func:`~marketing.definitions.motions_allowed_by`, stashed on the pending
@@ -950,7 +1015,7 @@ def extract_channel_plan(
         ),
         tool_name=CHANNEL_PLAN_TOOL_NAME,
         model_cls=ChannelPlan,
-        citation_groups=lambda r: [c.sources for c in r.channels],
+        citation_groups=lambda r: [c.sources for c in all_recommendations(r)],
         malformed_message=f"the channel-plan run produced no {CHANNEL_PLAN_TOOL_NAME} tool call",
         no_citations_message=(
             "The channel-plan run cited nothing at all — neither its own search results "
@@ -962,30 +1027,54 @@ def extract_channel_plan(
     if retrieved is not None:
         _require_retrieved_evidence(plan, retrieved_source_urls=retrieved)
     permitted = None if allowed_motions is None else frozenset(allowed_motions)
-    for recommendation in plan.channels:
+    proposable_motions: dict[str, Literal["organic", "paid"]] = dict(proposable or {})
+    planned: list[ChannelRecommendation] = []
+    proposed: list[ChannelRecommendation] = []
+    # Read off the model's two lists and thrown away immediately — the
+    # partition below is rebuilt from the snapshots, so where the model filed
+    # an entry never survives this function.
+    for recommendation in all_recommendations(plan):
         if recommendation.channel_key is None:
-            # A `suggested_label` proposal. `motion` is the agent's own — the
-            # model validator already requires it — so this is where the
-            # campaign's motion has to be enforced against the model.
+            # A `suggested_label` proposal for something in neither snapshot.
+            # `motion` is the agent's own — the model validator already
+            # requires it — so this is where the campaign's motion has to be
+            # enforced against the model.
             if permitted is not None and recommendation.motion not in permitted:
                 raise MotionNotAllowedError(
                     f"The channel-plan run proposed {recommendation.suggested_label!r} as a "
                     f"{recommendation.motion} channel, but this campaign runs "
                     f"{'/'.join(sorted(permitted))} channels only."
                 )
+            proposed.append(recommendation)
             continue
-        if recommendation.channel_key not in taxonomy:
+        is_proposal = recommendation.channel_key not in taxonomy
+        if is_proposal and recommendation.channel_key not in proposable_motions:
             raise UnknownChannelError(
                 f"The channel-plan run referenced channel_key {recommendation.channel_key!r}, "
-                "which was not in the taxonomy it was given."
+                "which was in neither the taxonomy nor the proposable channels it was given."
             )
-        motion = taxonomy[recommendation.channel_key]
+        motion = (
+            proposable_motions[recommendation.channel_key]
+            if is_proposal
+            else taxonomy[recommendation.channel_key]
+        )
         if permitted is not None and motion not in permitted:
+            # Defence in depth against a caller that filtered its snapshots
+            # wrongly, not against the model — and it applies to the proposable
+            # snapshot exactly as to the selected one. The motion is #67's
+            # OTHER operator decision, and relaxing the selection into
+            # "proposable" must not quietly relax the motion with it: an
+            # organic campaign is never shown a paid row in either block, so
+            # one reaching here means the route built the wrong set.
             raise MotionNotAllowedError(
-                f"The channel-plan run recommended {recommendation.channel_key!r}, a {motion} "
-                f"channel, but this campaign runs {'/'.join(sorted(permitted))} channels only."
+                f"The channel-plan run {'proposed' if is_proposal else 'recommended'} "
+                f"{recommendation.channel_key!r}, a {motion} channel, but this campaign runs "
+                f"{'/'.join(sorted(permitted))} channels only."
             )
         recommendation.motion = motion  # derived, not asserted
+        (proposed if is_proposal else planned).append(recommendation)
+    plan.channels = planned
+    plan.proposals = proposed
     return plan
 
 
@@ -1072,7 +1161,12 @@ def flatten_citations(
             *(c.sources for c in output.ctas),
         ]
     elif isinstance(output, ChannelPlan):
-        groups = [c.sources for c in output.channels]
+        # Both lists (#67). This column answers "what did this artefact cite",
+        # a question about the run rather than about the campaign, and a
+        # proposal an operator has yet to accept was still argued from sources
+        # — omitting them would make the citation count disagree with the
+        # artefact an operator is looking at.
+        groups = [c.sources for c in all_recommendations(output)]
     elif isinstance(output, CopySet):
         groups = [c.sources for c in output.channels]
     else:
@@ -1122,7 +1216,24 @@ def flatten_citations(
 #: has none of these keys, so every function below is a no-op on it, and a
 #: stage added later that carries a new list of selectable things needs only
 #: to be named here — not to teach every call site about a new `kind`.
-ELEMENT_LIST_KEYS: tuple[str, ...] = ("findings", "segments", "pillars", "ctas", "channels")
+#:
+#: `proposals` (#67) is a channel plan's second list, and it is here for the
+#: same reason `channels` is: its entries carry `sources`, so they must be in
+#: `source_urls_from_body`'s union or a selection would silently narrow the
+#: next stage's citable set by a source a kept element still relies on — the
+#: exact failure that function's docstring warns about. That the two lists are
+#: BOTH selectable is not the same as their being interchangeable: everything
+#: downstream of the approval gate reads `channels` alone (see
+#: `channel_key_motions`), so selecting a proposal keeps it visible on the
+#: approved artefact without making it a channel.
+ELEMENT_LIST_KEYS: tuple[str, ...] = (
+    "findings",
+    "segments",
+    "pillars",
+    "ctas",
+    "channels",
+    "proposals",
+)
 
 
 def with_element_ids(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -1192,6 +1303,29 @@ def selected_body(body: Mapping[str, Any], element_ids: Collection[str] | None) 
             item for item in items if isinstance(item, dict) and item.get("id") in wanted
         ]
     return narrowed
+
+
+def without_proposals(body: Mapping[str, Any]) -> dict[str, Any]:
+    """``body`` with a channel plan's ``proposals`` list removed (#67) — what
+    a DOWNSTREAM stage is handed, as opposed to what an operator reviews.
+
+    The separate list makes a proposal invisible to every reader that asks for
+    ``channels``, but the copy run is handed the plan artefact's body *whole*,
+    so without this it would see the proposals as prose and could write copy
+    for one. That copy is then rejected by :func:`extract_copy`'s
+    ``channel_plan_channels`` check — fatally, taking the whole artefact with
+    it, because this pipeline's outputs are all-or-nothing. So the failure mode
+    here is not "a proposal sneaks into a pack" but "a campaign's copy stage
+    dies on a channel the operator was only being asked about", which is worse
+    than it sounds: nothing in the resulting error points at the proposal.
+
+    Narrowing the input is also the same lever #67 uses everywhere else — the
+    channel-plan run cannot pick an unselected channel because it is not shown
+    one — rather than a fifth thing the prompt asks a model to remember.
+
+    A no-op on every other body: nothing but a channel plan has this key.
+    """
+    return {key: value for key, value in body.items() if key != "proposals"}
 
 
 def source_urls_from_body(body: Mapping[str, Any]) -> list[str]:
@@ -2037,6 +2171,7 @@ def channel_plan_input(
     *,
     positioning_body: dict[str, Any],
     taxonomy: list[dict[str, Any]],
+    proposable_taxonomy: list[dict[str, Any]] | None = None,
     campaign_motion: str,
 ) -> dict[str, Any]:
     """Everything the planning run needs beyond the evidence itself.
@@ -2048,10 +2183,26 @@ def channel_plan_input(
     ``channel_taxonomy`` already is — it must be what THIS stage was started
     against, not whatever the positioning or the taxonomy has been changed to
     by the time the grounding run finishes.
+
+    ``proposable_taxonomy`` (#67) is the deselected rows, in their own
+    clearly-labelled block. Two lists rather than one flagged list, because
+    what the run may PLAN from and what it may only PROPOSE from are different
+    permissions, and the block boundary is the only part of that the model can
+    see. Which one an answer actually lands in is decided afterwards from these
+    same two sets — :func:`extract_channel_plan` — so this block is how the run
+    is told the option exists, never how the operator's selection is enforced.
+
+    It rides in the PLANNING run's payload only, never the grounding run's:
+    #65 measured that everything in an ``:online`` payload steers retrieval,
+    and #67 is explicit that search budget should not be spent on channels the
+    operator has already ruled out. A proposal therefore has to be grounded in
+    what a search aimed at the *selected* channels happened to turn up, which
+    is the right bar for asking an operator to reconsider.
     """
     return {
         "positioning": positioning_body,
         "channel_taxonomy": taxonomy,
+        "proposable_taxonomy": list(proposable_taxonomy or []),
         "campaign_motion": campaign_motion,
     }
 
@@ -2235,6 +2386,7 @@ async def advance_channel_plan(
     *,
     evidence_run_id: str,
     taxonomy: dict[str, Literal["organic", "paid"]],
+    proposable: Mapping[str, Literal["organic", "paid"]] | None = None,
     plan_run_id: str | None = None,
     plan_input: Mapping[str, Any] | None = None,
     causation_id: str | None = None,
@@ -2254,8 +2406,9 @@ async def advance_channel_plan(
     ``plan_input`` is :func:`channel_plan_input`'s dict, stashed at start time
     for the reason that function's docstring gives. ``taxonomy`` is
     ``{channel_key: motion}`` for exactly the taxonomy the stage was started
-    against, and ``allowed_motions`` the campaign motion it was started under
-    (#67) — see :func:`extract_channel_plan` for how they and
+    against, ``proposable`` the same for the deselected rows it was allowed to
+    propose from, and ``allowed_motions`` the campaign motion it was started
+    under (#67) — see :func:`extract_channel_plan` for how they and
     ``allowed_source_urls`` are used.
 
     ## The guard's subject is the run that RETRIEVED
@@ -2334,6 +2487,7 @@ async def advance_channel_plan(
         plan=extract_channel_plan(
             plan_view.messages,
             taxonomy=taxonomy,
+            proposable=proposable,
             allowed_motions=allowed_motions,
             allowed_source_urls=allowed_source_urls,
             annotations=evidence_view.annotations,
@@ -2412,7 +2566,24 @@ async def advance_copy(
 def channel_key_motions(
     channel_plan_body: dict[str, Any],
 ) -> dict[str, Literal["organic", "paid"]]:
-    """``{channel_key: motion}`` for the entries that carry a key. Never raises.
+    """``{channel_key: motion}`` for the plan entries that carry a key. Never
+    raises.
+
+    **Reads ``channels`` only, never ``proposals`` (#67).** This is the
+    chokepoint every downstream stage goes through — copy, and through copy the
+    distribution and paid packs — so it is the one place "an approved channel"
+    is turned back into a set of keys, and a proposal must not be in it.
+
+    That exclusion is structural rather than filtered. Since #67's third
+    increment a proposal can carry a perfectly real ``channel_key`` (a taxonomy
+    row the operator deselected), so the ``if c.get("channel_key")`` below is
+    no longer what excludes it — the key it reads from is. A reader that knows
+    nothing about proposals gets the plan, which is the failure direction to
+    be in: forgetting `proposals` exists costs a proposal being invisible,
+    where a forgotten ``is_proposal`` filter would have cost publish-ready copy
+    for a channel the operator never selected. The remaining
+    ``if c.get("channel_key")`` guard is for the legacy shape, where a
+    proposal did live in ``channels`` with no key.
 
     Split out of :func:`channel_plan_channel_map` for issue #152. That function
     answers TWO questions at once — "is this plan stale?" and "what are its
@@ -2442,13 +2613,21 @@ def channel_plan_channel_map(
     channel_plan_body: dict[str, Any],
 ) -> dict[str, Literal["organic", "paid"]]:
     """``{channel_key: motion}`` for an approved channel plan's real entries
-    (#76 increment 2) — those carrying a ``channel_key``. A
-    ``suggested_label``-only proposal is excluded: it is not a real channel
-    until an operator accepts it, so copy must not be written for it yet.
+    (#76 increment 2) — those in ``channels`` carrying a ``channel_key``.
+    Every proposal is excluded, whether it names a taxonomy channel the
+    operator deselected or only a ``suggested_label``: it is not a channel of
+    this campaign's until an operator accepts it, so copy must not be written
+    for it yet. See :func:`channel_key_motions` for why that exclusion is a
+    matter of which list is read rather than which field is set.
 
-    Raises :class:`StaleChannelPlanError` when the plan has entries but NONE
-    of them carry a ``channel_key`` — every entry is the pre-#76 free-text
-    shape (``{"channel": ..., "motion": ...}``, no id at all). This is the
+    Raises :class:`StaleChannelPlanError` when the plan has ``channels``
+    entries but NONE of them carry a ``channel_key`` — every entry is the
+    pre-#76 free-text shape (``{"channel": ..., "motion": ...}``, no id at
+    all). Since #67's third increment that signal is sharper than it was: a
+    keyless entry can no longer legitimately appear in ``channels`` at all, so
+    one that does really is a pre-taxonomy plan rather than a current plan
+    whose only surviving entry is a proposal — which is the mis-diagnosis #152
+    had to work around. This is the
     explicit answer to "what happens to dev's existing approved plans/copy":
     rather than silently building a copy run with nothing to reference, or a
     bare ``KeyError``, this campaign needs channel planning re-run before
