@@ -88,6 +88,11 @@ _TAXONOMY_ROWS = [
     }
 ]
 
+#: The campaign brief the grounding run is given, and derives its search from
+#: (#65). Shaped `{"brief": ...}` exactly as `start_research`'s payload is, so
+#: `definitions._brief_topic` reads both the same way.
+_BRIEF = {"brief": "Independent UK coffee shop chains running 3-10 sites."}
+
 _POSITIONING_BODY = {
     "segments": [
         {
@@ -194,7 +199,7 @@ async def _start_and_ground(
     """Start the stage and complete its grounding run."""
     causation_id, evidence_run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )
@@ -488,7 +493,7 @@ async def test_a_grounding_run_that_never_called_its_tool_is_a_malformed_run() -
     gateway = _FakeGateway()
     causation_id, evidence_run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )

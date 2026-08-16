@@ -2044,17 +2044,68 @@ class ChannelPlanAdvance:
     started_plan_run_id: str | None = None
 
 
+def channel_evidence_input(
+    *,
+    brief: Mapping[str, Any] | None,
+    taxonomy: list[dict[str, Any]],
+    campaign_motion: str,
+) -> dict[str, Any]:
+    """Everything the **grounding** run is given — and nothing else (issue #65).
+
+    ## Every key here is also a search term, which is the whole point
+
+    An ``:online`` run's provider searches from the run's input payload before
+    the model is invoked. Not from its first key — from the payload. So this
+    function's return value is not "context for the model", it is *the query*,
+    and anything put here steers what comes back.
+
+    That distinction was measured rather than reasoned about. Until now this
+    run was handed :func:`channel_plan_input` — the full approved positioning,
+    thousands of tokens of segments, message pillars, calls to action and their
+    sources — behind a ``search_query`` first key. On tabsii dev (2026-08-15)
+    it retrieved five pages, and every one of them tracked the **pillars**:
+
+        default.com/post/revops-frankenstack
+        shopify.com/enterprise/blog/frankenstack
+        gtmstack.app/blog/building-unified-gtm-data-layer
+        stackswap.ai/knowledge/modern-gtm-architecture
+        kaelio.com/blog/single-source-of-truth-data-across-tools
+
+    "single source of truth" and "unified data layer" are that campaign's own
+    message pillars. They appear nowhere in the ``search_query`` — nor do any
+    of its terms appear in what came back. The query contributed nothing; the
+    body contributed everything, and the run correctly reported no evidence
+    because not one retrieved page was about where anyone converts.
+
+    So the grounding run now receives the question and not the answer-so-far:
+    the searched query, the audience as the operator described it, the channels
+    on the table, and the motion. The positioning still reaches the **planning**
+    run through :func:`channel_plan_input`, which is what needs it — that run is
+    ``opus-5`` with no ``:online``, so its payload steers no retrieval at all.
+
+    ``brief`` is the campaign's own ``{"brief": ...}`` shape, the same one
+    ``start_research`` sends, so both grounded stages describe their audience
+    from one source of words rather than two.
+    """
+    return {
+        "brief": dict(brief) if isinstance(brief, Mapping) else {},
+        "channel_taxonomy": taxonomy,
+        "campaign_motion": campaign_motion,
+    }
+
+
 async def start_channel_evidence(
     gateway: AgentGateway,
     *,
-    positioning_body: dict[str, Any],
+    brief: Mapping[str, Any] | None,
     taxonomy: list[dict[str, Any]],
     campaign_motion: str,
     channel_evidence_model: str = DEFAULT_CHANNEL_EVIDENCE_MODEL,
 ) -> tuple[str, str]:
     """Start the channel stage by starting its **grounding** run (M4, issues
-    #3/#65), given the *approved* positioning artefact's body AND the channels
-    this campaign may plan against as input.
+    #3/#65), given the campaign brief and the channels this campaign may plan
+    against as input — and deliberately NOT the approved positioning, which
+    reaches the planning run instead (see :func:`channel_evidence_input`).
 
     ## Why the stage starts with a run that recommends nothing
 
@@ -2121,18 +2172,22 @@ async def start_channel_evidence(
         # for exactly the same reason (issue #101, now #65): this is an
         # `:online` run, so the provider searches from the payload BEFORE the
         # model is invoked, and the payload is therefore the only place this
-        # stage can decide what its retrieval is about. Leading with
-        # `positioning` would retrieve the positioning question all over
-        # again — the audience/competitive evidence this stage already has
-        # too much of — instead of the conversion question it exists to ask.
+        # stage can decide what its retrieval is about.
+        #
+        # Being first is NOT sufficient, which is what #65's second live run
+        # measured — see `channel_evidence_input`. The rest of the payload is
+        # searched too, and a positioning body outweighs a one-line query by a
+        # thousand tokens. So the constraint is on the whole payload, and it is
+        # `channel_evidence_input`'s job to hold it: nothing reaches this run
+        # that its retrieval should not be about.
         input_payload={
             "search_query": channel_plan_search_query(
-                positioning_body=positioning_body,
+                brief=brief,
                 taxonomy=taxonomy,
                 campaign_motion=campaign_motion,
             ),
-            **channel_plan_input(
-                positioning_body=positioning_body,
+            **channel_evidence_input(
+                brief=brief,
                 taxonomy=taxonomy,
                 campaign_motion=campaign_motion,
             ),

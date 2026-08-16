@@ -36,9 +36,16 @@ router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 _INTERNAL_PREFIX = "/api/v1/internal/plugins/marketing"
 
 
-async def _targeting(campaign_id: str, token: str) -> tuple[str, list[str]]:
-    """This campaign's motion and selected channel keys (#67), or a 4xx
+async def _targeting(campaign_id: str, token: str) -> tuple[str, list[str], dict[str, Any]]:
+    """This campaign's motion, selected channel keys (#67) and brief, or a 4xx
     naming the decision that has not been taken yet.
+
+    The brief rides along rather than being fetched again because this is
+    already the read of the campaign row that has it. It is what the grounding
+    run's retrieval is derived from (#65) — see
+    ``pipeline.channel_evidence_input`` — and it is shaped as
+    ``{"brief": ...}`` here, matching ``start_research_route``'s payload
+    exactly, so ``definitions._brief_topic`` reads both the same way.
 
     Both are operator decisions the channel-plan stage cannot make for
     itself, and both are refused rather than defaulted. A default motion of
@@ -80,7 +87,7 @@ async def _targeting(campaign_id: str, token: str) -> tuple[str, list[str]]:
                 "should run on before planning."
             ),
         )
-    return motion, selected
+    return motion, selected, {"brief": row.get("brief") or ""}
 
 
 @router.post("/campaigns/{campaign_id}/channel-plan", status_code=status.HTTP_201_CREATED)
@@ -98,7 +105,7 @@ async def start_channel_plan_route(
     # The operator's two pre-plan decisions (#67), read BEFORE the approval
     # gate work below so a campaign missing either is told which decision is
     # missing rather than having an agent run started for it.
-    campaign_motion, selected_keys = await _targeting(campaign_id, admin.token)
+    campaign_motion, selected_keys, brief = await _targeting(campaign_id, admin.token)
 
     positioning = await admin_app._latest_artefact(campaign_id, "positioning", admin.token)
     if positioning is None:
@@ -207,7 +214,7 @@ async def start_channel_plan_route(
     # be handed over as an enumerated set — see `pipeline.advance_channel_plan`.
     causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=positioning_body,
+        brief=brief,
         taxonomy=taxonomy,
         campaign_motion=campaign_motion,
     )
