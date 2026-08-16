@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from . import admin_app, pipeline
+from . import admin_app, definitions, pipeline
 
 router = APIRouter(dependencies=[Depends(admin_app.require_admin)])
 
@@ -157,10 +157,33 @@ async def start_copy_route(
         )
     )
 
+    # The per-field ceiling each channel's copy must actually fit (#173).
+    #
+    # `COPY_LENGTH_BUDGET` alone is one number for every channel, and the paid
+    # platforms are tighter than it on some fields — so copy could satisfy the
+    # budget in full and still be trimmed by the paid pack on export. Measured
+    # on dev: 3 of 6 paid fields truncated, every one inside budget.
+    #
+    # The taxonomy already carries the shape needed to resolve this: #76
+    # increment 2 added `marketing_channel.ad_platform` and the seed populates
+    # it for every paid channel. Nothing has to be inferred from the channel
+    # key here — which is the guess `paid_pack_routes._platform_for_channel`
+    # deleted, and the reason #173 was recorded as blocked.
+    #
+    # Read at start time and stashed below for the same reason
+    # `channel_plan_channels` is: it must be what THIS run was shown, so the
+    # length check at advance time measures the copy against the number the
+    # model was actually given, not against a taxonomy that has moved since.
+    channels_resp = await admin_app._core("GET", f"{_INTERNAL_PREFIX}/channels", admin.token)
+    channels_resp.raise_for_status()
+    ad_platforms = {row["key"]: row.get("ad_platform") for row in (channels_resp.json() or [])}
+    channel_budgets = definitions.channel_copy_budgets(channel_plan_channels, ad_platforms)
+
     causation_id, run_id = await pipeline.start_copy(
         gateway,
         positioning_body=positioning_body,
         channel_plan_body=channel_plan_body,
+        channel_budgets=channel_budgets,
     )
 
     created = await admin_app._core(
@@ -179,6 +202,7 @@ async def start_copy_route(
                 pipeline.with_element_ids(
                     {
                         "channel_plan_channels": channel_plan_channels,
+                        "channel_budgets": channel_budgets,
                         "allowed_source_urls": allowed_source_urls,
                     }
                 )

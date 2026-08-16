@@ -489,6 +489,118 @@ CopyField = Literal["headline", "body", "cta"]
 
 COPY_LENGTH_BUDGET: Mapping[CopyField, int] = {"headline": 60, "body": 200, "cta": 40}
 
+#: Character limits by ad platform, per field (#76 increment 2, moved here for
+#: #173). Deliberately conservative, published numbers (Meta/Google/TikTok/
+#: LinkedIn ad-copy guidance), not fetched from anywhere — this plugin calls no
+#: platform API, so these are static data, the same way :data:`PLACEMENTS`'s
+#: aspect ratios are.
+#:
+#: ``"generic"`` is the fallback for a channel with no (or an unrecognised)
+#: ``ad_platform``, sized to the narrowest of the known platforms so a gap
+#: never overstates how much room the operator actually has.
+#:
+#: **This lives in ``definitions`` rather than in ``paid_pack_routes`` because
+#: two stages now read it** (#173): the pack trims to it at export, and the copy
+#: stage writes to it. While the pack owned it privately, the writing stage had
+#: no way to see it, and copy could satisfy its budget in full and still be
+#: truncated on the way out — which is the whole of #173. A second copy of these
+#: numbers beside the copy stage would have made the two drift apart silently,
+#: which is the failure mode this estate spends most of its time removing.
+#:
+#: Keyed by ``marketing_channel.ad_platform`` — "google" covers both Google
+#: Search ads and YouTube ads, which is coarser than ideal (search and video ad
+#: copy specs genuinely differ), but the taxonomy does not carry a finer-grained
+#: platform today and these limits are already declared conservative guidance
+#: rather than authoritative ones. Splitting it further is a taxonomy change,
+#: not a lookup-table one.
+AD_PLATFORM_LIMITS: Mapping[str, Mapping[CopyField, int]] = {
+    "meta": {"headline": 40, "body": 125, "cta": 20},
+    "google": {"headline": 30, "body": 90, "cta": 30},
+    "tiktok": {"headline": 100, "body": 100, "cta": 20},
+    "linkedin": {"headline": 70, "body": 150, "cta": 20},
+    "generic": {"headline": 30, "body": 90, "cta": 20},
+}
+
+#: The key :data:`AD_PLATFORM_LIMITS` falls back to. Named rather than written
+#: as a literal in three modules, for the same reason :data:`CopyField` is.
+AD_PLATFORM_GENERIC = "generic"
+
+
+def ad_platform_limits(ad_platform: str | None) -> Mapping[CopyField, int]:
+    """The per-field character limits for this channel's ad platform, falling
+    back to ``generic``'s narrower ones.
+
+    A channel with no ``ad_platform``, or one naming a platform this table does
+    not (yet) carry, still deserves a pack — just a more conservative one. The
+    fallback is deliberately the *narrowest* set, so an unknown platform can
+    never overstate the room an operator has.
+    """
+    return AD_PLATFORM_LIMITS.get(ad_platform or "", AD_PLATFORM_LIMITS[AD_PLATFORM_GENERIC])
+
+
+def copy_length_budget(*, motion: str, ad_platform: str | None) -> dict[CopyField, int]:
+    """What a channel's copy may actually be, per field (issue #173).
+
+    ## Why one ceiling was not enough
+
+    :data:`COPY_LENGTH_BUDGET` is a *writing* constraint — #128's "brevity as a
+    constraint, not a preference" — and it applies to every channel. The ad
+    platforms are a *fitting* constraint, and on some fields they are tighter
+    than the budget: Google's headline field holds 30 characters against the
+    budget's 60, and LinkedIn's CTA 20 against 40.
+
+    While those two never met, copy could satisfy the budget in full and still
+    be trimmed on export. Measured on dev, 2026-08-16 (campaign ``b6724387``):
+    a 46-character Google headline, a 132-character Google body and a
+    37-character LinkedIn CTA — every one inside budget, every one truncated by
+    the paid pack. Three of six paid fields.
+
+    So a paid channel's ceiling is the **tighter of the two**, per field, and
+    the model is told that number rather than the budget. Nothing here relaxes
+    the budget: ``min`` can only lower it.
+
+    ## Why organic is left alone
+
+    An organic channel has no ad form to fit, so there is no second constraint
+    to take the minimum with — and applying ``generic``'s 30/90/20 to a blog
+    post or a LinkedIn organic update would impose an ad's limits on something
+    that is not an ad. Organic keeps :data:`COPY_LENGTH_BUDGET` exactly as it
+    was, which is also what makes this change safe for every channel #173 did
+    not measure.
+
+    Note the asymmetry with :func:`ad_platform_limits`, which falls back to
+    ``generic`` for *anything* it does not recognise: that function answers "how
+    much will the pack trim to", and the pack only ever runs for paid channels.
+    This one answers "what may be written", and for an organic channel the
+    answer is not an ad platform's at all.
+    """
+    if motion != "paid":
+        return dict(COPY_LENGTH_BUDGET)
+    limits = ad_platform_limits(ad_platform)
+    return {field: min(budget, limits[field]) for field, budget in COPY_LENGTH_BUDGET.items()}
+
+
+def channel_copy_budgets(
+    channel_motions: Mapping[str, str],
+    ad_platforms: Mapping[str, str | None],
+) -> dict[str, dict[CopyField, int]]:
+    """``{channel_key: {field: ceiling}}`` for every channel the copy run will
+    write for (issue #173).
+
+    ``channel_motions`` is the approved plan's ``{channel_key: motion}`` — the
+    set the copy stage already validates against — and ``ad_platforms`` is
+    ``{channel_key: ad_platform}`` from the tenant's taxonomy. A channel absent
+    from the taxonomy resolves its platform to ``None``, which for a paid
+    channel means ``generic``'s conservative limits rather than an error: the
+    plan was approved against a taxonomy snapshot, and a channel retired since
+    should still get copy that fits.
+    """
+    return {
+        channel_key: copy_length_budget(motion=motion, ad_platform=ad_platforms.get(channel_key))
+        for channel_key, motion in channel_motions.items()
+    }
+
+
 #: How far past its budget a field has to be before the copy set is rejected
 #: outright rather than flagged (``pipeline.CopyTooLongError``).
 #:
@@ -559,22 +671,26 @@ class ChannelCopy(BaseModel):
     headline: str = Field(
         description=(
             f"The lead line, sized for this channel. At most "
-            f"{COPY_LENGTH_BUDGET['headline']} characters — a ceiling, not a target to "
-            "fill. One idea, scanned in a glance, strongest claim first."
+            f"{COPY_LENGTH_BUDGET['headline']} characters, and less where this channel "
+            "appears in the `channel_limits` map in your input — that number replaces "
+            "this one. A ceiling, not a target to fill. One idea, scanned in a glance, "
+            "strongest claim first."
         )
     )
     body: str = Field(
         description=(
             f"The body copy, sized for this channel. At most {COPY_LENGTH_BUDGET['body']} "
-            "characters — a ceiling, not a target to fill. One sentence; write a second "
-            "only if it carries a fact the first does not."
+            "characters, and less where this channel appears in the `channel_limits` map "
+            "in your input — that number replaces this one. A ceiling, not a target to "
+            "fill. One sentence; write a second only if it carries a fact the first does not."
         )
     )
     cta: str = Field(
         description=(
             "The call to action, drawn from the approved positioning. At most "
-            f"{COPY_LENGTH_BUDGET['cta']} characters — a ceiling, not a target to fill. "
-            "Ask for the action; do not restate the headline."
+            f"{COPY_LENGTH_BUDGET['cta']} characters, and less where this channel appears "
+            "in the `channel_limits` map in your input — that number replaces this one. "
+            "A ceiling, not a target to fill. Ask for the action; do not restate the headline."
         )
     )
     sources: list[Source] = Field(
@@ -1065,7 +1181,20 @@ one is usually still too long:
 - **Body: at most {_BODY_BUDGET} characters.**
 - **CTA: at most {_CTA_BUDGET} characters.**
 
-Your output is measured against these numbers after you return it. Every
+**Several channels are tighter than that, and your input says which.** Your
+input carries `channel_limits`: a `channel_key` to `{{headline, body, cta}}`
+map giving the real ceiling for each channel you are writing for. Where a
+channel appears there, **its numbers replace the ones above for that channel**
+— they are never higher, and they are what your output is measured against.
+
+Those tighter numbers are the ad platform's own field sizes, not a stricter
+opinion about brevity. A paid search headline lives in a box roughly half the
+width of the ceiling above: a headline written to the wider number is not
+slightly long there, it is a headline the platform cuts off, and an operator
+pastes the wreckage into an ads form. Write to the number given for the
+channel in front of you.
+
+Your output is measured against those numbers after you return it. Every
 field over its ceiling is recorded on the artefact and shown to the operator
 who has to approve it, right next to the line that broke it. Copy more than
 {_CEILING_MULTIPLE}x over is rejected outright and the whole set is thrown away with it.

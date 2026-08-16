@@ -998,6 +998,10 @@ async def test_start_copy_requests_one_run_carrying_both_upstream_bodies() -> No
     assert requested.input_payload == {
         "positioning": positioning_body,
         "channel_plan": channel_plan_body,
+        # #173: the per-channel ceilings ride in the payload, because the tool
+        # schema is one schema for every channel and cannot say "30 for Google,
+        # 70 for LinkedIn". Empty here because this run was given no channels.
+        "channel_limits": {},
     }
     assert run_id  # a real id was returned
 

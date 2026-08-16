@@ -60,7 +60,15 @@ from typing import Any
 from biffo_plugin_sdk import BiffoAPIClient, create_core_client
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from . import admin_app, config, pack_routes, pipeline, principal_client, spend_routes
+from . import (
+    admin_app,
+    config,
+    definitions,
+    pack_routes,
+    pipeline,
+    principal_client,
+    spend_routes,
+)
 
 require_admin = admin_app.require_admin
 
@@ -101,28 +109,16 @@ async def _channel_ad_platforms(admin_token: str) -> dict[str, str | None]:
 
 # ── Ad copy at real platform character limits ───────────────────────────────
 
-#: Character limits by ad platform, per field. Deliberately conservative,
-#: published numbers (Meta/Google/TikTok/LinkedIn ad-copy guidance), not
-#: fetched from anywhere — this milestone calls no platform API, so these are
-#: static data, the same way `definitions.PLACEMENTS`'s aspect ratios are.
-#: `"generic"` is the fallback for a channel with no (or an unrecognised)
-#: `ad_platform`, sized to the narrowest of the known platforms so a gap
-#: never overstates how much room the operator actually has.
+#: The character limits this pack trims to, now owned by `definitions` because
+#: the COPY STAGE reads the same table (#173). It used to live here, privately,
+#: which is precisely why copy could satisfy its length budget in full and still
+#: be truncated on the way out: the stage that writes the copy could not see the
+#: numbers the stage that exports it would enforce.
 #:
-#: Keyed by `marketing_channel.ad_platform` (#76 increment 2) — "google"
-#: covers both Google Search ads and YouTube ads, which is coarser than
-#: ideal (search and video ad copy specs genuinely differ), but the taxonomy
-#: does not carry a finer-grained platform today and these limits are already
-#: declared conservative, static guidance rather than authoritative ones —
-#: see the module docstring. Splitting it further is a taxonomy change, not
-#: a lookup-table one.
-_PLATFORM_LIMITS: dict[str, dict[str, int]] = {
-    "meta": {"headline": 40, "body": 125, "cta": 20},
-    "google": {"headline": 30, "body": 90, "cta": 30},
-    "tiktok": {"headline": 100, "body": 100, "cta": 20},
-    "linkedin": {"headline": 70, "body": 150, "cta": 20},
-    "generic": {"headline": 30, "body": 90, "cta": 20},
-}
+#: Aliased rather than re-exported under the old name so that every reader is
+#: pointed at the one definition — see `definitions.AD_PLATFORM_LIMITS` for the
+#: numbers themselves and why they are static.
+_PLATFORM_LIMITS = definitions.AD_PLATFORM_LIMITS
 
 _ELLIPSIS = "…"
 
@@ -141,7 +137,12 @@ def _platform_for_channel(channel_key: str, ad_platforms: dict[str, str | None])
     unrecognised platform still deserves a pack, just a more conservative
     one."""
     platform = ad_platforms.get(channel_key)
-    return platform if platform in _PLATFORM_LIMITS else "generic"
+    # `is not None` before the membership test, rather than relying on the
+    # test alone to exclude it: `_PLATFORM_LIMITS` is now a `Mapping` from
+    # `definitions`, and `in` on a Mapping does not narrow `str | None` away.
+    if platform is not None and platform in _PLATFORM_LIMITS:
+        return platform
+    return definitions.AD_PLATFORM_GENERIC
 
 
 def _fit_to_limit(text: str, limit: int) -> tuple[str, bool]:
