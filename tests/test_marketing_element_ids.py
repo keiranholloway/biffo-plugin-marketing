@@ -32,9 +32,13 @@ def _source(url: str) -> dict[str, str]:
 
 def test_with_element_ids_stamps_every_known_list() -> None:
     """One id per element, across every list this plugin's artefact kinds
-    actually use — proven for all five at once rather than one at a time, so
+    actually use — proven for all six at once rather than one at a time, so
     a future kind added to `ELEMENT_LIST_KEYS` without a matching branch here
-    is caught the moment this test is extended, not silently skipped."""
+    is caught the moment this test is extended, not silently skipped.
+
+    It did exactly that when `proposals` was added (#67): this test failed with
+    `KeyError: 'proposals'` before a line of it was touched, which is the
+    behaviour the docstring above promises."""
     body = {
         "summary": "irrelevant to ids",
         "findings": [{"signal": "s", "sources": [_source("https://a.example")]}],
@@ -42,6 +46,7 @@ def test_with_element_ids_stamps_every_known_list() -> None:
         "pillars": [{"pillar": "p", "sources": [_source("https://c.example")]}],
         "ctas": [{"text": "cta", "sources": [_source("https://d.example")]}],
         "channels": [{"channel_key": "x", "sources": [_source("https://e.example")]}],
+        "proposals": [{"channel_key": "y", "sources": [_source("https://f.example")]}],
     }
 
     stamped = with_element_ids(body)
@@ -163,6 +168,44 @@ def test_selected_body_leaves_non_element_keys_untouched() -> None:
 
     assert narrowed["summary"] == "kept verbatim"
     assert narrowed["findings"] == []
+
+
+def test_a_channel_plan_proposal_is_a_first_class_selectable_element() -> None:
+    """`proposals` (#67) has to be in `ELEMENT_LIST_KEYS`, and this is the
+    test that says so — the two guards it would otherwise fall between both
+    pass without it.
+
+    `test_with_element_ids_stamps_every_known_list` iterates
+    `ELEMENT_LIST_KEYS` itself, so a key missing from that tuple is a key it
+    never checks. And `selected_body` only filters the lists it knows about,
+    so an unlisted `proposals` is not "not selectable" — it is passed through
+    WHOLE on every narrowed body, surviving a selection that dropped it, while
+    `approve_artefact_route` rejects its id as unknown. The operator's
+    selection and what the artefact carries then disagree, silently.
+
+    Asserted end to end over the three functions rather than on the tuple's
+    contents, because the tuple being right is not the claim.
+    """
+    body = with_element_ids(
+        {
+            "channels": [{"channel_key": "instagram_organic", "sources": [_source("https://a")]}],
+            "proposals": [{"channel_key": "linkedin_organic", "sources": [_source("https://b")]}],
+        }
+    )
+    planned = body["channels"][0]["id"]
+    proposed = body["proposals"][0]["id"]
+
+    # Stamped, so there is something to select it by...
+    assert isinstance(proposed, str) and proposed
+    # ...offered to the approval route's unknown-id check...
+    assert known_element_ids(body) == {planned, proposed}
+    # ...and actually dropped when the operator does not keep it.
+    assert selected_body(body, [planned])["proposals"] == []
+    # Its sources go with it, so the next stage cannot cite a dropped
+    # proposal's evidence — see `source_urls_from_body` on why this is a fresh
+    # union rather than a subtraction.
+    assert source_urls_from_body(selected_body(body, [planned])) == ["https://a"]
+    assert source_urls_from_body(body) == ["https://a", "https://b"]
 
 
 # ── source_urls_from_body ────────────────────────────────────────────────────

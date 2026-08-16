@@ -102,9 +102,21 @@ async def start_copy_route(
         admin_app._parse_artefact_body(approved_positioning.get("body")),
         admin_app._artefact_selection(approved_positioning),
     )
-    channel_plan_body = pipeline.selected_body(
-        admin_app._parse_artefact_body(approved_channel_plan.get("body")),
-        admin_app._artefact_selection(approved_channel_plan),
+    # `without_proposals` (#67) narrows the same way `selected_body` does, and
+    # for the same reason: this body is BOTH the copy run's input and the basis
+    # of its citation check, so an outside-the-selection proposal must neither
+    # reach the model nor stay cite-able. See that function for why leaving it
+    # in kills the whole copy artefact rather than merely wasting output.
+    #
+    # Applied here, at the one place the approved plan is read for this stage,
+    # rather than inside `start_copy`: the citation set below is derived from
+    # this same value, and narrowing in only one of the two places is how the
+    # allowed set and the shown set drift apart.
+    channel_plan_body = pipeline.without_proposals(
+        pipeline.selected_body(
+            admin_app._parse_artefact_body(approved_channel_plan.get("body")),
+            admin_app._artefact_selection(approved_channel_plan),
+        )
     )
     # `{channel_key: motion}` for the plan's real, APPROVED entries (#76
     # increment 2, narrowed per #145) — excludes any suggested_label-only

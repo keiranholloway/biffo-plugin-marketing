@@ -346,27 +346,39 @@ class ChannelRecommendation(BaseModel):
     agent-generated name once overflowed `marketing_link.channel` (#75).
     Exactly one of `channel_key`/`suggested_label` is set — enforced below,
     not left to convention — mirroring #67's settled design: the agent picks
-    from the taxonomy it is given (`channel_key`, a real
-    `marketing_channel.key`) where it can, and may still propose a channel
-    outside that taxonomy (`suggested_label`, free text) where its evidence is
-    strong. A proposal is promoted to a real `channel_key` only on operator
-    acceptance — out of scope here, since that promotion is a UI/workflow
-    action, not a schema one.
+    from a taxonomy it is given (`channel_key`, a real `marketing_channel.key`)
+    where it can, and may still propose a channel outside every taxonomy it
+    was shown (`suggested_label`, free text) where its evidence is strong. A
+    `suggested_label` proposal is promoted to a real `channel_key` only on
+    operator acceptance — out of scope here, since that promotion is a
+    UI/workflow action, not a schema one.
+
+    ## This class does NOT say whether an entry is a plan entry or a proposal
+
+    Deliberately. Since #67's third increment the agent is shown **two**
+    taxonomies — `channel_taxonomy` (the operator's selection, which it may
+    PLAN from) and `proposable_taxonomy` (the rows the operator left out,
+    which it may only PROPOSE from) — so a `channel_key` on its own no longer
+    tells you which it is. That distinction lives in **which list of
+    :class:`ChannelPlan` the entry ends up in**, and it is decided by
+    `pipeline.extract_channel_plan` from the two stashed snapshots, never by
+    the model. See :class:`ChannelPlan` for why the answer is a position in
+    the body rather than a flag on this object.
     """
 
     channel_key: str | None = Field(
         default=None,
         description=(
-            "A `key` from the channel taxonomy you were given, when this recommendation "
-            "matches one of the available channels. Leave unset ONLY when proposing a "
-            "channel outside that taxonomy — set `suggested_label` instead, never both."
+            "A `key` copied exactly from `channel_taxonomy` or `proposable_taxonomy`, when "
+            "one of their entries fits. Leave unset ONLY when proposing a channel that is "
+            "in neither list — set `suggested_label` instead, never both."
         ),
     )
     suggested_label: str | None = Field(
         default=None,
         description=(
-            "Free-text name for a channel NOT in the taxonomy you were given, used only "
-            "when your evidence strongly supports a channel that taxonomy does not offer. "
+            "Free-text name for a channel in NEITHER list you were given, used only "
+            "when your evidence strongly supports a channel that no taxonomy entry offers. "
             "Requires operator acceptance before it becomes a real channel. Leave unset "
             "when `channel_key` is set."
         ),
@@ -413,9 +425,58 @@ class ChannelPlan(BaseModel):
     the third approval gate (M4). Organic and paid recommendations share one
     list, distinguished by `ChannelRecommendation.motion`, rather than two
     separate lists: ranking is only meaningful within a motion, and a single
-    list keeps that scoped to the field the rank is relative to."""
+    list keeps that scoped to the field the rank is relative to.
 
-    channels: list[ChannelRecommendation] = Field(default_factory=list)
+    ## Two lists, because plan-vs-proposal has to be structural (#67)
+
+    `channels` is the plan. `proposals` is what the agent argues FOR without
+    being able to put it in the plan — a channel the operator deselected, or
+    one no taxonomy entry covers at all — and an operator must accept a
+    proposal before it becomes a real channel.
+
+    Until #67's third increment the two were told apart by a field: a
+    proposal was `channel_key: null` plus a `suggested_label`, so every
+    downstream reader could ask "does it carry a `channel_key`?" and get the
+    right answer. That increment lets the agent propose a **taxonomy** channel
+    the operator deselected, which carries a perfectly real `channel_key` — so
+    that question silently starts answering "yes, an approved channel" for
+    something the operator never selected. The copy stage would then write
+    publish-ready copy for it and the packs would carry it.
+
+    Separate lists rather than a `is_proposal` flag alongside the existing
+    field, because the two fail in opposite directions. A flag fails **open**:
+    every reader that forgets it — including one written next year by someone
+    who never read this docstring — treats a proposal as an approved channel.
+    A separate list fails **closed**: a reader that only knows about
+    `channels`, which is every reader that exists today, cannot see a proposal
+    at all. `pipeline.channel_key_motions` is the chokepoint every downstream
+    stage goes through and it reads `channels`; it needed no change, and that
+    is the property being bought.
+
+    The model does not decide which list an entry lands in — see
+    `pipeline.extract_channel_plan`, which re-partitions both lists from the
+    taxonomy snapshots this run was actually shown. Putting `proposals` in the
+    output schema is how the model is *told* the distinction exists; it is not
+    how the distinction is enforced (#128: a constraint the model is merely
+    asked to respect is not a constraint).
+    """
+
+    channels: list[ChannelRecommendation] = Field(
+        default_factory=list,
+        description=(
+            "Recommendations drawn from `channel_taxonomy` — the channels the operator "
+            "selected. This is the plan."
+        ),
+    )
+    proposals: list[ChannelRecommendation] = Field(
+        default_factory=list,
+        description=(
+            "Channels you are arguing FOR but cannot plan: an entry from "
+            "`proposable_taxonomy` (a channel the operator did not select), or a "
+            "`suggested_label` for a channel in neither list. Each needs the operator's "
+            "acceptance before it becomes part of the campaign."
+        ),
+    )
 
 
 # ── How long a piece of copy is allowed to be (issue #128) ───────────────────
@@ -1031,8 +1092,13 @@ You are the campaign studio's channel strategist. You are given
 `retrieved_evidence` — the conversion evidence gathered for this campaign — one
 **approved** positioning artefact (audience segments, message pillars and calls
 to action, each carrying the sources that support it), a `campaign_motion`
-(`organic`, `paid` or `both`), and one **channel taxonomy**: a list of
-`{{channel_key, label, motion, category}}` entries.
+(`organic`, `paid` or `both`), and **two channel lists**, each a list of
+`{{channel_key, label, motion, category}}` entries:
+
+- `channel_taxonomy` — the channels the operator SELECTED for this campaign.
+  You may plan from these.
+- `proposable_taxonomy` — channels this platform offers that the operator did
+  NOT select. You may not plan from these; you may only propose them.
 
 ## `retrieved_evidence` is the list you decide from, and cite from
 
@@ -1051,11 +1117,12 @@ Among the entries you were given, prefer the specific one carrying the number �
 a benchmark report, a results write-up, a case study — over a vendor home page
 or an agency's "top 10 channels" listicle.
 
-**The taxonomy you are given is not the whole taxonomy.** It is the set of
-channels the operator selected for this campaign, already narrowed to the
-campaign's motion. Channels the operator did not select, and channels whose
-motion this campaign does not run, are simply absent from it — that is a
-decision already taken, not an omission for you to correct.
+**Neither list is the whole taxonomy.** Both are already narrowed to the
+campaign's motion, so a channel whose motion this campaign does not run is
+absent from both — that is a decision already taken, not an omission for you
+to correct. What separates the two lists is the operator's selection, and that
+separation is the whole point: `channel_taxonomy` is what this campaign will
+actually run, and `proposable_taxonomy` is what it decided against.
 
 Recommend channels for this campaign, covering the motion(s) it runs:
 1. **Organic** channels — where this audience already spends attention,
@@ -1068,23 +1135,39 @@ paid only; `both` wants both. This is enforced when your answer comes back,
 not merely requested here: a recommendation outside the campaign's motion is
 rejected and the whole plan fails with it.
 
-For EVERY recommendation, set exactly one of:
-- `channel_key` — copy it EXACTLY from the taxonomy you were given, when one
-  of its entries fits. Do not invent a key, alter one, or guess at a key that
-  looks plausible but was not in the list — an unrecognised key is rejected,
-  not silently accepted. When you set `channel_key`, leave `motion` unset:
-  it is derived from the taxonomy entry, not asserted by you.
+For EVERY recommendation, in either list, set exactly one of:
+- `channel_key` — copy it EXACTLY from `channel_taxonomy` or
+  `proposable_taxonomy`, when one of their entries fits. Do not invent a key,
+  alter one, or guess at a key that looks plausible but was in neither list —
+  an unrecognised key is rejected, not silently accepted. When you set
+  `channel_key`, leave `motion` unset: it is derived from the taxonomy entry,
+  not asserted by you.
 - `suggested_label` — free text, ONLY when the evidence strongly supports a
-  channel that genuinely is not in the taxonomy you were given. This is a
-  proposal, not a plan entry: an operator must accept it before it becomes a
-  real channel. When you use `suggested_label`, you MUST also set `motion`
-  yourself, since there is no taxonomy entry to derive it from — and that
-  motion must be one the campaign runs, or the plan is rejected.
+  channel that is in neither list. When you use `suggested_label`, you MUST
+  also set `motion` yourself, since there is no taxonomy entry to derive it
+  from — and that motion must be one the campaign runs, or the plan is
+  rejected.
 
-Prefer the taxonomy. Reach for `suggested_label` only when nothing in the
-taxonomy is a genuine fit for what the evidence supports — not as a shortcut
-around checking the list first, and never to re-propose a channel the
-operator has already left out for a reason you cannot see.
+Then put each recommendation in the right list:
+
+- `channels` — the plan. Only `channel_taxonomy` entries belong here.
+- `proposals` — things the operator has to accept before they are real: a
+  `proposable_taxonomy` entry, or a `suggested_label`. Nothing here is
+  planned, no copy is written for it, and it appears in no pack until an
+  operator accepts it.
+
+Which list an entry belongs in is worked out from the two taxonomies when your
+answer comes back, not taken from where you put it — so putting a
+`proposable_taxonomy` channel in `channels` does not get it planned, it simply
+makes your answer harder to read. Sort them correctly.
+
+**Propose sparingly, and only on the evidence.** A `proposable_taxonomy`
+channel is one the operator decided against, for reasons you cannot see;
+proposing it is worth an operator's attention only when `retrieved_evidence`
+says something specific and strong about it that they may not have known. A
+list of everything they left out is worth nothing. Prefer planning well within
+the selection over arguing to widen it, and reach for `suggested_label` last —
+only when nothing in EITHER list is a genuine fit.
 
 Rank the channels within each motion (1 = highest priority) and give each a
 rationale an operator can disagree with: name the conversion evidence from
@@ -1123,6 +1206,11 @@ question, and is rejected along with the whole plan. If nothing in
 `retrieved_evidence` speaks to a channel's performance for this audience, do
 not recommend that channel — leave it out rather than reach for the
 positioning to dress it up.
+
+This applies to `proposals` exactly as it does to `channels`, and the whole
+plan fails on either. Asking an operator to reconsider a channel they already
+decided against, with nothing retrieved behind it, is the least defensible
+thing this run can produce.
 
 For `note`, do not paste the positioning item's note verbatim — your
 `rationale` already says why this channel follows from the evidence, so repeat

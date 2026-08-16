@@ -362,6 +362,81 @@ describe('ChannelPlanArtefact', () => {
     // channel_key with no taxonomy row", a different failure entirely.
     expect(heading.textContent).not.toMatch(/unrecognised channel/i)
   })
+
+  /** #67's third increment: the agent may now propose a channel that IS in
+   * the taxonomy — one the operator deselected — so a proposal arrives with a
+   * real `channel_key` and a real label, in `proposals` rather than
+   * `channels`.
+   *
+   * Without the separate block this renders as an ordinary ranked channel and
+   * an operator reading the plan has no way to tell it apart from one they
+   * selected. That is the failure #67 names ("visually and structurally
+   * distinct — a separate field or flag, not merely a note in the rationale"),
+   * and it is the half a reader actually acts on. */
+  it('renders a proposed TAXONOMY channel in its own block, badged, outside the plan (#67)', () => {
+    render(
+      <ChannelPlanArtefact
+        body={{
+          channels: [
+            {
+              channel_key: 'linkedin_organic',
+              suggested_label: null,
+              motion: 'organic',
+              rank: 1,
+              rationale: 'Selected, planned',
+              sources: [{ url: 'https://example.com/linkedin', note: 'n' }],
+            },
+          ],
+          proposals: [
+            {
+              channel_key: 'google_search_paid',
+              suggested_label: null,
+              motion: 'paid',
+              rank: 1,
+              rationale: 'Deselected, but the evidence is strong',
+              sources: [{ url: 'https://example.com/google', note: 'n' }],
+            },
+          ],
+        }}
+        channelLookup={makeLookup([LINKEDIN, GOOGLE])}
+      />,
+    )
+
+    const headings = screen.getAllByRole('heading', { level: 4 }).map((h) => h.textContent ?? '')
+    const planned = headings.find((h) => h.includes('LinkedIn — organic')) ?? ''
+    const proposed = headings.find((h) => h.includes('Google Search ads')) ?? ''
+    // The planned channel is unbadged; the proposed one is badged — the two
+    // must not read the same, which is the entire point.
+    expect(planned).not.toMatch(/proposed/i)
+    expect(proposed).toMatch(/outside selection/i)
+    // ...and the proposals sit under their own heading, after the plan,
+    // rather than being interleaved with it by rank.
+    expect(screen.getByRole('heading', { name: /outside your selection/i })).toBeInTheDocument()
+  })
+
+  it('renders exactly as before for a plan with no proposals key at all', () => {
+    render(
+      <ChannelPlanArtefact
+        body={{
+          channels: [
+            {
+              channel_key: 'linkedin_organic',
+              suggested_label: null,
+              motion: 'organic',
+              rank: 1,
+              rationale: 'Planned',
+              sources: [{ url: 'https://example.com/linkedin', note: 'n' }],
+            },
+          ],
+        }}
+        channelLookup={makeLookup([LINKEDIN, GOOGLE])}
+      />,
+    )
+
+    // Every channel-plan artefact proposed before #67's third increment has no
+    // `proposals` key. The block must not appear empty for them.
+    expect(screen.queryByRole('heading', { name: /outside your selection/i })).not.toBeInTheDocument()
+  })
 })
 
 describe('CopyArtefact', () => {

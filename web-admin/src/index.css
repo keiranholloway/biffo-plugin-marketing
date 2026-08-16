@@ -704,6 +704,36 @@ details.mint-toggle[open] > .mint {
   color: var(--text-muted);
 }
 
+/* ── Outside-the-selection proposals (issue #67) ──────────────────────────
+ *
+ * #67 requires an outside-selection proposal be "visually and structurally
+ * distinct — a separate field or flag, not merely a note in the rationale".
+ * The structural half is `ChannelPlanBody.proposals`, a list of its own; this
+ * is the visual half, and it deliberately does more than the per-item
+ * `.badge-proposed` alone. A badge on each heading is easy to skim past in a
+ * list of eight ranked channels that otherwise look identical, and the cost
+ * of skimming past it is an operator believing a channel they never selected
+ * is in the plan.
+ *
+ * So the whole block is set apart: indented behind a warning-coloured rule,
+ * under its own heading, after every planned channel. The plan reads first
+ * and unchanged; this reads as an appendix to it, which is what it is.
+ */
+.channel-proposals {
+  margin-top: 1.25rem;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--warning-bg);
+}
+
+.channel-proposals > h4 {
+  margin-bottom: 0.25rem;
+}
+
+.channel-proposals-note {
+  margin-top: 0;
+  color: var(--text-muted);
+}
+
 .stage-actions {
   display: flex;
   gap: 0.5rem;

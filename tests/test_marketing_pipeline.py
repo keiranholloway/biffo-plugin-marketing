@@ -805,6 +805,44 @@ def test_flatten_citations_of_a_channel_plan_dedupes_by_url() -> None:
     assert citations == [{"url": "https://example.com/dup", "note": "a"}]
 
 
+def test_flatten_citations_of_a_channel_plan_covers_proposals_too() -> None:
+    """`marketing_artefact.citations` exists so "this artefact cites nothing"
+    is a question a query can ask rather than a paragraph someone has to read.
+    That is a question about the RUN, not about the campaign — so it spans both
+    lists (#67), or the count disagrees with the artefact on screen and a plan
+    whose only sourced work was a proposal reads as uncited."""
+    plan = extract_channel_plan(
+        _tool_call(
+            "submit_channel_plan",
+            {
+                "channels": [
+                    {
+                        "channel_key": "instagram_organic",
+                        "rank": 1,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/planned", "note": "a"}],
+                    }
+                ],
+                "proposals": [
+                    {
+                        "channel_key": "linkedin_organic",
+                        "rank": 2,
+                        "rationale": "r",
+                        "sources": [{"url": "https://example.com/proposed", "note": "b"}],
+                    }
+                ],
+            },
+        ),
+        taxonomy={"instagram_organic": "organic"},
+        proposable={"linkedin_organic": "organic"},
+    )
+
+    assert flatten_citations(plan) == [
+        {"url": "https://example.com/planned", "note": "a"},
+        {"url": "https://example.com/proposed", "note": "b"},
+    ]
+
+
 def test_flatten_citations_of_copy_dedupes_by_url() -> None:
     copy = extract_copy(
         _tool_call(
@@ -1003,6 +1041,71 @@ def test_channel_plan_channel_map_excludes_proposals_and_derives_from_real_entri
     }
 
     assert channel_plan_channel_map(plan_body) == {"instagram_organic": "organic"}
+
+
+def test_channel_key_motions_ignores_the_proposals_list_entirely() -> None:
+    """#67's third increment inverted what "carries a `channel_key`" means.
+
+    A proposal can now name a real taxonomy channel — one the operator
+    DESELECTED — so the old test ("has a key" ⇒ "is an approved channel")
+    silently starts admitting a channel nobody chose. This is the chokepoint
+    every downstream stage reads (copy, and through copy both packs), so a
+    `linkedin_organic` leaking through here is publish-ready copy and a pack
+    entry for a channel the operator excluded.
+
+    It is excluded structurally rather than filtered: the function reads
+    `channels`, and the proposal is not in it. A reader written next year that
+    knows nothing about proposals gets the same right answer.
+    """
+    from marketing.pipeline import channel_key_motions, channel_plan_channel_map
+
+    plan_body = {
+        "channels": [{"channel_key": "instagram_organic", "motion": "organic"}],
+        "proposals": [
+            {"channel_key": "linkedin_organic", "motion": "organic"},
+            {"channel_key": None, "suggested_label": "Reddit r/franchise", "motion": "organic"},
+        ],
+    }
+
+    assert channel_key_motions(plan_body) == {"instagram_organic": "organic"}
+    assert channel_plan_channel_map(plan_body) == {"instagram_organic": "organic"}
+
+
+def test_a_plan_of_nothing_but_proposals_is_not_a_stale_plan() -> None:
+    """`channels: []` with proposals present is a current plan that recommends
+    nothing within the selection — not the pre-#76 free-text shape. Raising
+    here would tell an operator to re-run a plan that is fine, which is the
+    mis-diagnosis #152 had to work around; the new shape makes it impossible
+    rather than worked around, because a keyless entry can no longer be in
+    `channels` at all."""
+    from marketing.pipeline import channel_plan_channel_map
+
+    plan_body = {
+        "channels": [],
+        "proposals": [{"channel_key": "linkedin_organic", "motion": "organic"}],
+    }
+
+    assert channel_plan_channel_map(plan_body) == {}
+
+
+def test_without_proposals_strips_only_that_key() -> None:
+    """What the copy run is handed (#67). Everything else about the approved
+    plan passes through byte for byte — this narrows the input, it does not
+    reshape it — and it is a no-op on a body that has no proposals, which is
+    every other artefact kind and every plan written before this shipped."""
+    from marketing.pipeline import without_proposals
+
+    body = {
+        "channels": [{"channel_key": "instagram_organic"}],
+        "proposals": [{"channel_key": "linkedin_organic"}],
+        "summary": "kept",
+    }
+
+    assert without_proposals(body) == {
+        "channels": [{"channel_key": "instagram_organic"}],
+        "summary": "kept",
+    }
+    assert without_proposals({"channels": []}) == {"channels": []}
 
 
 def test_channel_plan_channel_map_raises_on_a_pre_migration_plan() -> None:

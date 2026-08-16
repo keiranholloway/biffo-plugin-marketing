@@ -161,11 +161,12 @@ async def start_channel_plan_route(
     #
     # This is what makes them constraints rather than requests. A channel the
     # operator did not select, or whose motion this campaign does not run, is
-    # simply not in the list the agent is given — and `extract_channel_plan`
-    # rejects any `channel_key` outside exactly this snapshot (#76 increment
-    # 2), so there is no path by which one reaches the plan. Nothing here
-    # relies on the model choosing to comply; #128 is this estate's evidence
-    # that a constraint the model is merely asked to respect is not one.
+    # simply not in the list the agent may plan from — and
+    # `extract_channel_plan` rejects any `channel_key` outside exactly this
+    # snapshot as a plan entry (#76 increment 2), so there is no path by which
+    # one reaches the plan. Nothing here relies on the model choosing to
+    # comply; #128 is this estate's evidence that a constraint the model is
+    # merely asked to respect is not one.
     #
     # A selected key that is no longer in the taxonomy is skipped rather than
     # rejected: the selection is a filter over the taxonomy, never a source of
@@ -173,6 +174,25 @@ async def start_channel_plan_route(
     # every campaign that had selected it.
     allowed_motions = definitions.motions_allowed_by(campaign_motion)
     selected = set(selected_keys)
+    # The MOTION filter is applied to both blocks; only the SELECTION filter
+    # tells them apart (#67, third increment). #67's section 2 is headed
+    # "shortlist, with the agent able to add", and the deselected rows below
+    # are what makes the "able to add" half reach a taxonomy channel at all —
+    # until now the agent could not name `online_communities` to argue for it,
+    # because it had never been told the key exists.
+    #
+    # Motion is NOT relaxed with the selection, and the asymmetry is
+    # deliberate. #67 settles motion as a campaign-strategy property that copy
+    # and both packs read; an organic campaign has no use for an argument to
+    # run a paid channel, and showing it one would spend a proposal slot on
+    # something the operator would have to change the campaign's strategy to
+    # accept. A deselected channel, by contrast, is a decision about THIS
+    # campaign's reach that new evidence can legitimately reopen.
+    proposable_rows = [
+        row
+        for row in channel_rows
+        if row["key"] not in selected and row["motion"] in allowed_motions
+    ]
     channel_rows = [
         row for row in channel_rows if row["key"] in selected and row["motion"] in allowed_motions
     ]
@@ -196,16 +216,27 @@ async def start_channel_plan_route(
     # operator widening a campaign from organic to both while a run is in
     # flight must not retroactively legalise a paid channel that run was
     # never allowed to pick.
-    taxonomy = [
-        {
-            "channel_key": row["key"],
-            "label": row["label"],
-            "motion": row["motion"],
-            "category": row["category"],
-        }
-        for row in channel_rows
-    ]
+    def _shown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "channel_key": row["key"],
+                "label": row["label"],
+                "motion": row["motion"],
+                "category": row["category"],
+            }
+            for row in rows
+        ]
+
+    taxonomy = _shown(channel_rows)
     taxonomy_motions = {row["key"]: row["motion"] for row in channel_rows}
+    # Stashed beside `channel_taxonomy` and for the identical reason: an
+    # operator selecting a channel while a run is in flight must not
+    # retroactively promote that run's PROPOSAL of it into a plan entry, any
+    # more than widening the motion may retroactively legalise a paid channel.
+    # `extract_channel_plan` partitions the answer against exactly these two
+    # snapshots — see its docstring for why the model gets no vote in that.
+    proposable_taxonomy = _shown(proposable_rows)
+    proposable_motions = {row["key"]: row["motion"] for row in proposable_rows}
 
     # The stage starts with its GROUNDING run (#65): one `:online` run whose
     # job is to retrieve and to read. The planning run that turns what it
@@ -236,6 +267,7 @@ async def start_channel_plan_route(
                 pipeline.with_element_ids(
                     {
                         "channel_taxonomy": taxonomy_motions,
+                        "proposable_taxonomy": proposable_motions,
                         "allowed_motions": sorted(allowed_motions),
                         "allowed_source_urls": allowed_source_urls,
                         # What the PLANNING run will be started with, one or
@@ -250,6 +282,7 @@ async def start_channel_plan_route(
                         "plan_input": pipeline.channel_plan_input(
                             positioning_body=positioning_body,
                             taxonomy=taxonomy,
+                            proposable_taxonomy=proposable_taxonomy,
                             campaign_motion=campaign_motion,
                         ),
                     }

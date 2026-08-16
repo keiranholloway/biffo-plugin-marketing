@@ -699,6 +699,15 @@ async def _advance_artefact(
         # increment 2). See `pipeline.extract_channel_plan` for why it must
         # be what the run was shown, not a fresh fetch.
         taxonomy = pending.get("channel_taxonomy") or {}
+        # `proposable_taxonomy` is the same snapshot for the rows the operator
+        # DESELECTED — what this run was allowed to argue for but not to plan
+        # (#67). Carried the same way and read back here for the same reason:
+        # an operator re-selecting a channel mid-flight must not turn this
+        # run's proposal of it into a plan entry. Absent — a run started
+        # before this shipped — reads as `{}`, i.e. "this run was shown
+        # nothing proposable", so an unrecognised key is still an
+        # `UnknownChannelError` exactly as it was.
+        proposable = pending.get("proposable_taxonomy") or {}
         # `allowed_motions` is the campaign's motion as it stood when this run
         # started (#67), carried the same way and for the same reason.
         # Absent — a run started before #67 shipped — reads as `None`, i.e.
@@ -724,6 +733,7 @@ async def _advance_artefact(
             # the stage share one chain.
             causation_id=artefact.get("causation_id"),
             taxonomy=taxonomy,
+            proposable=proposable,
             allowed_motions=allowed_motions,
             allowed_source_urls=allowed_source_urls,
         )
