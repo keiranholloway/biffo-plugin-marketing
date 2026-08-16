@@ -754,10 +754,18 @@ async def _advance_artefact(
         # plan's real entries this run was started against — same pattern,
         # see `pipeline.extract_copy`.
         channel_plan_channels = pending.get("channel_plan_channels") or {}
+        # `channel_budgets` is the per-channel ceiling THIS run was given in
+        # its payload (#173), stashed at start time for the same reason
+        # `channel_plan_channels` is. `None` — not `{}` — when the artefact
+        # predates #173, so `measure_copy_length` judges that copy by the
+        # single budget it was actually written under rather than by the
+        # tighter per-channel one it never saw.
+        channel_budgets = pending.get("channel_budgets")
         result = await pipeline.advance_copy(
             gateway,
             run_id=_require_run_id(),
             channel_plan_channels=channel_plan_channels,
+            channel_budgets=channel_budgets,
             allowed_source_urls=allowed_source_urls,
         )
     else:

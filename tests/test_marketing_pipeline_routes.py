@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from marketing import admin_app, pipeline
+from marketing import admin_app, definitions, pipeline
 from marketing.definitions import RESEARCH_SYNTHESIS_AGENT_NAME
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000cd"
@@ -1016,6 +1016,37 @@ def test_start_copy_stashes_the_union_of_both_approved_inputs_citation_urls(ctx)
 
     pending = json.loads(started["body"])
     assert pending["allowed_source_urls"] == ["https://example.com/thread"]
+    assert pending["channel_plan_channels"], "the channel stash must survive the new key"
+
+
+def test_start_copy_resolves_each_channels_ceiling_from_the_taxonomy(ctx) -> None:
+    """#173, at the seam where it was said to be blocked.
+
+    The issue recorded this as needing a taxonomy change, because at
+    `extract_copy` the only channel fact available is `{channel_key: motion}`
+    and deriving a channel's shape from its key means substring-matching it —
+    the guess `paid_pack_routes._platform_for_channel` deleted in #76
+    increment 2.
+
+    That premise was already stale: #76 increment 2 also added
+    `marketing_channel.ad_platform`, and the route reads it. Nothing here is
+    inferred from a channel key.
+    """
+    client, core, gateway = ctx
+    _propose_and_approve_channel_plan(client, core, gateway)
+
+    started = client.post(f"/campaigns/{_CAMPAIGN}/copy").json()
+
+    # Paid Google search: tighter than the shared budget on headline and body.
+    limits = gateway.requested[-1]["input_payload"]["channel_limits"]
+    assert limits["google_search_paid"] == {"headline": 30, "body": 90, "cta": 30}
+    # Organic: untouched, which is #173's fourth acceptance line.
+    assert limits["instagram_organic"] == dict(definitions.COPY_LENGTH_BUDGET)
+
+    # Stashed, so the length check at advance time measures the copy against
+    # the number the model was given rather than a taxonomy that has moved.
+    pending = json.loads(started["body"])
+    assert pending["channel_budgets"] == limits
     assert pending["channel_plan_channels"], "the channel stash must survive the new key"
 
 

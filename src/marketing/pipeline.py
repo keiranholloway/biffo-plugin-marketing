@@ -86,6 +86,7 @@ from .definitions import (
     ChannelCopy,
     ChannelEvidenceSet,
     ChannelPlan,
+    CopyField,
     CopySet,
     LengthOverage,
     Positioning,
@@ -271,11 +272,23 @@ class CopyTooLongError(PipelineError):
 # ── Length: measured, recorded, and only fatal at the far end (issue #128) ───
 
 
-def measure_copy_length(channels: Sequence[ChannelCopy]) -> None:
-    """Record every field over :data:`COPY_LENGTH_BUDGET` on its own
+def measure_copy_length(
+    channels: Sequence[ChannelCopy],
+    channel_budgets: Mapping[str, Mapping[CopyField, int]] | None = None,
+) -> None:
+    """Record every field over its channel's budget on its own
     :class:`ChannelCopy`, and raise :class:`CopyTooLongError` for anything
     past :data:`COPY_LENGTH_CEILING_MULTIPLE` times that budget. Mutates in
     place, exactly as :func:`extract_copy`'s ``motion`` carry-over does.
+
+    ``channel_budgets`` is ``{channel_key: {field: ceiling}}`` from
+    :func:`~marketing.definitions.channel_copy_budgets` — the *same* mapping
+    the run was given in its input payload (#173), so what is measured here is
+    what the model was asked for. A channel missing from it falls back to
+    :data:`COPY_LENGTH_BUDGET`, which is also what ``None`` means: an older
+    pending artefact, stashed before per-channel budgets existed, must keep
+    being judged by the rule it was written under rather than by a tighter one
+    it never saw.
 
     ## Why over-budget is recorded rather than rejected
 
@@ -315,9 +328,16 @@ def measure_copy_length(channels: Sequence[ChannelCopy]) -> None:
     (``admin_app._pipeline_error_to_http``, which maps the BASE class so a new
     error type cannot fall through as a bare 500).
     """
+    budgets = channel_budgets or {}
     for channel_copy in channels:
+        # Per channel, defaulting to the shared budget. `.get` rather than a
+        # membership test: an unknown channel is already a hard error one
+        # function up (`UnknownChannelError`), so the only way to reach this
+        # with a missing key is the pre-#173 artefact case above.
+        budget_for_channel = budgets.get(channel_copy.channel_key, COPY_LENGTH_BUDGET)
         overages: list[LengthOverage] = []
-        for field_name, budget in COPY_LENGTH_BUDGET.items():
+        for field_name in COPY_LENGTH_BUDGET:
+            budget = budget_for_channel.get(field_name, COPY_LENGTH_BUDGET[field_name])
             length = len(getattr(channel_copy, field_name))
             if length > budget:
                 overages.append(LengthOverage(field=field_name, length=length, budget=budget))
@@ -972,6 +992,7 @@ def extract_copy(
     messages: list[dict[str, Any]],
     *,
     channel_plan_channels: dict[str, Literal["organic", "paid"]],
+    channel_budgets: Mapping[str, Mapping[CopyField, int]] | None = None,
     allowed_source_urls: Collection[str] | None = None,
     annotations: list[dict[str, Any]] | None = None,
 ) -> CopySet:
@@ -1025,7 +1046,7 @@ def extract_copy(
     # fabricated a source should be reported as having fabricated a source, not
     # as having written a long headline. See :func:`measure_copy_length` for why
     # only the far end of this is fatal (issue #128).
-    measure_copy_length(result.channels)
+    measure_copy_length(result.channels, channel_budgets)
     return result
 
 
@@ -2313,6 +2334,7 @@ async def start_copy(
     *,
     positioning_body: dict[str, Any],
     channel_plan_body: dict[str, Any],
+    channel_budgets: Mapping[str, Mapping[CopyField, int]] | None = None,
     copy_model: str = DEFAULT_COPY_MODEL,
 ) -> tuple[str, str]:
     """Request the single copy agent (M5, issue #4), given the *approved*
@@ -2328,7 +2350,20 @@ async def start_copy(
         agent_name=COPY_AGENT_NAME,
         definition=copy_definition(model=copy_model, instructions=COPY_INSTRUCTIONS),
         output_tool=copy_tool_schema(),
-        input_payload={"positioning": positioning_body, "channel_plan": channel_plan_body},
+        # `channel_limits` is the per-channel ceiling the model must write to
+        # (#173). It rides in the payload rather than in the tool schema
+        # because the schema is built once per run and covers every channel,
+        # so a field description cannot say "30 for Google, 70 for LinkedIn" —
+        # while the payload can, and `measure_copy_length` then measures the
+        # output against this same mapping.
+        #
+        # Not an `:online` run, so nothing here steers retrieval — the ordering
+        # constraint that governs the grounded stages (#65) does not apply.
+        input_payload={
+            "positioning": positioning_body,
+            "channel_plan": channel_plan_body,
+            "channel_limits": dict(channel_budgets or {}),
+        },
         causation_id=causation_id,
     )
     return causation_id, run_id
@@ -2339,13 +2374,15 @@ async def advance_copy(
     *,
     run_id: str,
     channel_plan_channels: dict[str, Literal["organic", "paid"]],
+    channel_budgets: Mapping[str, Mapping[CopyField, int]] | None = None,
     allowed_source_urls: Collection[str] | None = None,
 ) -> CopySet | None:
     """Read the copy run, advancing nothing else — mirrors
     :func:`advance_channel_plan`: a single run, not a chain, so there is no
     fan-in to discover. ``channel_plan_channels`` is ``{channel_key: motion}``
     for exactly the approved channel plan's real (non-proposal) entries — see
-    :func:`extract_copy` for how it and ``allowed_source_urls`` are used."""
+    :func:`extract_copy` for how it, ``channel_budgets`` (#173) and
+    ``allowed_source_urls`` are used."""
     view = await gateway.get_agent_run(run_id=run_id)
     if view is None or not view.is_terminal:
         return None
@@ -2354,6 +2391,7 @@ async def advance_copy(
     return extract_copy(
         view.messages,
         channel_plan_channels=channel_plan_channels,
+        channel_budgets=channel_budgets,
         allowed_source_urls=allowed_source_urls,
         annotations=view.annotations,
     )
