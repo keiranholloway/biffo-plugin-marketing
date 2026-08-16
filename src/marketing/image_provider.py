@@ -139,10 +139,10 @@ _EXTENSION_BY_CONTENT_TYPE = {
 #: Cap on the campaign portion of a filename, matching
 #: `web-admin/src/lib/assetFilename.ts`'s own `MAX_SLUG` exactly — long enough
 #: to stay recognisable, short enough that the whole name survives a mobile
-#: filesystem and a share sheet. Kept in step with the client constant by the
-#: guard in `tests/test_marketing_image_provider.py` that asserts the two
-#: values agree (see this module's `asset_filename` docstring for why the two
-#: implementations exist at all).
+#: filesystem and a share sheet. Kept in step with the client constant by
+#: `shared/cross-language-ports.json`, which both suites execute — see this
+#: module's `asset_filename` docstring for why the two implementations exist at
+#: all, and what now catches them disagreeing.
 _MAX_SLUG = 60
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -186,15 +186,19 @@ def asset_filename(*, campaign_name: str, part: str, extension: str) -> str:
     `slugify` so the two never disagree on what one campaign name reduces
     to — see that function's docstring.
 
-    **What catches drift if the two disagree:** nothing automatic today.
-    `tests/test_marketing_image_provider.py` asserts `slugify`'s behaviour
-    against the same fixtures `web-admin`'s own `assetFilename.test.ts`
-    uses (accents, empty input, the `_MAX_SLUG` cap), so a change to either
-    file's slugging rule shows up as a failing assertion in that test rather
-    than a silent divergence — but a human still has to notice the other
-    side needs the matching edit; there is no shared fixture or generated
-    constant enforcing it. This is the same drift class issue #119 already
-    tracks for this repo's other client/server convention pairs.
+    **What catches drift if the two disagree:** `shared/cross-language-ports.json`
+    states the shared behaviour once, and both suites execute it —
+    `tests/test_marketing_cross_language_ports.py` here and
+    `web-admin/src/lib/crossLanguagePorts.test.ts` there — so a slugging rule
+    changed on one side fails that side's suite until the other side changes
+    with it.
+
+    Until 2026-08-16 the answer was "nothing automatic": each suite ran its own
+    copy of the fixtures and the one guard that named the other language
+    asserted `_MAX_SLUG == 60`, a literal, which could only fail if THIS side
+    moved. Measured rather than assumed — setting the client's `MAX_SLUG` to 40
+    left all 24 tests here and all 10 there passing while the two halves named
+    the same download differently (issue #119).
 
     ``part`` is always a definite value at every call site in this repo —
     ``"source"`` for the one approved creative, or a `definitions.PLACEMENTS`
