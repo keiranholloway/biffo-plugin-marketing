@@ -11,10 +11,16 @@ afterEach(() => {
 
 const NAME = 'Marketing — synthesise research once both angles complete'
 
-function declaration(config: Record<string, unknown> = { model: 'anthropic/claude-opus-5' }) {
+const CORE_ORIGIN = 'https://api.example.invalid'
+
+function declaration(
+  config: Record<string, unknown> = { model: 'anthropic/claude-opus-5' },
+  coreApiUrl: string = CORE_ORIGIN,
+) {
   return {
     name: NAME,
     fingerprint: 'sha256:31883429cd45ebe4',
+    core_api_url: coreApiUrl,
     definition: {
       name: NAME,
       trigger_source: 'biffo.core',
@@ -69,7 +75,13 @@ describe('FanInWorkflow', () => {
     render(<FanInWorkflow />)
     await userEvent.click(await screen.findByRole('button', { name: /Re-seed it now/ }))
 
-    await waitFor(() => expect(seed).toHaveBeenCalledWith(expect.objectContaining({ name: NAME }), 'w1'))
+    await waitFor(() =>
+      expect(seed).toHaveBeenCalledWith(
+        expect.objectContaining({ name: NAME }),
+        'w1',
+        `${CORE_ORIGIN}/api/v1/orchestration`,
+      ),
+    )
   })
 
   it('offers to seed, with no id, when Core holds no workflow of this name', async () => {
@@ -80,7 +92,44 @@ describe('FanInWorkflow', () => {
 
     expect(await screen.findByText(/Not seeded/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Seed it now/ }))
-    await waitFor(() => expect(seed).toHaveBeenCalledWith(expect.anything(), null))
+    await waitFor(() =>
+      expect(seed).toHaveBeenCalledWith(
+        expect.anything(),
+        null,
+        `${CORE_ORIGIN}/api/v1/orchestration`,
+      ),
+    )
+  })
+
+
+  it('addresses Core by its own origin, never this page\'s (#171)', async () => {
+    // The whole of #171. Asked for on THIS origin, the request reaches the
+    // instance's public site — CloudFront routes only `/api/v1/plugins/*` to
+    // the API — and comes back 403 with an HTML body, identically with a valid
+    // admin token and with no token at all. So what is asserted here is the
+    // absolute base, not merely that a call was made.
+    stub(declaration(), [{ id: 'w1', name: NAME, action_config: { model: 'anthropic/claude-opus-5' } }])
+
+    render(<FanInWorkflow />)
+
+    await waitFor(() =>
+      expect(api.listCoreWorkflows).toHaveBeenCalledWith(`${CORE_ORIGIN}/api/v1/orchestration`),
+    )
+    const [base] = vi.mocked(api.listCoreWorkflows).mock.calls[0]
+    expect(base.startsWith('http')).toBe(true)
+  })
+
+  it('says so, and calls nothing, when the deployment supplies no Core origin', async () => {
+    // Falling back to a same-origin path is what produced a 403 that looked
+    // like a permissions problem for a morning. Not knowing is a reportable
+    // state, not a reason to guess.
+    stub(declaration({ model: 'm' }, ''), [])
+
+    render(<FanInWorkflow />)
+
+    expect(await screen.findByText(/BIFFO_CORE_API_URL is unset/)).toBeInTheDocument()
+    expect(api.listCoreWorkflows).not.toHaveBeenCalled()
+    expect(screen.queryByText(/In step/)).not.toBeInTheDocument()
   })
 
   it('reports a failed read as a failure, never as "in step"', async () => {

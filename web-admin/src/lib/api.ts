@@ -880,10 +880,32 @@ export async function getResults(): Promise<ResultsResponse> {
 // the operator's own session is the only credential in the system that can
 // both read and replace a workflow definition.
 
-/** Core's workflow-definition CRUD. NOT under `/admin` — that variant 404s,
- * indistinguishable from a route that does not exist, which is how the seed
- * script silently never seeded anything until 2026-08-11. */
-const CORE_ORCHESTRATION_BASE = '/api/v1/orchestration'
+/** Core's workflow-definition CRUD, appended to the CORE ORIGIN the plugin
+ * serves us — never to this page's own origin (#171).
+ *
+ * Two things are load-bearing in that sentence:
+ *
+ * **Not `/admin`.** That variant 404s, indistinguishable from a route that does
+ * not exist, which is how the seed script silently never seeded anything until
+ * 2026-08-11.
+ *
+ * **Not same-origin.** This SPA is served from the instance's own domain, whose
+ * CloudFront routes only `/api/v1/plugins/*` to the API; everything else falls
+ * through to the public site. A same-origin `/api/v1/orchestration/workflows`
+ * therefore returned the marketing homepage under a 403 — identically with a
+ * valid admin token, an access token, or no `Authorization` header at all,
+ * which is what made it look like a permissions problem for a whole morning.
+ * Core's real origin is its API Gateway endpoint; `getDeclaredFanInWorkflow`
+ * carries it as `core_api_url`. */
+const CORE_ORCHESTRATION_PATH = '/api/v1/orchestration'
+
+/** Where Core's orchestration API lives for this deployment, or `null` when the
+ * plugin could not tell us — in which case the caller must report that rather
+ * than guess an origin. Guessing is the bug. */
+export function coreOrchestrationBase(declared: DeclaredWorkflow): string | null {
+  const origin = declared.core_api_url?.replace(/\/+$/, '')
+  return origin ? `${origin}${CORE_ORCHESTRATION_PATH}` : null
+}
 
 /** The fan-in workflow definition this build declares. */
 export interface DeclaredWorkflow {
@@ -897,6 +919,9 @@ export interface DeclaredWorkflow {
     enabled: boolean
   }
   fingerprint: string
+  /** Core's public API origin, from the plugin Lambda's `BIFFO_CORE_API_URL`.
+   * Empty string when unset — never assume same-origin. */
+  core_api_url: string
 }
 
 /** One workflow definition as Core holds it. Only the fields this panel reads
@@ -917,12 +942,12 @@ export async function getDeclaredFanInWorkflow(): Promise<DeclaredWorkflow> {
   )
 }
 
-export async function listCoreWorkflows(): Promise<DeployedWorkflow[]> {
+export async function listCoreWorkflows(base: string): Promise<DeployedWorkflow[]> {
   const body = await request<unknown>(
     'GET',
     '/workflows',
     undefined,
-    CORE_ORCHESTRATION_BASE,
+    base,
     'list the deployed workflows',
   )
   return Array.isArray(body) ? (body as DeployedWorkflow[]) : []
@@ -938,13 +963,14 @@ export async function listCoreWorkflows(): Promise<DeployedWorkflow[]> {
 export async function seedFanInWorkflow(
   declared: DeclaredWorkflow,
   existingId: string | null,
+  base: string,
 ): Promise<void> {
   if (existingId) {
     await request<unknown>(
       'PUT',
       `/workflows/${existingId}`,
       declared.definition,
-      CORE_ORCHESTRATION_BASE,
+      base,
       're-seed the fan-in workflow',
     )
     return
@@ -953,7 +979,7 @@ export async function seedFanInWorkflow(
     'POST',
     '/workflows',
     declared.definition,
-    CORE_ORCHESTRATION_BASE,
+    base,
     'seed the fan-in workflow',
   )
 }

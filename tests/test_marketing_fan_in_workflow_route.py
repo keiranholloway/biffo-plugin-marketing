@@ -9,6 +9,8 @@ Restating them here would create the second copy the route exists to prevent.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from marketing import admin_app as admin_app_module
@@ -68,3 +70,45 @@ def test_it_is_admin_gated_like_every_other_route_on_this_app() -> None:
     response = TestClient(admin_app_module.build_app()).get("/fan-in-workflow")
 
     assert response.status_code in (401, 403)
+
+
+def test_it_tells_the_browser_where_cores_api_actually_lives() -> None:
+    """The route carries `core_api_url`, and #171 is what happens without it.
+
+    The admin SPA is served from the instance's own domain, whose CloudFront
+    routes only `/api/v1/plugins/*` to the API. A browser asking for
+    `/api/v1/orchestration/workflows` on that origin therefore reaches the
+    public marketing site and gets a **403 with an HTML body** — the same 403
+    with a valid admin token, with an access token, and with no `Authorization`
+    header at all, which is exactly why it read as a permissions failure.
+
+    Core's real origin is its API Gateway endpoint, which this Lambda already
+    holds as `BIFFO_CORE_API_URL` (Terraform passes `module.api_gateway.
+    api_endpoint`). Serving it keeps the instance-specific value out of this
+    repo, which is the same rule `web-admin`'s own base resolution follows.
+    """
+    app = admin_app_module.build_app()
+    app.dependency_overrides[admin_app_module.require_admin] = lambda: None
+
+    with patch.object(admin_app_module, "CORE_API_URL", "https://core.example.invalid/"):
+        body = TestClient(app).get("/fan-in-workflow").json()
+
+    # Trailing slash stripped: the browser appends `/api/v1/orchestration`, and
+    # a doubled separator is a 404 nobody would think to look for.
+    assert body["core_api_url"] == "https://core.example.invalid"
+
+
+def test_an_unset_core_api_url_is_reported_as_empty_rather_than_guessed() -> None:
+    """Empty is an answer the panel can act on — it says it cannot check.
+
+    The alternative is this route inventing a plausible origin, which would put
+    the guess a layer deeper than #171 had it and make the same 403 harder to
+    trace, not easier.
+    """
+    app = admin_app_module.build_app()
+    app.dependency_overrides[admin_app_module.require_admin] = lambda: None
+
+    with patch.object(admin_app_module, "CORE_API_URL", ""):
+        body = TestClient(app).get("/fan-in-workflow").json()
+
+    assert body["core_api_url"] == ""
