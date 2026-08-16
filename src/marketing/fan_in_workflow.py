@@ -116,7 +116,7 @@ def config_fingerprint(config: dict[str, Any]) -> str:
 #: anything. Nothing inside this repo can know that — only ``--check`` against
 #: a live Core, or ``marketing.pipeline.synthesis_config_drift`` reading a real
 #: run's ``definition_snapshot``, can.
-SEEDED_CONFIG_FINGERPRINT = "sha256:31883429cd45ebe4"
+SEEDED_CONFIG_FINGERPRINT = "sha256:2861297e15c999fc"
 
 
 def config_drift(

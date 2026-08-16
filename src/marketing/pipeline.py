@@ -292,7 +292,7 @@ def measure_copy_length(channels: Sequence[ChannelCopy]) -> None:
        shortened.
     2. **The run is expensive and the failure is cheap to survive.** One long
        headline failing ``model_validate`` discards every other channel's copy
-       with it, from an agent already running close to its 240s ceiling
+       with it, from an agent already running close to its wall-clock ceiling
        (#131), to fix something an operator can read and judge in seconds.
 
     So the budget is enforced where a length problem is actually decidable:

@@ -1410,10 +1410,14 @@ POSITIONING_MAX_TURNS = 3
 # success"), because channel choice is what every downstream artefact is
 # generated per. What it does NOT buy is more wall clock: every agent is
 # already at `AGENT_TIMEOUT_SECONDS` = the runtime ceiling, so these turns
-# have to fit in the same 240s research's do, and raising that is an instance
-# change (see `RUNTIME_TIMEOUT_CEILING_SECONDS`), not a plugin one. The two
-# runs get 240s EACH — the ceiling is per run, and this stage is advanced by
-# polling rather than held open across both.
+# have to fit in the same budget research's do, and raising it past the
+# ceiling is an instance change (see `RUNTIME_TIMEOUT_CEILING_SECONDS`), not a
+# plugin one. The two runs get that budget EACH — the ceiling is per run, and
+# this stage is advanced by polling rather than held open across both.
+#
+# The number is deliberately not repeated here. It was written out as "240s"
+# and stayed that way through the deployment moving to 300 (#132 instance 5);
+# a second copy of a constant is a second thing to forget.
 CHANNEL_EVIDENCE_MAX_TURNS = RESEARCH_MAX_TURNS
 # Channel planning no longer retrieves: it reasons over the evidence it is
 # handed, exactly as positioning and copy reason over the artefact they are
@@ -1439,26 +1443,36 @@ RUNTIME_DEFAULT_TIMEOUT_SECONDS = 120.0
 #:
 #:     $ aws lambda get-function-configuration \
 #:         --function-name tabsii-platform-dev-plugin-agent-runtime
-#:     "AGENT_RUNTIME_MAX_SECONDS": "240"
+#:     "AGENT_RUNTIME_MAX_SECONDS": "300"     # Timeout: 360
 #:
 #: It reaches the Lambda through template-owned Terraform, not through
 #: `agent_runtime`'s Python source: `services/_plugins/agent-runtime/
 #: terraform/main.tf:108` sets
 #: ``AGENT_RUNTIME_MAX_SECONDS = tostring(var.run_timeout_seconds)`` — a
-#: Terraform **variable** that happens to default to 240, the same number
-#: `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING` uses in code for when the env
-#: var is entirely absent.
+#: Terraform **variable**, whose *code* default is 240 (the same number
+#: `agent_runtime.loop.DEFAULT_TIMEOUT_CEILING` uses when the env var is
+#: absent) but whose deployed value is not that default.
 #:
-#: The distinction is not academic: **`run_timeout_seconds` is per-deployment
-#: configuration.** An instance can lower it with a Terraform change alone —
-#: no edit to `agent_runtime`'s Python anywhere — and `RunLimits.from_snapshot`
-#: would clamp every agent's real wall clock to the new value **silently**.
-#: This constant would then claim a 240s budget no run actually gets, and
-#: every test in this file would stay green throughout, because none of them
-#: can see the deployed Terraform variable from inside this repo. That is the
-#: live version of the risk this constant's docstring used to describe as
-#: hypothetical — it is not hypothetical, it is one `terraform apply` away.
-RUNTIME_TIMEOUT_CEILING_SECONDS = 240.0
+#: **This constant read 240.0 for two days after the deployment moved to 300,
+#: and every test in this repo stayed green.** That is instance 5 of this
+#: issue's own class, and the direction is what makes it interesting: the
+#: drift was *safe* — nothing was clamped — so it produced no failed run to
+#: find it by. What it produced instead was `AGENT_TIMEOUT_SECONDS` pinned at
+#: 240 by the argument below, with 60 seconds of real headroom unspent, on the
+#: two stages the estate had already measured as marginal. A false negative,
+#: not a failure. It was found by reading the deployed Lambda while verifying
+#: #164, which is the only way it could have been found from here.
+#:
+#: The risk in the other direction is unchanged and still real: an instance
+#: can *lower* `run_timeout_seconds` with a Terraform change alone, and every
+#: test here would stay green while every agent's real budget shrank. What has
+#: changed is that the reduction is no longer silent — `RunLimits.from_snapshot`
+#: now records a `LimitClamp` naming the requested value, the granted value,
+#: the ceiling and the env var that raises it (biffo-template#1586, verified
+#: present in the deployed artefact 2026-08-16). So a clamp is now findable in
+#: a log rather than only in a dead campaign; a *widening*, as here, still is
+#: not, because nothing reports a ceiling it did not have to enforce.
+RUNTIME_TIMEOUT_CEILING_SECONDS = 300.0
 
 #: The wall clock every agent in this plugin may spend, in seconds
 #: (issues #126, #130).
@@ -1477,22 +1491,39 @@ RUNTIME_TIMEOUT_CEILING_SECONDS = 240.0
 #: research keeps pushing the failure to whichever stage is next; positioning,
 #: channel plan and copy all consume the research artefact and grow with it.
 #:
-#: **240s is the runtime ceiling, not a guess** — this deliberately equals
+#: **300s is the runtime ceiling, not a guess** — this deliberately equals
 #: `RUNTIME_TIMEOUT_CEILING_SECONDS` above rather than leaving headroom below
-#: it: every stage already needs the full 240s (that is what #130 measured),
+#: it: every stage already needs its full budget (that is what #130 measured),
 #: so trading budget away to guard against a ceiling cut would reintroduce the
-#: exact failure #126/#130 exist to fix. `from_snapshot` clamps silently to
-#: whatever `AGENT_RUNTIME_MAX_SECONDS` actually is, so asking for more would
-#: be silently reduced and this constant would claim a budget no run ever
-#: gets. Raising it further is an instance change (raising
-#: `run_timeout_seconds` in Terraform, and the Lambda timeout with it) — not a
-#: plugin one, and likewise **lowering** the ceiling is an instance change
-#: this file cannot see: see `RUNTIME_TIMEOUT_CEILING_SECONDS`'s docstring for
-#: why that is a real, live risk rather than a hypothetical one.
+#: exact failure #126/#130 exist to fix. Raising it *past* the ceiling is an
+#: instance change (`run_timeout_seconds` in Terraform, and the Lambda timeout
+#: above it) — not a plugin one.
+#:
+#: **Why this moved 240 -> 300, which is the whole of #132 instance 5.** The
+#: instance change already happened: `run_timeout_seconds` is deployed at 300
+#: with a 360s Lambda timeout. This file did not know, because the ceiling it
+#: reads is a hand-copied belief, so it went on asking for 240 while arguing —
+#: in this very comment — that 240 *was* the ceiling and that raising it was
+#: somebody else's job. The estate had meanwhile recorded the budget as
+#: marginal twice: `agent_runtime` logged "Agent run finished close to its
+#: wall-clock limit" on 2026-08-13 04:53 for research at 8 turns with
+#: `:online`, and #155 gave channel-evidence that same shape. Those 60 seconds
+#: are what this change spends, on evidence rather than on precaution.
+#:
+#: **This is not free of consequence.** `timeout_seconds` is part of the
+#: `action_config` seeded for the research-synthesis fan-in, so moving it
+#: changes `fan_in_workflow.SEEDED_CONFIG_FINGERPRINT` and the deployed
+#: workflow is stale until `seed_fan_in_workflow.py --replace` is run against
+#: each environment. Leaving synthesis at 240 while every other stage moved to
+#: 300 would be #160 re-created deliberately, so the re-seed is part of
+#: shipping this, not a follow-up.
 #:
 #: **Cost is deliberately not the deciding factor.** A campaign built on failed
-#: or half-completed research costs far more than the tokens.
-AGENT_TIMEOUT_SECONDS = 240.0
+#: or half-completed research costs far more than the tokens. Wall clock is
+#: also not billed: `max_turns` bounds what a run can spend, and that is
+#: unchanged here — this buys a marginal run the time to *finish*, not licence
+#: to do more work.
+AGENT_TIMEOUT_SECONDS = 300.0
 
 
 def research_definition(*, model: str, instructions: str) -> dict[str, Any]:
