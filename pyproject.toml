@@ -127,8 +127,31 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 
+# `scripts` is in `source` because the INSTANCE measures it, and a scope this
+# repo does not share is a scope this repo cannot gate (#183).
+#
+# When `biffo plugin install` vendors this repo it lands whole at
+# `services/marketing/` — `src/`, `scripts/`, `tests/`, all of it — and
+# tabsii-platform's own `[tool.coverage.run]` reads
+# `source = ["services", "packages"]`, `omit = ["*/tests/*", ...]`. So the set
+# the instance's `Error-branch coverage` gate judges this plugin over is
+# "everything except tests/", while this file used to say `source = ["src"]`
+# alone. Measured at 1e432ff: `uv run pytest --cov --cov-report=json` wrote 23
+# files, every one under `src/`, and the four modules in `scripts/` appeared in
+# no coverage report at all — which is why PR #180 could add an `except
+# Exception` to `scripts/check_runtime_ceiling.py`, pass all twelve checks
+# here, and red-light the instance the moment it was vendored:
+#
+#   1 error branch(es) added with no test exercising them:
+#     services/marketing/scripts/check_runtime_ceiling.py:except:except Exception
+#
+# The analyser (`scripts/error_branch_coverage.py`) only ever inspects files
+# that appear in `coverage.json`, so widening this line is what puts `scripts/`
+# in front of it. Keep the two repos' scopes in agreement: a directory added
+# here that is not in `source` is a directory this repo does not check and the
+# instance does.
 [tool.coverage.run]
-source = ["src"]
+source = ["src", "scripts"]
 omit = ["*/tests/*"]
 
 # python-semantic-release config for release.yml. This repo does not use
