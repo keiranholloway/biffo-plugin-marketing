@@ -101,9 +101,27 @@ def test_researchs_wall_clock_is_not_silently_clamped_by_the_runtime() -> None:
     not move with it — nothing tells this test the number it is comparing
     against has gone stale. So this proves internal self-consistency between
     two beliefs held in this repo, never agreement with the deployed
-    Terraform variable. That gap needs an upstream contract test that can
-    read both sides (biffo-template#1364) or a loud clamp in `from_snapshot`
-    (today it clamps silently); neither is buildable from here.
+    Terraform variable.
+
+    **Two of the three things that would close that gap have since arrived,
+    and this comment used to say none of them could.** It read "neither is
+    buildable from here", which was wrong in both halves:
+
+    - The clamp is no longer silent. `RunLimits.from_snapshot` records a
+      `LimitClamp` naming requested, granted, ceiling and the env var that
+      raises it (biffo-template#1586, verified present in the deployed
+      artefact 2026-08-16). So a NARROWING is now findable in a log.
+    - A WIDENING still is not — nothing reports a ceiling it did not have to
+      enforce — and that is the direction that produced #132 instance 5. What
+      is buildable from here, and now exists, is
+      `scripts/check_runtime_ceiling.py`: it reads the ceilings off the
+      deployed Lambda and reports either direction. It cannot be a pytest
+      (AWS credentials, and a different answer per environment), so it is an
+      operator command like `seed_fan_in_workflow.py --check` rather than
+      something that can fail this suite.
+
+    What is still not buildable here is a CI gate that reads both sides —
+    that remains biffo-template#1364.
     """
     assert AGENT_TIMEOUT_SECONDS <= _RUNTIME_TIMEOUT_CEILING, (
         f"{AGENT_TIMEOUT_SECONDS}s exceeds the runtime ceiling "
@@ -236,9 +254,10 @@ def test_the_ceilings_docstring_evidence_agrees_with_the_ceiling_it_documents() 
             f'definitions.py quotes AGENT_RUNTIME_MAX_SECONDS as "{value}" '
             f"while RUNTIME_TIMEOUT_CEILING_SECONDS is "
             f"{RUNTIME_TIMEOUT_CEILING_SECONDS}. One of them was updated and "
-            "the other was not — re-read the deployed value with `aws lambda "
-            "get-function-configuration` and make both say it (issue #132 "
-            "instance 5)."
+            "the other was not — re-read the deployed value with `uv run "
+            "python scripts/check_runtime_ceiling.py --function-name "
+            "<project>-<env>-plugin-agent-runtime` and make both say it "
+            "(issue #132 instance 5)."
         )
 
 
