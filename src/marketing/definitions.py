@@ -882,11 +882,16 @@ are what to look for in the pages you were given:
 - Where this audience demonstrably **converts** — not where it merely has
   attention. Intent expressed beats attention observed.
 
-You are also given the approved `positioning` and the `channel_taxonomy` this
-campaign may plan against. Both are context for what is worth noticing; they
-are not what you report on. The positioning was researched to establish who
-this audience is and what competitors say to them, which is a different
-question from yours.
+You are also given the campaign `brief` — who this campaign is for, in the
+operator's own words — and the `channel_taxonomy` it may plan against. Both
+are context for what is worth noticing; they are not what you report on.
+
+You are deliberately NOT given the approved positioning, and its absence is
+not an oversight you should try to work around. Everything in this run's input
+is also what its retrieval was derived from, so the message pillars and calls
+to action would have pulled the search towards the campaign's own argument and
+away from the channel question. Read on that basis: you are looking for where
+this brief's audience converts, not for pages that agree with a position.
 
 For every page worth reporting, give:
 
@@ -1230,71 +1235,60 @@ CHANNEL_PLAN_SEARCH_FRAMING = (
     "carrying the number, not a vendor home page or a listicle"
 )
 
-#: How many of the positioning's segment names, and how many channel labels,
-#: ride in the searched query. Bounded for the same reason
-#: ``SEARCH_QUERY_BRIEF_CHARS`` is: the whole positioning body still travels in
-#: the payload for the *model* to read, and a query assembled from nine
-#: segments and thirty channels is a worse query than one built from the few
-#: that lead.
-CHANNEL_PLAN_QUERY_SEGMENTS = 3
+#: How many channel labels ride in the searched query. Bounded for the same
+#: reason ``SEARCH_QUERY_BRIEF_CHARS`` is: a query naming thirty channels is a
+#: worse query than one naming the few that lead.
 CHANNEL_PLAN_QUERY_CHANNELS = 6
-
-
-def _named_items(body: Mapping[str, Any] | None, key: str, field: str, limit: int) -> list[str]:
-    """Up to ``limit`` non-empty ``field`` values from ``body[key]``.
-
-    Tolerant by construction, exactly like ``_brief_topic``: the positioning
-    body is JSON this plugin persisted but a model wrote, and a malformed or
-    partially-approved one must degrade to a thinner query rather than fail
-    the run before it starts.
-    """
-    if not isinstance(body, Mapping):
-        return []
-    items = body.get(key)
-    if not isinstance(items, list):
-        return []
-    found: list[str] = []
-    for item in items:
-        value = item.get(field) if isinstance(item, Mapping) else None
-        if isinstance(value, str) and value.strip() and value not in found:
-            found.append(" ".join(value.split()))
-        if len(found) == limit:
-            break
-    return found
 
 
 def channel_plan_search_query(
     *,
-    positioning_body: Mapping[str, Any] | None,
+    brief: Mapping[str, Any] | None,
     taxonomy: list[dict[str, Any]],
     campaign_motion: str,
 ) -> str:
     """The text the channel-plan run's retrieval is derived from (issue #65).
 
-    Sent as the FIRST key of the run's ``input_payload`` (see
-    ``marketing.pipeline.start_channel_plan``), for exactly the reason
+    Sent as the FIRST key of the grounding run's ``input_payload`` (see
+    ``marketing.pipeline.start_channel_evidence``), for exactly the reason
     ``research_search_query`` is: an ``:online`` run's provider searches
     *before* the model is invoked, from the payload, so the payload — not the
     instructions — is the only place this stage can influence what comes back.
-    Issue #101 measured what happens when that is left alone: two agents sent
-    identical payloads received 4 of 5 identical pages.
 
-    A channel-plan payload that led with the positioning body would retrieve
-    the positioning question a second time, which is precisely the defect
-    #65 reports one layer up. So the query is assembled from the three things
-    that make this campaign's channel question specific — its audience, the
-    channels actually on the table, and the motion it runs — and closed with
-    :data:`CHANNEL_PLAN_SEARCH_FRAMING`.
+    ## Why the audience half is the BRIEF, and not the positioning's segments
+
+    It was the segments, by ``name``, until a live run on tabsii dev
+    (2026-08-15) measured what that retrieves. The names a positioning agent
+    coins are written for an operator to recognise — "The Frankenstein-Stack
+    Operator (5–20 sites)", "Head Office Caught in the False Choice" — and
+    they are not phrases anyone outside this campaign has ever published. A
+    search built from them has nothing real to match.
+
+    The brief is the opposite kind of text: an operator describing a market in
+    the market's own words ("UK multi-unit franchise owners running 5-20
+    sites"). It is also the one audience half in this plugin **measured** to
+    retrieve on-topic pages — ``research_search_query`` is built the same way,
+    from the same helper, and its runs come back with franchise-specific
+    material.
+
+    Sharing the brief with research does not re-retrieve research's pages:
+    #101 established that two runs over the same topic diverge completely when
+    their framings differ, and :data:`CHANNEL_PLAN_SEARCH_FRAMING` asks a
+    different question — where this audience converts, not who it is.
     """
-    audience = _named_items(positioning_body, "segments", "name", CHANNEL_PLAN_QUERY_SEGMENTS)
+    topic_source = _brief_topic(brief)
     labels = [
         " ".join(str(entry["label"]).split())
         for entry in taxonomy
         if isinstance(entry, Mapping) and entry.get("label")
     ][:CHANNEL_PLAN_QUERY_CHANNELS]
 
-    who = ", ".join(audience) if audience else "this audience"
-    topic = f"{campaign_motion} channels for {who}"
+    # Em-dash separated rather than "channels for <who>": a brief is a
+    # sentence, not the noun phrase a segment name was, so "for" produced
+    # "channels for We are marketing Tabsii to…". The separator matches the
+    # rest of the query's own structure and costs the search nothing.
+    who = topic_source or "this audience"
+    topic = f"{campaign_motion} marketing channels — {who}"
     if labels:
         topic += f" — {', '.join(labels)}"
     return f"{topic} — {CHANNEL_PLAN_SEARCH_FRAMING}"

@@ -8,6 +8,7 @@ that directly.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -757,15 +758,25 @@ def _plan_call(channels: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_start_channel_evidence_requests_one_grounded_run_carrying_the_positioning_body() -> (
+async def test_start_channel_evidence_requests_one_grounded_run_carrying_only_the_question() -> (
     None
 ):
+    """The grounding run is given the question, not the answer-so-far (#65).
+
+    This test used to assert the opposite — that the grounding run's payload
+    was exactly the planning run's, "so the two runs cannot be shown different
+    things". That symmetry read well and was wrong: everything in an
+    ``:online`` run's payload is also its search, so handing it the positioning
+    made the campaign's own message pillars the query. Measured on tabsii dev,
+    2026-08-15: five pages retrieved, every one tracking a pillar, none about
+    conversion.
+    """
     gateway = _FakeGateway()
-    positioning_body = {"segments": [], "pillars": [], "ctas": []}
+    brief = {"brief": "Independent UK coffee shop chains running 3-10 sites."}
     taxonomy = [{"channel_key": "instagram_organic", "label": "Instagram", "motion": "organic"}]
 
     causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
+        gateway, brief=brief, taxonomy=taxonomy, campaign_motion="both"
     )
 
     assert len(gateway.requested) == 1
@@ -775,29 +786,64 @@ async def test_start_channel_evidence_requests_one_grounded_run_carrying_the_pos
     assert requested.agent_name == CHANNEL_EVIDENCE_AGENT_NAME
     assert requested.causation_id == causation_id
     assert requested.input_payload == {
-        # #65: an `:online` run's provider searches from the payload before the
-        # model is invoked — so the searched query leads, exactly as research's
-        # does (#101). Its CONTENT is asserted in
-        # `test_marketing_channel_plan_grounding.py`; what matters here is that
-        # the payload's other keys are unchanged and this one is present.
+        # The searched query leads, exactly as research's does (#101). Its
+        # CONTENT is asserted in `test_marketing_channel_plan_grounding.py`.
         "search_query": pipeline.channel_plan_search_query(
-            positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
+            brief=brief, taxonomy=taxonomy, campaign_motion="both"
         ),
-        # Exactly what the planning run will be started with, so the two runs
-        # cannot be shown different things.
-        **pipeline.channel_plan_input(
-            positioning_body=positioning_body, taxonomy=taxonomy, campaign_motion="both"
-        ),
+        **pipeline.channel_evidence_input(brief=brief, taxonomy=taxonomy, campaign_motion="both"),
     }
     assert next(iter(requested.input_payload)) == "search_query"
     assert run_id  # a real id was returned
 
 
 @pytest.mark.asyncio
+async def test_the_grounding_run_is_never_shown_the_positioning() -> None:
+    """The guard on the above, stated as its own claim so it cannot be lost in
+    a payload-equality assertion someone later relaxes.
+
+    Every key of an ``:online`` payload is a search term. The positioning's
+    pillars and CTAs are this campaign's argument, and searching them retrieves
+    pages that agree with the argument rather than pages about where anyone
+    converts — which is the whole of #65.
+    """
+    gateway = _FakeGateway()
+    positioning = {
+        "segments": [{"name": "The Frankenstein-Stack Operator", "description": "d"}],
+        "pillars": [{"pillar": "One source of truth, not two systems"}],
+        "ctas": [{"text": "Book a stack review"}],
+    }
+
+    await pipeline.start_channel_evidence(
+        gateway,
+        brief={"brief": "UK multi-unit franchise owners running 5-20 sites."},
+        taxonomy=[{"channel_key": "linkedin_paid", "label": "LinkedIn ads", "motion": "paid"}],
+        campaign_motion="paid",
+    )
+
+    serialised = json.dumps(gateway.requested[0].input_payload)
+    assert "positioning" not in gateway.requested[0].input_payload
+    # Asserted on the SERIALISED payload, not on its keys: what the provider
+    # searches is the text, so a pillar nested three levels down under some
+    # other key would steer retrieval exactly as one at the top level does.
+    #
+    # The terms are read off the positioning above rather than retyped, so a
+    # future edit to that fixture cannot leave this checking for wording the
+    # test no longer supplies.
+    coined = [
+        positioning["segments"][0]["name"],
+        positioning["pillars"][0]["pillar"],
+        positioning["ctas"][0]["text"],
+    ]
+    for term in coined:
+        assert term not in serialised, f"{term!r} reached the run whose payload is its query"
+
+
+@pytest.mark.asyncio
 async def test_advance_channel_plan_returns_nothing_while_the_grounding_run_is_running() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
 
     advance = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
@@ -811,7 +857,7 @@ async def test_advance_channel_plan_returns_nothing_while_the_grounding_run_is_r
 async def test_advance_channel_plan_starts_the_planning_run_on_the_same_chain() -> None:
     gateway = _FakeGateway()
     causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, messages=_evidence_call("https://example.com/y"))
 
@@ -838,7 +884,7 @@ async def test_advance_channel_plan_starts_the_planning_run_on_the_same_chain() 
 async def test_advance_channel_plan_returns_the_plan_once_the_planning_run_succeeds() -> None:
     gateway = _FakeGateway()
     causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(
         run_id,
@@ -879,7 +925,7 @@ async def test_advance_channel_plan_returns_the_plan_once_the_planning_run_succe
 async def test_advance_channel_plan_raises_when_the_grounding_run_failed() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, status="failed")
 
@@ -891,7 +937,7 @@ async def test_advance_channel_plan_raises_when_the_grounding_run_failed() -> No
 async def test_advance_channel_plan_raises_when_the_planning_run_failed() -> None:
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, messages=_evidence_call("https://example.com/y"))
     started = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})
@@ -915,7 +961,7 @@ async def test_advance_channel_plan_propagates_null_annotations_into_the_error()
     the run this leaves without them."""
     gateway = _FakeGateway()
     _causation_id, run_id = await pipeline.start_channel_evidence(
-        gateway, positioning_body={}, taxonomy=[], campaign_motion="both"
+        gateway, brief={}, taxonomy=[], campaign_motion="both"
     )
     gateway.complete(run_id, messages=_evidence_call(), annotations=None)
     started = await pipeline.advance_channel_plan(gateway, evidence_run_id=run_id, taxonomy={})

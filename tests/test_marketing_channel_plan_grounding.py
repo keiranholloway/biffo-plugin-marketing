@@ -193,6 +193,11 @@ _TAXONOMY_ROWS = [
     }
 ]
 
+#: The campaign brief the grounding run is given, and derives its search from
+#: (#65). Shaped `{"brief": ...}` exactly as `start_research`'s payload is, so
+#: `definitions._brief_topic` reads both the same way.
+_BRIEF = {"brief": "Independent UK coffee shop chains running 3-10 sites."}
+
 
 # ── 1. The route ─────────────────────────────────────────────────────────────
 
@@ -277,14 +282,20 @@ async def test_the_run_leads_with_a_conversion_search_query() -> None:
     """An `:online` run's retrieval is derived from its input payload — the
     provider searches before the model is invoked — so the payload, not the
     instructions, is the only place this stage can affect what comes back
-    (issue #101, measured: identical payloads produced identical pages). A
-    channel-plan payload that leads with the positioning body would retrieve
-    the positioning question all over again."""
+    (issue #101, measured: identical payloads produced identical pages).
+
+    The audience half is the campaign BRIEF (#65). It was the positioning's
+    segment `name`s until a live run measured what those retrieve: the names a
+    positioning agent coins — "The Frankenstein-Stack Operator (5-20 sites)" —
+    are written for an operator to recognise and match nothing anyone has
+    published. A brief is an operator describing a market in the market's own
+    words, and it is the one audience half in this plugin measured to retrieve
+    on-topic pages."""
     gateway = _FakeGateway()
 
     await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )
@@ -296,9 +307,16 @@ async def test_the_run_leads_with_a_conversion_search_query() -> None:
     )
     query = payload["search_query"].lower()
     assert "convert" in query  # the channel question, not the audience question
-    assert "multi-location operators" in query  # this campaign's audience, not any audience
+    assert "coffee shop chains" in query  # this campaign's market, in the market's own words
     assert "google search ads" in query  # the channels actually on the table
     assert gateway.requested[0]["agent_name"] == CHANNEL_EVIDENCE_AGENT_NAME
+
+    # The guard, not a restatement: a coined persona name must never reach the
+    # query, because a search built from one has nothing real to match. Held
+    # against the positioning fixture's OWN segment name, so renaming that
+    # fixture cannot quietly make this pass.
+    coined = _POSITIONING_BODY["segments"][0]["name"].lower()
+    assert coined not in query, f"{coined!r} is a coined label, not something the web has published"
 
 
 # ── 4. Provenance, for a stage that retrieves (issue #113/#22 re-derived) ────
@@ -481,7 +499,7 @@ async def test_channel_plan_retrieval_breadth_is_measured_like_researchs(
     gateway = _FakeGateway()
     causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )
@@ -518,7 +536,7 @@ async def test_channel_plan_breadth_is_logged_when_the_run_failed(
     gateway = _FakeGateway()
     causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )
@@ -542,7 +560,7 @@ async def test_channel_plan_breadth_says_unmeasured_rather_than_a_false_zero(
     gateway = _FakeGateway()
     causation_id, run_id = await pipeline.start_channel_evidence(
         gateway,
-        positioning_body=_POSITIONING_BODY,
+        brief=_BRIEF,
         taxonomy=_TAXONOMY_ROWS,
         campaign_motion="paid",
     )

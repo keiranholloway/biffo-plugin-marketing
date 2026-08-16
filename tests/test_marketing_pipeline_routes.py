@@ -656,12 +656,18 @@ def test_start_channel_plan_runs_once_positioning_is_approved(ctx) -> None:
         r for r in gateway.requested if r["agent_name"] == "marketing-channel-evidence"
     ]
     assert len(channel_plan_requests) == 1
-    assert channel_plan_requests[0]["input_payload"]["positioning"]["segments"][0]["name"] == (
-        "Segment"
-    )
+    payload = channel_plan_requests[0]["input_payload"]
+    # The route reads the campaign's brief and hands it to the grounding run
+    # (#65) — its retrieval is derived from this payload, so the audience has
+    # to be described here in the market's own words.
+    assert payload["brief"]["brief"] == "Reach multi-location operators."
+    # And the positioning does NOT travel with it: every key here is a search
+    # term, and this campaign's own message pillars are not what the run is
+    # meant to go and look for.
+    assert "positioning" not in payload
     # The taxonomy fetched from `GET /channels` (#76 increment 2) rides along
     # as the agent's own input, not something it has to be told separately.
-    taxonomy = channel_plan_requests[0]["input_payload"]["channel_taxonomy"]
+    taxonomy = payload["channel_taxonomy"]
     assert {c["channel_key"] for c in taxonomy} == {"instagram_organic", "google_search_paid"}
 
 
