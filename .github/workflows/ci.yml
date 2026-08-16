@@ -81,7 +81,61 @@ jobs:
       # switch happens outside this repo's control).
       - run: command -v ffmpeg >/dev/null || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       - run: uv sync --all-groups
-      - run: uv run pytest --cov --cov-report=xml
+      # `--cov-report=json` is not a second copy of the xml for Codecov's
+      # benefit — `scripts/error_branch_coverage.py` reads `coverage.json` and
+      # nothing else, so without this line the step below has no input and
+      # exits 2 ("no coverage data"), which is the gate failing to run rather
+      # than the gate passing. Same pairing the instance's `ci.yml` uses.
+      - run: uv run pytest --cov --cov-report=xml --cov-report=json
+      # Fails only when error handling is ADDED with nothing exercising it
+      # (#183; the check itself is keiranholloway/biffo-template#956). An
+      # unexecuted `except` is unverified — nobody has ever observed what it
+      # does — and that is where every fail-open this estate has found actually
+      # lived.
+      #
+      # ## Why this repo grew it late, and what it cost
+      #
+      # This is a ratchet the INSTANCE has run for months and this repo ran not
+      # at all. Not a narrower version of it — none: `gh pr checks 180` listed
+      # twelve contexts and `Error-branch coverage` was not among them. The
+      # analyser is template-owned (`biffo-template/scripts/`) and reaches an
+      # instance through `biffo core upgrade`; it is absent from that repo's
+      # `shared-files.json` AND from the `@biffo/cli` package `scripts/biffo.sh`
+      # resolves, so there was no channel by which a satellite could ever have
+      # received it (the class biffo-template#1570 records: "merged upstream"
+      # and "present downstream" are different facts).
+      #
+      # The bill came due on PR #180, which added an `except Exception` to
+      # `scripts/check_runtime_ceiling.py` converting any AWS failure into
+      # `CannotReadError`, went green on every check here, and then reddened
+      # tabsii-platform the moment `biffo plugin install` vendored it:
+      #
+      #   1 error branch(es) added with no test exercising them:
+      #     services/marketing/scripts/check_runtime_ceiling.py:except:except Exception
+      #
+      # A gate that only exists one repo downstream of the author is a gate
+      # that reports to the wrong person.
+      #
+      # ## No `hashFiles('.github/workflows/rls-tests.yml')` guard here
+      #
+      # The instance's copy of this step carries one, because a repo with a
+      # real-Postgres lane has error branches this job structurally cannot
+      # execute, and its combined assertion happens once in
+      # `error-branch-coverage-gate.yml` instead. A plugin repo has neither
+      # file, so replicating the guard would buy nothing and cost something
+      # real: if an `rls-tests.yml` ever appeared here the condition would
+      # silently skip this step and NOTHING would take over the assertion — a
+      # fail-open dressed as a deliberate narrowing. Instead the condition is
+      # absent and `tests/test_marketing_error_branch_gate.py` asserts this
+      # repo still has no RLS lane, so the day one arrives the test goes red and
+      # names this decision rather than the gate going quiet.
+      #
+      # `scripts/error_branch_coverage.py` is byte-identical to
+      # `biffo-template/scripts/error_branch_coverage.py`. Do not edit it here;
+      # edit it upstream — the same rule `scripts/py-dependency-audit.sh`
+      # already carries.
+      - name: Error-branch coverage
+        run: uv run python scripts/error_branch_coverage.py --check --coverage coverage.json
       - uses: codecov/codecov-action@v5
         if: always()
         with:
