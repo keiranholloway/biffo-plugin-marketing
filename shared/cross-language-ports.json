@@ -1,0 +1,219 @@
+{
+  "$comment": [
+    "The behaviour a Python module and a TypeScript module BOTH have to produce,",
+    "expressed once, in a language neither of them owns (issue #119).",
+    "",
+    "Some of this plugin's logic exists twice on purpose: half runs in the",
+    "plugin's Lambda and half runs in the operator's browser, and the two cannot",
+    "share code (one has boto3 and no DOM, the other has a Cognito token the",
+    "Lambda can never see). Each port's own module docstring says why it exists.",
+    "",
+    "What this file is FOR: before it, each side's suite executed its own private",
+    "copy of the fixtures, so the two implementations could disagree with both",
+    "suites green. Measured on 2026-08-16 against origin/dev: changing",
+    "`assetFilename.ts`'s MAX_SLUG from 60 to 40 left ALL 24 Python tests and ALL",
+    "10 vitest tests passing, while the two halves named the same download",
+    "differently. Both sides now execute the cases below, so a rule changed on",
+    "one side fails that side's suite until the other side is changed with it.",
+    "",
+    "ADDING A PORT: add it here and both suites pick it up automatically —",
+    "`tests/test_marketing_cross_language_ports.py` enumerates the cases, and so",
+    "does `web-admin/src/lib/crossLanguagePorts.test.ts`. That sweep also",
+    "enumerates candidate ports out of the two SOURCE TREES, so a port added",
+    "without an entry here fails rather than going unnoticed."
+  ],
+  "ports": {
+    "assetFilename": {
+      "why": "The filename a downloaded creative arrives under. The Lambda names the upload (Core signs it into Content-Disposition) and the browser names the download attribute; both must compose the same <campaign>-<part>.<ext>. Issue #122.",
+      "python": "src/marketing/image_provider.py",
+      "typescript": "web-admin/src/lib/assetFilename.ts",
+      "symbols": ["slugify", "assetFilename", "MAX_SLUG"],
+      "constants": {
+        "MAX_SLUG": 60
+      },
+      "slugify": [
+        {
+          "why": "lowercases, strips punctuation, collapses separator runs",
+          "input": "Spring Launch — 2026!",
+          "expected": "spring-launch-2026"
+        },
+        {
+          "why": "a placement key becomes readable path-safe words",
+          "input": "feed_1x1",
+          "expected": "feed-1x1"
+        },
+        {
+          "why": "nothing sluggable in it, so a caller can fall back",
+          "input": "!!!",
+          "expected": ""
+        },
+        {
+          "why": "whitespace only is the same empty case",
+          "input": "   ",
+          "expected": ""
+        },
+        {
+          "why": "accents are folded, not dropped — Café -> cafe, not caf",
+          "input": "Café",
+          "expected": "cafe"
+        },
+        {
+          "why": "the cap, pinned BEHAVIOURALLY rather than by asserting the constant: this expectation is exactly MAX_SLUG characters long, so moving the cap on either side fails that side here. This is the case that was green on both sides while the two disagreed.",
+          "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbb",
+          "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-b"
+        },
+        {
+          "why": "a cap that lands ON a separator trims it, so no filename ends on a hyphen",
+          "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbb",
+          "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "assetFilename": [
+        {
+          "why": "a placement render is named after the campaign and the placement",
+          "campaign": "Spring Launch",
+          "part": "feed_1x1",
+          "extension": "png",
+          "expected": "spring-launch-feed-1x1.png"
+        },
+        {
+          "why": "the approved creative is named source, never a storage uuid",
+          "campaign": "Spring Launch",
+          "part": "source",
+          "extension": "png",
+          "expected": "spring-launch-source.png"
+        },
+        {
+          "why": "the real extension is kept, not defaulted to png",
+          "campaign": "Spring Launch",
+          "part": "source",
+          "extension": "jpeg",
+          "expected": "spring-launch-source.jpeg"
+        },
+        {
+          "why": "a campaign name that slugs to nothing falls back to 'campaign' on both sides",
+          "campaign": "   ",
+          "part": "source",
+          "extension": "png",
+          "expected": "campaign-source.png"
+        },
+        {
+          "why": "a non-ASCII campaign name still produces a recognisable name",
+          "campaign": "Café Noir",
+          "part": "source",
+          "extension": "png",
+          "expected": "cafe-noir-source.png"
+        }
+      ],
+      "deliberate_differences": [
+        "An EMPTY part: the browser falls back to 'source'/'creative' from the asset's is_source flag, the Lambda to 'asset'. The Lambda is never called with an empty part (every call site passes 'source' or a definitions.PLACEMENTS entry), so there is no shared expectation to state and each side covers its own fallback.",
+        "The EXTENSION: the browser has to infer one from a presigned URL's path (extensionFrom, working around the SigV4 query a last-dot split misreads); the Lambda is handed the real one. Cases above supply the extension to both, so they exercise the shared half only."
+      ]
+    },
+    "workflowDrift": {
+      "why": "Which keys of the fan-in workflow's action_config differ between what Core holds and what this build declares. The comparison runs in the browser because only the operator's Cognito token can read the deployed half, and in the Lambda/script because that is where --check runs. Issues #160, #167, #175, #177.",
+      "python": "src/marketing/fan_in_workflow.py",
+      "typescript": "web-admin/src/lib/workflowDrift.ts",
+      "symbols": [
+        "configDrift",
+        "REDACTED_SENTINEL",
+        "asTheRuntimeStoresIt",
+        "RUNTIME_PROMPT_FIELDS"
+      ],
+      "constants": {
+        "REDACTED_SENTINEL": "••••••••",
+        "RUNTIME_PROMPT_FIELDS": ["instructions", "goals"]
+      },
+      "configDrift": [
+        {
+          "why": "identical configs are not drift",
+          "deployed": { "model": "openai/gpt-5", "max_turns": 12 },
+          "declared": { "model": "openai/gpt-5", "max_turns": 12 },
+          "expected": []
+        },
+        {
+          "why": "a changed value is drift",
+          "deployed": { "model": "openai/gpt-4" },
+          "declared": { "model": "openai/gpt-5" },
+          "expected": ["model"]
+        },
+        {
+          "why": "a key only the deployed copy has is drift too — a leftover from an older seed, in the direction nothing else reports",
+          "deployed": { "model": "openai/gpt-5", "legacy_key": 1 },
+          "declared": { "model": "openai/gpt-5" },
+          "expected": ["legacy_key"]
+        },
+        {
+          "why": "a key only this build declares is drift — it has never been seeded",
+          "deployed": { "model": "openai/gpt-5" },
+          "declared": { "model": "openai/gpt-5", "timeout_seconds": 900 },
+          "expected": ["timeout_seconds"]
+        },
+        {
+          "why": "a key Core has masked cannot be compared, so it is skipped rather than reported as permanent, unfixable red",
+          "deployed": { "api_key": "••••••••" },
+          "declared": { "api_key": "the-real-one" },
+          "expected": []
+        },
+        {
+          "why": "keys are reported sorted, so two implementations cannot differ merely by ordering",
+          "deployed": { "b": 1, "a": 1 },
+          "declared": { "b": 2, "a": 2 },
+          "expected": ["a", "b"]
+        },
+        {
+          "why": "values are compared STRUCTURALLY: output_tools is a list of nested schema objects, so identity comparison would report drift on every render",
+          "deployed": { "output_tools": [{ "name": "t", "schema": { "type": "object" } }] },
+          "declared": { "output_tools": [{ "name": "t", "schema": { "type": "object" } }] },
+          "expected": []
+        },
+        {
+          "why": "Key ORDER is not drift. Python compares dicts, which are order-insensitive; a JSON.stringify comparison is not — and both halves read JSON off the wire whose key order neither of them chooses. Same consequence as the #175 case below: a detector that goes red on two identical configs and cannot be cleared.",
+          "deployed": { "output_tools": [{ "name": "t", "schema": { "type": "object" } }] },
+          "declared": { "output_tools": [{ "schema": { "type": "object" }, "name": "t" }] },
+          "expected": []
+        },
+        {
+          "why": "a genuinely different nested structure is still drift",
+          "deployed": { "output_tools": [{ "name": "t", "schema": { "type": "object" } }] },
+          "declared": { "output_tools": [{ "name": "t", "schema": { "type": "string" } }] },
+          "expected": ["output_tools"]
+        },
+        {
+          "why": "THE #175 CASE. Core stores a prompt field through prompt_parts.compose, which strips it, so a declared instructions ending in a newline comes back one character shorter for ever. Comparing raw makes the detector permanently red and its own remedy — re-seeding — can never clear it. The declared RESEARCH_SYNTHESIS_INSTRUCTIONS really does end in a newline (2047 declared, 2046 deployed), so this is the live case, not a hypothetical one.",
+          "deployed": { "instructions": "Do the thing." },
+          "declared": { "instructions": "Do the thing.\n" },
+          "expected": []
+        },
+        {
+          "why": "the same normalisation applies to goals, the other runtime prompt field",
+          "deployed": { "goals": "Ship it." },
+          "declared": { "goals": "  Ship it.  " },
+          "expected": []
+        },
+        {
+          "why": "normalisation is SCOPED to prompt fields — it normalises the one transformation Core performs, not whitespace generally, so a model name that gained a newline is still drift",
+          "deployed": { "model": "openai/gpt-5" },
+          "declared": { "model": "openai/gpt-5\n" },
+          "expected": ["model"]
+        },
+        {
+          "why": "a prompt field whose text really differs is still drift — the normalisation must not swallow the thing the detector exists to catch",
+          "deployed": { "instructions": "Do the thing." },
+          "declared": { "instructions": "Do the OTHER thing." },
+          "expected": ["instructions"]
+        },
+        {
+          "why": "a non-string prompt field is compared unchanged: Core would join a list of parts, nothing declares one, and reproducing that join would be a second unverified belief about Core rather than a fix",
+          "deployed": { "instructions": ["a", "b"] },
+          "declared": { "instructions": ["a", "b"] },
+          "expected": []
+        }
+      ],
+      "deliberate_differences": [
+        "The RETURN SHAPE: Python returns {key: (deployed, desired)} and TypeScript returns [{key, deployed, declared}], because each is shaped for its own caller. Both are keyed by the same key set, which is what these cases compare — the values are each side's own to render.",
+        "A deployed side of null/None — nothing seeded at all — is not expressible as a per-key diff and is the caller's job to report. Each side covers that in its own suite."
+      ]
+    }
+  }
+}

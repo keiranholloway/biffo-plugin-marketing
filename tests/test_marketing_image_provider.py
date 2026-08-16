@@ -21,7 +21,6 @@ from marketing.image_provider import (
     ImageProviderError,
     OpenAIImageProvider,
     asset_filename,
-    slugify,
 )
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nnot a real png but bytes are bytes"
@@ -266,76 +265,31 @@ def test_the_real_ssm_wiring_reports_a_confirmed_absence(monkeypatch: pytest.Mon
 # ── issue #122: `slugify`/`asset_filename` mirror
 # `web-admin/src/lib/assetFilename.ts`'s own naming convention ──────────────
 #
-# Fixtures below are ported 1:1 from that file's own
-# `assetFilename.test.ts` (same inputs, same expected slugs) — see
-# `asset_filename`'s docstring in `image_provider.py` for why the two
-# implementations are separate code rather than one shared module, and what
-# does (and does not) catch the two drifting apart.
+# The fixtures that were here are gone, and that is the point. They were
+# "ported 1:1" from `assetFilename.test.ts` — a SECOND COPY of the client's
+# cases, which is the same mistake in the test suite that the two
+# implementations make in the source, and it left both suites green while the
+# two halves disagreed (measured 2026-08-16: `MAX_SLUG` 60 -> 40 in the client
+# broke nothing, here or there).
+#
+# The shared behaviour now lives once, in `shared/cross-language-ports.json`,
+# and BOTH suites execute it: `tests/test_marketing_cross_language_ports.py`
+# and `web-admin/src/lib/crossLanguagePorts.test.ts`. What stays below is only
+# what is deliberately NOT shared — this side's own fallbacks, which the
+# client's differ from on purpose (issue #119).
 
 
-def test_max_slug_matches_the_client_side_constant() -> None:
-    """`_MAX_SLUG` here and `MAX_SLUG` in `assetFilename.ts` must agree for
-    `slugify` to cap identically on both sides of the wire. There is no
-    shared constant, so this hardcodes the client's current value (60) and
-    fails loudly the moment just one side changes it — see `asset_filename`'s
-    docstring in `image_provider.py` for the full drift-detection story."""
-    assert image_provider._MAX_SLUG == 60
-
-
-def test_slugify_lowercases_strips_punctuation_and_collapses_separators() -> None:
-    assert slugify("Spring Launch — 2026!") == "spring-launch-2026"
-
-
-def test_slugify_turns_a_placement_key_into_readable_path_safe_words() -> None:
-    assert slugify("feed_1x1") == "feed-1x1"
-
-
-def test_slugify_is_empty_for_a_value_with_nothing_sluggable_in_it() -> None:
-    assert slugify("!!!") == ""
-    assert slugify("   ") == ""
-
-
-def test_slugify_caps_length_and_never_ends_on_a_separator_after_the_cap() -> None:
-    slug = slugify("a" * 58 + " bbbbbbbbbb")
-    assert len(slug) <= 60
-    assert not slug.endswith("-")
-
-
-def test_slugify_folds_accents_rather_than_dropping_them() -> None:
-    """`Café` -> `cafe`, not `caf` — a non-ASCII campaign name should still
-    produce something recognisable, matching `assetFilename.ts`'s own
-    NFKD-normalise-then-strip-combining-marks approach."""
-    assert slugify("Café") == "cafe"
-
-
-def test_asset_filename_names_a_placement_render_after_the_campaign_and_the_placement() -> None:
-    assert (
-        asset_filename(campaign_name="Spring Launch", part="feed_1x1", extension="png")
-        == "spring-launch-feed-1x1.png"
+def test_asset_filename_falls_back_to_asset_when_the_part_slugs_to_nothing() -> None:
+    """This side's own fallback, and deliberately not the client's: the
+    browser picks `source`/`creative` from the asset's `is_source` flag, which
+    this side is not given. No call site here passes an empty `part` — every
+    one passes `"source"` or a `definitions.PLACEMENTS` entry — so this pins
+    the behaviour rather than describing a live case, and it is stated in the
+    shared spec's `deliberate_differences` so nobody later "fixes" the two
+    into agreement."""
+    assert asset_filename(campaign_name="Spring Launch", part="  ", extension="png") == (
+        "spring-launch-asset.png"
     )
-
-
-def test_asset_filename_names_the_source_creative_source_not_a_storage_key() -> None:
-    assert (
-        asset_filename(campaign_name="Spring Launch", part="source", extension="png")
-        == "spring-launch-source.png"
-    )
-
-
-def test_asset_filename_keeps_whatever_extension_it_is_given() -> None:
-    """Unlike the client (`extensionFrom`, which has to infer an extension
-    from a presigned URL's path), this side already has the real one from
-    the provider/render step — no URL to parse, so no fallback logic to
-    test here beyond passing it straight through."""
-    assert (
-        asset_filename(campaign_name="Spring Launch", part="source", extension="jpeg")
-        == "spring-launch-source.jpeg"
-    )
-
-
-def test_asset_filename_falls_back_to_campaign_when_the_campaign_name_slugs_to_nothing() -> None:
-    result = asset_filename(campaign_name="   ", part="source", extension="png")
-    assert result == "campaign-source.png"
 
 
 def test_asset_filename_never_contains_a_uuid() -> None:
