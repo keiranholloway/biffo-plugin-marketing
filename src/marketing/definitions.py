@@ -1749,6 +1749,18 @@ RUNTIME_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: present in the deployed artefact 2026-08-16). So a clamp is now findable in
 #: a log rather than only in a dead campaign; a *widening*, as here, still is
 #: not, because nothing reports a ceiling it did not have to enforce.
+#:
+#: **Do not update this number by hand from memory — ask the deployment.**
+#: ``uv run python scripts/check_runtime_ceiling.py --function-name
+#: <project>-<env>-plugin-agent-runtime`` reads both ceilings off the running
+#: Lambda and reports either direction of disagreement (0 in step · 1 drifted ·
+#: 2 cannot tell). It is the only thing in this repo that can tell you whether
+#: the line above is still true, and it is what instance 5 needed and did not
+#: have: the widening that created it produces no clamp, no failure and no log
+#: line, so it is invisible to everything else. It is an operator command
+#: rather than a CI gate because it needs AWS credentials and answers
+#: differently per environment — the CI-side version has to live where both
+#: halves are importable (biffo-template#1364).
 RUNTIME_TIMEOUT_CEILING_SECONDS = 300.0
 
 #: The wall clock every agent in this plugin may spend, in seconds
