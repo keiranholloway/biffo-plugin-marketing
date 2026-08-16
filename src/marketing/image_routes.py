@@ -98,6 +98,11 @@ from .image_provider import (
 
 logger = Logger(child=True)
 
+#: A bare literal ON PURPOSE — `admin` is a universal Biffo role, unlike the
+#: group `user_app` gates on, which is instance vocabulary and therefore lives
+#: in `ingress.py` and is declared in the manifest's `config` block (#46).
+#: `admin_app.require_admin` carries the full reasoning; `ingress.py`'s module
+#: docstring is the long form. Do not parameterise this one to match.
 require_admin = require_group("admin")
 
 router = APIRouter(dependencies=[Depends(require_admin)])

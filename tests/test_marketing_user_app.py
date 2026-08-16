@@ -11,7 +11,7 @@ matching `test_marketing_image_routes.py`'s own split:
 - `_FakeCoreClient` — the SigV4-only, plugin-identity client
   (`get_core_client`) used for the `me` storage `/url` route.
 - `_FakeCampaignClient` — the dual-auth client (`get_campaign_client`) over
-  this plugin's own generated-CRUD tables, carrying the founder's own
+  this plugin's own generated-CRUD tables, carrying the caller's own
   forwarded token.
 
 `admin_app._core`/`admin_app._latest_artefact` are exercised for real (not
@@ -33,15 +33,30 @@ from biffo_plugin_sdk import BiffoAPIError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from marketing import admin_app, principal_client, user_app
+from marketing import admin_app, ingress, principal_client, user_app
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000a1"
 _CORE_API_URL = "https://core.invalid"
 _BASE_URL = "https://dev.tabsii.com"
 
+#: The forwarded token the fake caller carries. Deliberately not named after
+#: any group (#46) — what matters is that THIS token reaches Core, not who it
+#: belongs to.
+_USER_JWT = "user-ingress-jwt"
 
-def _founder_user() -> Any:
-    return type("U", (), {"sub": "unit-1", "groups": ["founder"], "token": "founder-jwt"})()
+
+def _ingress_user() -> Any:
+    """A caller carrying whatever group the user surface gates on.
+
+    `ingress.USER_INGRESS_GROUP`, not a literal (#46): a fixture that names the
+    group itself would keep passing against a stale gate the moment
+    keiranholloway/biffo-template#1517 moves the real value, and
+    `test_marketing_ingress_group_guard` fails on the literal for that reason."""
+    return type(
+        "U",
+        (),
+        {"sub": "unit-1", "groups": [ingress.USER_INGRESS_GROUP], "token": _USER_JWT},
+    )()
 
 
 class _FakeCoreClient:
@@ -90,7 +105,7 @@ class _FakeCampaignClient:
 def _app(*, core_client: Any, campaign_client: _FakeCampaignClient) -> FastAPI:
     app = FastAPI()
     app.include_router(user_app.router)
-    app.dependency_overrides[user_app.require_founder] = _founder_user
+    app.dependency_overrides[user_app.require_user_ingress] = _ingress_user
     app.dependency_overrides[user_app.get_core_client] = lambda: core_client
     app.dependency_overrides[user_app.get_campaign_client] = lambda: campaign_client
     return app
@@ -101,7 +116,7 @@ class _FakeSignedCoreClient:
     `test_marketing_dual_auth_wiring.py`'s own docstring for why this is
     faked at `principal_client.SignedCoreClient` rather than mocking
     `admin_app._core` itself: it proves `_core`'s and `_latest_artefact`'s
-    real bodies ran with the founder's own token, not a stand-in for them."""
+    real bodies ran with the caller's own token, not a stand-in for them."""
 
     def __init__(self, responses: dict[str, tuple[int, bytes]]) -> None:
         self._responses = responses
@@ -433,7 +448,7 @@ def test_pack_404s_a_malformed_campaign_id() -> None:
 def test_pack_404s_when_copy_is_not_yet_approved(fake_signed_client) -> None:
     """A `proposed` copy artefact must not reach a unit — collapsed to the
     same 404 as "no copy yet", never a 409 (see `get_pack_route`'s own
-    docstring for why: a founder cannot act on that distinction)."""
+    docstring for why: this surface cannot act on that distinction)."""
     fake_signed_client(
         {
             f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
@@ -455,7 +470,7 @@ def test_pack_404s_when_copy_is_not_yet_approved(fake_signed_client) -> None:
 
 def test_pack_serves_approved_copy_even_with_a_newer_pending_re_run(fake_signed_client) -> None:
     """The divergence case issue #41 is about — the "pack still serving"
-    shape, this surface's half: a founder-facing pack that was serving fine
+    shape, this surface's half: a user-facing pack that was serving fine
     must not start 404ing purely because an admin started a copy re-run. The
     newer `pending` row (later `created_at`, no `created_at` column needed
     here since both rows are returned together) must not hide the older
@@ -494,9 +509,9 @@ def test_pack_serves_approved_copy_even_with_a_newer_pending_re_run(fake_signed_
     assert resp.json()["copy"] == [{"channel": "instagram", "text": "Great offer!"}]
 
 
-def test_pack_forwards_the_founders_own_token(fake_signed_client) -> None:
+def test_pack_forwards_the_callers_own_token(fake_signed_client) -> None:
     """`admin_app._core`/`_latest_artefact`, reused here, must carry THIS
-    founder's token — not a hardcoded or admin one — through to Core."""
+    caller's token — not a hardcoded or admin one — through to Core."""
     fake = fake_signed_client(
         {
             f"{user_app._INTERNAL_PREFIX}/campaigns/{_CAMPAIGN}": (
@@ -515,9 +530,7 @@ def test_pack_forwards_the_founders_own_token(fake_signed_client) -> None:
 
     assert fake.calls, "no Core calls were made"
     for call in fake.calls:
-        assert call["extra_signed_headers"] == {
-            principal_client.FORWARDED_USER_HEADER: "founder-jwt"
-        }
+        assert call["extra_signed_headers"] == {principal_client.FORWARDED_USER_HEADER: _USER_JWT}
 
 
 def test_pack_omits_link_urls_when_no_public_base_url_is_configured(
