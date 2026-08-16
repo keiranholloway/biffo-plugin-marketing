@@ -1,0 +1,7 @@
+{
+  "total": 2,
+  "branches": [
+    "src/marketing/pipeline.py:except:except ValidationError",
+    "src/marketing/pipeline.py:except:except json.JSONDecodeError"
+  ]
+}
