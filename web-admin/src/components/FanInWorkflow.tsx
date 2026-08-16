@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import {
+  coreOrchestrationBase,
   getDeclaredFanInWorkflow,
   listCoreWorkflows,
   seedFanInWorkflow,
@@ -40,6 +41,19 @@ import { configDrift, shortenValue, type ConfigDrift } from '../lib/workflowDrif
  * here, is the only credential in the system that both halves accept. The
  * plugin serves the declaration; the browser reads what is deployed, diffs,
  * and writes.
+ *
+ * ## And why it addresses Core by origin, not by path (#171)
+ *
+ * The first version of this panel asked for `/api/v1/orchestration/workflows`
+ * on its own origin, which is where an admin API on the same domain would be.
+ * It is not there. The instance's CloudFront routes only `/api/v1/plugins/*`
+ * to the API, so that request reached the public marketing site and came back
+ * **403 with an HTML body** — the same 403 with a valid admin token, with an
+ * access token, and with no `Authorization` header at all, which is precisely
+ * why it read as a permissions failure rather than a routing one.
+ *
+ * So the origin comes from the plugin, which holds it as `BIFFO_CORE_API_URL`,
+ * and when it cannot supply one this panel says so instead of guessing.
  */
 export function FanInWorkflow() {
   const [declared, setDeclared] = useState<DeclaredWorkflow | null>(null)
@@ -57,11 +71,19 @@ export function FanInWorkflow() {
     setError(null)
     setLoaded(false)
     try {
-      const [declaration, workflows] = await Promise.all([
-        getDeclaredFanInWorkflow(),
-        listCoreWorkflows(),
-      ])
+      // Sequential, not `Promise.all`: the declaration carries the origin the
+      // second call needs, so there is nothing to parallelise.
+      const declaration = await getDeclaredFanInWorkflow()
       setDeclared(declaration)
+      const base = coreOrchestrationBase(declaration)
+      if (base == null) {
+        setError(
+          'this deployment did not tell the plugin where Core’s API lives ' +
+            '(BIFFO_CORE_API_URL is unset), so the deployed workflow cannot be read',
+        )
+        return
+      }
+      const workflows = await listCoreWorkflows(base)
       setDeployed(workflows.find((w) => w.name === declaration.name) ?? null)
       setLoaded(true)
     } catch (e: unknown) {
@@ -75,10 +97,12 @@ export function FanInWorkflow() {
 
   async function reseed() {
     if (declared == null) return
+    const base = coreOrchestrationBase(declared)
+    if (base == null) return
     setSeeding(true)
     setError(null)
     try {
-      await seedFanInWorkflow(declared, deployed?.id ?? null)
+      await seedFanInWorkflow(declared, deployed?.id ?? null, base)
       setSeeded(true)
       // Re-read rather than assume. What matters is what Core now holds, and
       // a panel that congratulated itself on a write it never verified would

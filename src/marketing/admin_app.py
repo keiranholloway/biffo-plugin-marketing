@@ -132,12 +132,34 @@ async def fan_in_workflow() -> dict[str, Any]:
     argument as ``/config`` above, with more at stake: a hand-copied
     ``action_config`` in the UI would be a *fourth* copy of the thing whose
     copies going stale is the entire subject of #160.
+
+    ## ``core_api_url``, and why the browser cannot work it out (#171)
+
+    **Core's admin API is not same-origin with this surface.** The admin SPA is
+    served from ``dev.<domain>/api/v1/plugins/marketing/admin``, and the
+    instance's CloudFront routes only the plugin paths to the API — everything
+    else falls through to the public site. So a browser asking for
+    ``/api/v1/orchestration/workflows`` on the page's own origin gets the
+    marketing homepage under a **403**, with or without a token, which is
+    exactly how #171 presented: an auth failure that was not an auth failure.
+
+    Core's real origin is its API Gateway endpoint, which the portal reaches
+    through ``NEXT_PUBLIC_API_URL``. This Lambda already holds the same value
+    in ``BIFFO_CORE_API_URL`` (Terraform passes ``module.api_gateway.
+    api_endpoint``), so serving it here lets the panel address Core without
+    any instance-specific constant being compiled into this repo — the same
+    reason ``api.ts`` resolves its own base relatively rather than hard-coding
+    an origin.
+
+    Empty when the variable is unset. The panel must then say so rather than
+    falling back to a same-origin path, because that fallback is the bug.
     """
     declared = fan_in_definition()
     return {
         "name": WORKFLOW_NAME,
         "definition": declared,
         "fingerprint": config_fingerprint(declared["action_config"]),
+        "core_api_url": CORE_API_URL.rstrip("/"),
     }
 
 
