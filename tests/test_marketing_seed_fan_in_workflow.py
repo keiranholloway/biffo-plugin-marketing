@@ -385,3 +385,35 @@ def test_replace_puts_over_the_existing_definition_rather_than_creating_a_second
     assert _seed.main() == 0
     assert calls[1] == ("PUT", f"https://core.example{_seed._DEFINITIONS_PATH}/wf-1")
     assert "Replaced workflow wf-1." in capsys.readouterr().out
+
+
+def test_config_drift_agrees_with_the_run_side_detector_about_a_stripped_prompt() -> None:
+    """Issue #175's second half: the two detectors must not disagree about the
+    same config.
+
+    `--check` reads the stored *workflow definition* (unstripped) while
+    `pipeline.synthesis_config_drift` reads a *run's* snapshot (stripped by
+    Core). On 2026-08-16 they answered differently about the same workflow at
+    the same moment — `--check` said "in step", the runtime said "STALE" —
+    which is most of why the cause took a while to find.
+
+    So this side normalises too, even though it is not the side that was
+    firing: a stored config that differs only by the newline Core would strip
+    is not drift by either reading.
+    """
+    stored = definition()["action_config"]
+    assert stored["instructions"].endswith("\n"), (
+        "this test is about the trailing newline Core strips; if the declared "
+        "prompt no longer has one, keep the case but plant it explicitly"
+    )
+    as_a_run_would_hold_it = {**stored, "instructions": stored["instructions"].strip()}
+
+    assert _seed.config_drift(as_a_run_would_hold_it) == {}
+
+
+def test_config_drift_still_reports_a_prompt_whose_words_changed() -> None:
+    """The fix must not blunt the detector — whitespace is normalised, content
+    is not. This is the drift #160 exists to catch."""
+    deployed = {**definition()["action_config"], "instructions": "Summarise it. Keep it short.\n"}
+
+    assert "instructions" in _seed.config_drift(deployed)

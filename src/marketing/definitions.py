@@ -1554,6 +1554,66 @@ CHANNEL_EVIDENCE_MAX_TURNS = RESEARCH_MAX_TURNS
 CHANNEL_PLAN_MAX_TURNS = 3
 COPY_MAX_TURNS = 3
 
+#: The `action_config`/run-definition keys Core resolves through its **prompt
+#: library** before a run ever sees them (ADR-0015 §2 — `instructions` and
+#: `goals`).
+#:
+#: This repo's belief about another repo's behaviour, in the same sense as the
+#: two timeout constants below, and it cannot be imported for the same reason.
+RUNTIME_PROMPT_FIELDS = frozenset({"instructions", "goals"})
+
+
+def as_the_runtime_stores_it(key: str, value: Any) -> Any:
+    """One config value as it will look **on the run**, not as declared here.
+
+    Core does not store a prompt field verbatim. Every write of a run
+    definition goes through `agent_runs.resolve_definition_snapshot` ->
+    `prompt_library.resolve_prompt_field` -> `prompt_parts.compose`, and
+    `compose` is:
+
+        return _PART_SEPARATOR.join(
+            stripped for text in texts if (stripped := text.strip())
+        )
+
+    A plain-string prompt is a single part, so **it comes back stripped**. Any
+    other key is returned untouched: this normalises the one transformation
+    Core actually performs, not whitespace generally.
+
+    **Why this function exists at all (issue #175).** Both of this repo's drift
+    detectors compared what they declare against what a run received, and the
+    declared `RESEARCH_SYNTHESIS_INSTRUCTIONS` ends in a newline. So every
+    synthesis run reported drift of exactly one character — 2047 declared
+    against 2046 deployed — and the remedy it printed, re-seeding, could never
+    clear it: `--replace` writes 2047 back, Core strips it to 2046 on the next
+    run, and the detector fires again. Measured on tabsii dev on 2026-08-16, in
+    a run twenty minutes after a successful `--replace`.
+
+    A permanently-red detector is worse than none: this is the ONLY one of the
+    three synthesis-drift checks that fires by itself, in the environment where
+    the drift is real, with no token and no operator. Teaching people to scroll
+    past it costs the thing #160 exists to catch.
+
+    **A drift detector must compare like with like**, so the normalisation is
+    applied to BOTH sides rather than only to the declared one — the deployed
+    side is already stripped, and `strip` is idempotent, so this is symmetric
+    by construction rather than by luck.
+
+    The fix is deliberately here and not in Core: `compose`'s stripping is
+    documented behaviour that multi-part prompts rely on, and changing it to
+    preserve a trailing newline for the single-part case would be a wide blast
+    radius for a narrow problem.
+
+    **What this does NOT normalise**: a prompt declared as a *list* of parts.
+    Core would join those with `_PART_SEPARATOR`; nothing here declares one, so
+    reproducing that join would be a second unverified belief about Core rather
+    than a fix. A list is returned unchanged and compares exactly, which fails
+    loudly rather than silently if that day comes.
+    """
+    if key in RUNTIME_PROMPT_FIELDS and isinstance(value, str):
+        return value.strip()
+    return value
+
+
 #: This repo's belief about `agent_runtime.loop.DEFAULT_TIMEOUT_SECONDS` — the
 #: wall clock a run definition inherits when it declares no `timeout_seconds`
 #: of its own. `agent_runtime` is not a dependency of this plugin (checked

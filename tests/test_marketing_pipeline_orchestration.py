@@ -31,10 +31,36 @@ from marketing.definitions import (
 
 def _in_step_snapshot() -> dict[str, Any]:
     """The definition snapshot a *freshly re-seeded* workflow would produce —
-    what the engine ran the synthesis agent with when nothing has drifted."""
-    return research_synthesis_definition(
+    what the engine ran the synthesis agent with when nothing has drifted.
+
+    **Built through the runtime's own normalisation, not from the declaration
+    verbatim (issue #175).** This helper used to return
+    ``research_synthesis_definition(...)`` unchanged, which is a snapshot Core
+    cannot produce: a run definition passes through
+    ``prompt_library.resolve_prompt_field`` -> ``prompt_parts.compose``, which
+    strips each prompt part, and the declared instructions end in a newline.
+
+    So the negative control below asserted "no drift" against a fixture that
+    was **one character different from every real run**, and the suite stayed
+    green for as long as production reported drift on every single synthesis.
+    A fixture that invents a state the system never reaches cannot fail with
+    it — the fix belongs in what the fixture models, not in the assertion.
+
+    **Deliberately does NOT call `definitions.as_the_runtime_stores_it`**, even
+    though that function exists to describe exactly this. A fixture built from
+    the code under test agrees with that code by construction: remove the
+    normalisation and the fixture silently stops normalising too, so the
+    control goes on passing and proves nothing. Core's behaviour is restated
+    here as a literal `.strip()` of the prompt fields, so the two can
+    disagree — which is the only way this control can fail.
+    """
+    declared = research_synthesis_definition(
         model=DEFAULT_SYNTHESIS_MODEL, instructions=RESEARCH_SYNTHESIS_INSTRUCTIONS
     )
+    return {
+        key: value.strip() if key in ("instructions", "goals") and isinstance(value, str) else value
+        for key, value in declared.items()
+    }
 
 
 @dataclass
@@ -1157,6 +1183,59 @@ def test_synthesis_config_drift_is_empty_for_a_freshly_seeded_workflow() -> None
     """The negative control: after a re-seed this must go quiet, or the report
     is noise and gets filtered out."""
     assert pipeline.synthesis_config_drift(_in_step_snapshot()) == {}
+
+
+def test_synthesis_config_drift_ignores_the_newline_core_itself_strips() -> None:
+    """The regression for issue #175, measured on tabsii dev.
+
+    `RESEARCH_SYNTHESIS_INSTRUCTIONS` ends in a newline. Core strips it on the
+    way in (`prompt_parts.compose`), so a run's snapshot is 2046 characters
+    where this repo declares 2047 — and the detector reported that one
+    character as drift on **every** synthesis run, twenty minutes after a
+    successful `--replace` included.
+
+    What made it worse than a false alarm: the remedy it printed could not
+    clear it. `--replace` writes the newline back, Core strips it again, and
+    the next run reports the same drift. A guard that cannot go green is one
+    people learn to scroll past, and this is the only synthesis-drift check
+    that fires by itself in the environment where the drift is real.
+    """
+    declared = research_synthesis_definition(
+        model=DEFAULT_SYNTHESIS_MODEL, instructions=RESEARCH_SYNTHESIS_INSTRUCTIONS
+    )
+    assert declared["instructions"].endswith("\n"), (
+        "this test is about the trailing newline Core strips; if the declared "
+        "prompt no longer has one, keep the case but plant it explicitly"
+    )
+    as_core_stored_it = {**_in_step_snapshot(), "instructions": declared["instructions"].strip()}
+
+    assert pipeline.synthesis_config_drift(as_core_stored_it) == {}
+
+
+def test_synthesis_config_drift_still_catches_a_prompt_that_really_changed() -> None:
+    """The other half of #175, and the one that keeps the fix honest.
+
+    Normalising whitespace must not blunt the detector: a prompt whose WORDS
+    differ is the drift #160 exists to catch, and stripping both sides must
+    leave that entirely visible.
+    """
+    drift = pipeline.synthesis_config_drift(
+        {**_in_step_snapshot(), "instructions": "Reconcile the two research angles. Be brief.\n"}
+    )
+
+    assert "instructions" in drift
+
+
+def test_synthesis_config_drift_normalises_prompts_only_not_every_string() -> None:
+    """Scope check. Core strips `instructions`/`goals` because they go through
+    the prompt library; it does not strip `agent_name` or `model`, so neither
+    does this — a trailing space in a model slug is a real difference and must
+    still be reported rather than quietly absorbed."""
+    drift = pipeline.synthesis_config_drift(
+        {**_in_step_snapshot(), "model": DEFAULT_SYNTHESIS_MODEL + " "}
+    )
+
+    assert "model" in drift
 
 
 def test_synthesis_config_drift_shortens_a_prompt_rather_than_pasting_it() -> None:
