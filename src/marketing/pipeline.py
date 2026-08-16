@@ -93,6 +93,7 @@ from .definitions import (
     ResearchFindingSet,
     ResearchSynthesis,
     Source,
+    as_the_runtime_stores_it,
     channel_evidence_definition,
     channel_evidence_tool_schema,
     channel_plan_definition,
@@ -1803,6 +1804,15 @@ def synthesis_config_drift(
     drift with a deployed value of ``None``, because absent is precisely how
     ``timeout_seconds`` produced the 120s clock #160 measured: the runtime
     silently substitutes its own default for a key nobody wrote.
+
+    **The comparison is made in the runtime's terms, not this repo's**
+    (issue #175). A snapshot is what Core *stored*, and Core resolves prompt
+    fields through its prompt library on the way in — so comparing a declared
+    prompt to a stored one raw made this detector report one character of
+    drift on **every** synthesis run, unfixably: the declared instructions end
+    in a newline and `prompt_parts.compose` strips it. See
+    :func:`definitions.as_the_runtime_stores_it`. This is the difference
+    between a guard that reports a real stale workflow and one nobody reads.
     """
     if snapshot is None:
         return {}
@@ -1814,7 +1824,9 @@ def synthesis_config_drift(
         if key in SYNTHESIS_DRIFT_IGNORED_KEYS:
             continue
         deployed_value = snapshot.get(key)
-        if deployed_value != declared_value:
+        if as_the_runtime_stores_it(key, deployed_value) != as_the_runtime_stores_it(
+            key, declared_value
+        ):
             drift[key] = (_drift_summary(deployed_value), _drift_summary(declared_value))
     return drift
 

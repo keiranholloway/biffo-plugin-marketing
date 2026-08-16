@@ -38,6 +38,7 @@ from .definitions import (
     RESEARCH_AGENT_NAMES,
     RESEARCH_SYNTHESIS_AGENT_NAME,
     RESEARCH_SYNTHESIS_INSTRUCTIONS,
+    as_the_runtime_stores_it,
     research_synthesis_definition,
     research_synthesis_tool_schema,
 )
@@ -132,6 +133,15 @@ def config_drift(
     value cannot be read back, so calling it drift would mean permanent,
     unfixable red. ``deployed`` of ``None`` — nothing seeded at all — is not
     expressible as a per-key diff and is the caller's job to report.
+
+    **Prompt fields are compared as Core stores them**, via
+    :func:`definitions.as_the_runtime_stores_it` — for the same "permanent,
+    unfixable red" reason the sentinel is skipped above, and see that function
+    for the measurement (issue #175). This one reads a *workflow definition*
+    rather than a *run*, so it did not report the drift #175 describes; it is
+    normalised anyway so that `--check` and ``pipeline.synthesis_config_drift``
+    cannot answer differently about the same config, which is exactly what made
+    #175 hard to pin down.
     """
     desired = definition()["action_config"] if desired is None else desired
     if deployed is None:
@@ -142,6 +152,8 @@ def config_drift(
         if deployed_value == REDACTED_SENTINEL:
             continue
         desired_value = desired.get(key)
-        if deployed_value != desired_value:
+        if as_the_runtime_stores_it(key, deployed_value) != as_the_runtime_stores_it(
+            key, desired_value
+        ):
             drift[key] = (deployed_value, desired_value)
     return drift
