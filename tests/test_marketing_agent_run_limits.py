@@ -20,6 +20,10 @@ the disagreement was invisible until it cost a research angle in production.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+from marketing import definitions
 from marketing.definitions import (
     AGENT_TIMEOUT_SECONDS,
     CHANNEL_EVIDENCE_MAX_TURNS,
@@ -194,3 +198,64 @@ def test_every_definition_still_declares_a_turn_budget() -> None:
     )
     for factory, turns in expected.items():
         assert _definition(factory)["max_turns"] == turns
+
+
+def test_the_ceilings_docstring_evidence_agrees_with_the_ceiling_it_documents() -> None:
+    """The guard for issue #132 **instance 5**, which the assertions above
+    could not catch and did not.
+
+    `RUNTIME_TIMEOUT_CEILING_SECONDS` is a hand-copied belief about another
+    repo's Terraform, and it justifies itself by quoting the deployed Lambda's
+    environment in its own docstring. Those are two copies of one fact sitting
+    four lines apart, and on 2026-08-16 they disagreed: the deployment had
+    moved to 300 while the constant — and every test here — still said 240.
+
+    **Why nothing failed.** The drift was in the safe direction, so no run was
+    ever clamped and no campaign ever died. What it cost instead was
+    `AGENT_TIMEOUT_SECONDS` staying pinned at 240 on the argument that 240 was
+    the ceiling, leaving 60s of real headroom unspent on two stages already
+    measured as marginal. A wrong number that produces no failure is found by
+    reading a deployed Lambda, or it is not found at all.
+
+    This cannot make either number agree with the deployment — that needs
+    biffo-template#1364, an upstream test that can read both sides. What it
+    CAN do is stop the constant and the evidence offered for it drifting apart
+    in silence, so the next person to move one is told to move the other.
+    """
+    source = Path(definitions.__file__).read_text(encoding="utf-8")
+    quoted = re.findall(r'"AGENT_RUNTIME_MAX_SECONDS":\s*"(\d+)"', source)
+
+    assert quoted, (
+        "RUNTIME_TIMEOUT_CEILING_SECONDS documents itself by quoting the "
+        "deployed Lambda's AGENT_RUNTIME_MAX_SECONDS. That quote is gone, so "
+        "the constant is now an unevidenced number — restore it, or this "
+        "guard has nothing to compare against (issue #132)."
+    )
+    for value in quoted:
+        assert float(value) == RUNTIME_TIMEOUT_CEILING_SECONDS, (
+            f'definitions.py quotes AGENT_RUNTIME_MAX_SECONDS as "{value}" '
+            f"while RUNTIME_TIMEOUT_CEILING_SECONDS is "
+            f"{RUNTIME_TIMEOUT_CEILING_SECONDS}. One of them was updated and "
+            "the other was not — re-read the deployed value with `aws lambda "
+            "get-function-configuration` and make both say it (issue #132 "
+            "instance 5)."
+        )
+
+
+def test_the_guard_above_can_actually_fail() -> None:
+    """A detector nobody has seen fail is a detector nobody knows works.
+
+    Feeds the real assertion a source string with the disagreement that
+    actually occurred — a docstring quoting 240 beside a 300 ceiling — and
+    proves it is caught, without depending on the live file holding either
+    value.
+    """
+    planted = '#:     "AGENT_RUNTIME_MAX_SECONDS": "240"'
+    quoted = re.findall(r'"AGENT_RUNTIME_MAX_SECONDS":\s*"(\d+)"', planted)
+
+    assert quoted == ["240"]
+    assert float(quoted[0]) != 300.0, (
+        "this self-test assumes the historical drift (240 quoted, 300 real); "
+        "if the ceiling ever legitimately returns to 240, rewrite it around a "
+        "different pair rather than deleting it"
+    )
