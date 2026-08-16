@@ -21,6 +21,8 @@ questions nobody asked (biffo-template#1363).
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -220,3 +222,44 @@ def test_main_exits_in_step_when_the_deployment_agrees(monkeypatch: pytest.Monke
     monkeypatch.setattr(_check, "read_deployed_configuration", _fake)
 
     assert _check.main(["--function-name", "whatever"]) == IN_STEP
+
+
+def test_a_refused_lambda_read_becomes_cannot_read_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_deployed_configuration` itself, with the AWS call failing.
+
+    `test_an_unreadable_deployment_exits_cannot_tell` above replaces this whole
+    function, so it proves `main` handles a `CannotReadError` — and never
+    executes the `except` that raises one. The two are different claims, and
+    only this one covers the line that turns a botocore exception into the
+    tri-state's "cannot tell".
+
+    It is not a hypothetical path: run the script against a name that does not
+    exist and this is what answers, via `ResourceNotFoundException`.
+
+    boto3 is injected through `sys.modules` rather than monkeypatched on the
+    script, because the import is inside the function precisely so that neither
+    boto3 nor credentials need to exist for the rest of the module to be
+    testable — patching an attribute that does not exist at module scope would
+    pass while testing nothing.
+    """
+
+    class _Client:
+        def get_function_configuration(self, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("AccessDeniedException: not authorized")
+
+    class _Session:
+        def __init__(self, **_kwargs: Any) -> None: ...
+
+        def client(self, _name: str) -> _Client:
+            return _Client()
+
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(Session=_Session))
+
+    with pytest.raises(_check.CannotReadError) as excinfo:
+        _check.read_deployed_configuration("some-function")
+
+    # The cause survives into the message: "cannot tell" is only actionable if
+    # it says which of denied/expired/typo'd it was.
+    assert "AccessDeniedException" in str(excinfo.value)
