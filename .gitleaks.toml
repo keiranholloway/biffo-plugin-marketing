@@ -1,11 +1,29 @@
 title = "Biffo Plugin Gitleaks Configuration"
 
 # Mirrors biffo-template's .gitleaks.toml `biffo-aws-account-id` rule
-# verbatim (see /home/keiran/code/biffo-template/.gitleaks.toml). Without it,
-# a bare 12-digit fixture value passes this repo's own Secret Scan and only
-# fails one repo and one CI cycle downstream, once vendored into an instance
-# whose gitleaks config does have this rule (#19). A plugin repo's gates
-# should be a superset of what its vendored copy will face downstream.
+# verbatim (see /home/keiran/code/biffo-template/.gitleaks.toml, ATTEMPT 3 in
+# its long comment there — read it before touching this rule again, because
+# two earlier designs looked reasonable and were both prosecuted and broken
+# with the real binary). Without it, a bare 12-digit fixture value passes
+# this repo's own Secret Scan and only fails one repo and one CI cycle
+# downstream, once vendored into an instance whose gitleaks config does have
+# this rule (#19). A plugin repo's gates should be a superset of what its
+# vendored copy will face downstream.
+#
+# This repo previously carried the broad `\b\d{12}\b` rule plus a `commits`
+# allowlist naming three specific commits whose fixture UUIDs (all-digit
+# tails) tripped it — a finite defence against an infinite class: every new
+# fixture UUID with an all-digit tail needed a fourth entry. Narrowed here
+# instead (tabsii-com/tabsii-platform#893) to the template's current,
+# three-times-iterated regex, which consumes a UUID's two-hex-quad prefix and
+# reports only the twelve digits via `secretGroup`, with a match-scoped (not
+# line-scoped) allowlist. The `commits` allowlist is removed: verified by
+# stripping it and re-running `gitleaks detect --log-opts="--full-history
+# HEAD"` against all commits reachable from dev under the narrowed rule —
+# zero leaks, so the three entries were suppressing only the old rule's
+# false-positive on this content and are dead weight now. See PR that
+# introduced this change for the full case matrix and the real gitleaks
+# output that established the above.
 
 [extend]
 useDefault = true
@@ -13,26 +31,23 @@ useDefault = true
 [[rules]]
 id = "biffo-aws-account-id"
 description = "AWS Account ID — should only appear in .tfvars.example or biffo.config.json placeholders"
-regex = '''\b\d{12}\b'''
+regex = '''\b(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-)?(\d{12})\b'''
+secretGroup = 1
 entropy = 0
-[rules.allowlist]
+
+# Suppresses a UUID's final segment, and ONLY that shape — match-scoped, not
+# line-scoped, so a genuine account id sharing a line with an unrelated UUID
+# is still caught (see biffo-template's .gitleaks.toml for why a line-scoped
+# allowlist was rejected).
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = [
+  "^[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-\\d{12}$",
+]
+
+[[rules.allowlists]]
 regexes = [
   "\\{\\{AWS_ACCOUNT_ID\\}\\}",  # placeholder in template files
   "123456789012",                  # canonical example account ID used in tests
   "999999999999",                  # canonical wrong-account ID used in error-path tests
-]
-# security-secrets' history scan runs `--full-history HEAD` (see ci.yml), so
-# this rule reaches every commit reachable from dev, not only this branch's
-# diff. #14 already fixed the *current* fixture values (the all-digit UUID
-# suffixes this rule exists to catch, e.g. b3f1c0de-...-000000000001), but the
-# pre-fix values are permanently part of dev's merged history and this rule
-# would otherwise flag them retroactively on every PR from now on — dev is
-# protected and its history is not ours to rewrite. Allowlisted by commit,
-# not by value or path, so the rule stays fully live against any NEW bare
-# 12-digit number introduced anywhere in the repo going forward — only these
-# three already-merged, already-superseded commits are exempted.
-commits = [
-  "bfb5dc5e075cc740dfaed146aa53aa1fca4dab45", # feat(marketing): mint tracked links for a campaign (#13)
-  "86f57b34c7ada4b7f84276148722602b29e8e57b", # feat(marketing): research + positioning agents, citation-enforced (#18)
-  "d2ddeef824268a5ec6464f5019b71735fd6d249c", # feat(marketing): still-image generation behind a provider port (#20)
 ]
