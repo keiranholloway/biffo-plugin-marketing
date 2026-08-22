@@ -24,11 +24,14 @@ work, for four independent reasons — any one of which is sufficient:
 2. **``brand_id`` is ``NOT NULL`` and this plugin has no brand.** The generic
    CRUD create handler injects ``tenant_id`` only; ``brand_id`` is an
    ordinary caller-supplied payload field, and there is no brand header and
-   no default brand anywhere in Core. The reading side does not answer this
-   question either — tabsii's ``campaign_results.py`` documents that it
-   deliberately **ignores** ``brand_id`` and sums across every brand, calling
-   the requirement "a genuine, structural mismatch this endpoint works
-   around, not past". There is no value to reuse, only an acknowledged gap.
+   no default brand anywhere in Core. Writing ``lead_source_costs`` would
+   therefore need a brand value this plugin has no way to produce — that is
+   the mismatch on its own terms, independent of anything the reading side
+   does with the column once it exists. (As of 2026-08-22, the reading side
+   has stopped reading that table at all — ``tabsii-platform#892`` removed
+   the ``lead_source_costs`` read from ``campaign_results.py`` entirely, so
+   ``marketing_spend`` is now the sole cost ledger. That is a second,
+   independent reason to prefer it, not the basis for this one.)
 3. **The plugin's transport cannot reach that route.** Everything this
    plugin sends to Core goes through ``principal_client`` — SigV4 plus the
    admin's forwarded token — onto ``/api/v1/internal/plugins/marketing/*``.
