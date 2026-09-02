@@ -418,16 +418,47 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    reports = [json.loads(p.read_text()) for p in present]
+    coverage = merge_coverage(reports)
+    file_count = len(coverage.get("files", {}))
+
     # Restated in every summary line below (not just the warning above) so the
     # denominator survives even if the warning scrolls past unread: a reader
     # who sees only the final line still learns how much of the requested
-    # picture this result is actually over.
-    coverage_note = f"{len(present)}/{len(coverage_paths)} coverage artefact(s)"
+    # picture this result is actually over. The file count is part of that
+    # denominator, not just the artefact count — see the fail-closed check
+    # immediately below for why (#1657).
+    coverage_note = (
+        f"{len(present)}/{len(coverage_paths)} coverage artefact(s), {file_count} file(s)"
+    )
     if absent:
         coverage_note += f" — MISSING: {', '.join(str(p) for p in absent)}"
 
-    reports = [json.loads(p.read_text()) for p in present]
-    coverage = merge_coverage(reports)
+    if file_count == 0:
+        # #1657: an artefact can be present and valid JSON while still
+        # describing NOTHING — `{"files": {}}`, or `files` absent entirely.
+        # That reads identically to "everything is covered" to the logic
+        # below (found == [], keys == [], nothing NEW), so --check would
+        # exit 0 over a report that examined zero files: a fail-open in the
+        # gate that exists specifically to catch fail-opens. Every other
+        # soft-open path here (no baseline, a missing --coverage file)
+        # announces itself loudly and still proceeds; this one cannot
+        # proceed at all, because there is no denominator left to reason
+        # over. Fail closed rather than fail open: refuse both --write
+        # (never baseline a measurement of nothing) and --check (never let
+        # a growth check pass over nothing to check).
+        print(
+            f"::error::error-branch coverage: {coverage_note} — the merged "
+            "coverage report describes 0 files. Refusing to treat that as "
+            "clean: a report with nothing in it is not evidence the tree is "
+            "covered, it is evidence nothing was measured (a "
+            "[tool.coverage.run] source pointed at the wrong tree, a "
+            "truncated or hand-staged artefact, a coverage run against an "
+            "empty package). Fix the coverage run and try again.",
+            file=sys.stderr,
+        )
+        return 2
+
     found = unexecuted(coverage, source_root)
     keys = sorted({b.key() for b in found})
 
@@ -436,7 +467,7 @@ def main() -> int:
         baseline_path.write_text(
             json.dumps({"total": len(keys), "branches": keys}, indent=2) + "\n",
         )
-        print(f"baseline written: {len(keys)} unexecuted error branches")
+        print(f"baseline written: {len(keys)} unexecuted error branches ({coverage_note})")
         return 0
 
     baseline = load_baseline(baseline_path)

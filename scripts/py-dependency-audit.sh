@@ -62,6 +62,43 @@
 # it layout-agnostic, or the copies stop being interchangeable and
 # `shared-sync.sh --check` starts reporting drift that is really divergence.
 #
+# ## Pre-existing vs introduced (#1673)
+#
+# The checks above (network flake vs real finding) say nothing about WHEN the
+# vulnerable version got there. PYSEC-2026-3721 was published against pip
+# 26.1.2 on 2026-08-21 and turned this lane red on PRs #1669/#1670 — neither
+# of which touched uv.lock or any Python dependency; dev's own lockfile had
+# been green on that exact pip version the same morning, before the advisory
+# existed. The timestamp this file already prints proves the *scan* was
+# fresh; it says nothing about whether the *finding* belongs to the diff
+# under test, so a pre-existing advisory on dev and a real regression read
+# as an identical red — a reader cannot tell which one to fix without
+# re-deriving the same by-hand diagnosis #1673 was filed to save.
+#
+# The fix compares the flagged package's version against the SAME tree's
+# lockfile on the PR's base branch, not against the diff: a PR can leave
+# uv.lock untouched while another package's line moves it, or the base
+# branch itself may already have upgraded — checking "did the diff touch
+# uv.lock" would get both wrong. Comparing per-package versions is also what
+# tells a PR that upgrades a DIFFERENT package into a vulnerable version
+# apart from one that never touches the flagged package at all.
+#
+# `GITHUB_BASE_REF` is the base branch name and is set ONLY for a
+# `pull_request`/`pull_request_target` event — empty on `push`,
+# `workflow_dispatch` and `merge_group`. That is deliberate, not a gap:
+# outside a PR there is no "diff" to attribute a finding to, so the
+# classification does not apply and every finding blocks exactly as before
+# — which is the correct behaviour for dev itself (#1671 fixed dev's own red
+# by bumping the lockfile, not by reclassifying it away).
+#
+# `origin/$GITHUB_BASE_REF` must already be a resolvable local ref for the
+# comparison to run at all — the `python` job's checkout uses
+# `fetch-depth: 0` precisely so it is (see that job's own comment). If it is
+# NOT resolvable (a shallow checkout, or a distributed copy of this script
+# running somewhere that checkout is missing), comparison fails CLOSED: every
+# finding blocks, same as before this fix, rather than silently waving a real
+# regression through because the check could not be performed.
+#
 # POSIX sh (the CI step runs `sh scripts/...`, i.e. dash) — no `pipefail`.
 set -u
 
@@ -79,14 +116,80 @@ fi
 attempts=3
 inconclusive=0
 failed=0
+preexisting_total=0
+
+# Extract the version pinned for package `$1` from a uv.lock's content, read
+# on stdin. uv.lock's TOML shape is a flat list of `[[package]]` tables, each
+# starting with a `name = "..."` line immediately followed by a
+# `version = "..."` line (verified against this repo's own uv.lock) — so a
+# small awk state machine is enough without pulling in a real TOML parser.
+# Prints nothing (empty string) if the package is not in the lockfile at all.
+_lockfile_version_for() {
+  pkg="$1"
+  awk -v pkg="$pkg" '
+    /^\[\[package\]\]/ { name = "" }
+    /^name = "/ {
+      line = $0
+      sub(/^name = "/, "", line)
+      sub(/".*$/, "", line)
+      name = line
+      next
+    }
+    /^version = "/ {
+      if (name == pkg) {
+        line = $0
+        sub(/^version = "/, "", line)
+        sub(/".*$/, "", line)
+        print line
+        exit
+      }
+    }
+  '
+}
+
+# Classify one (package, version) finding as "introduced" (blocks) or
+# "pre-existing" (does not) by comparing against the SAME tree's uv.lock on
+# the PR's base branch. `$1` name, `$2` the version pip-audit flagged, `$3`
+# the tree's uv.lock path relative to the repo root. Always prints
+# "introduced" — the old, safe behaviour — when a comparison cannot be made
+# at all: no base ref (not a PR), or the ref does not resolve locally.
+_classify_finding() {
+  finding_name="$1"
+  finding_version="$2"
+  finding_lockfile_relpath="$3"
+
+  if [ "$COMPARE_MODE" -ne 1 ]; then
+    printf 'introduced'
+    return
+  fi
+
+  base_lock_content="$(git show "${BASE_REMOTE_REF}:${finding_lockfile_relpath}" 2>/dev/null)"
+  if [ -z "$base_lock_content" ]; then
+    # Tree (or this path within it) did not exist on the base branch at all
+    # — cannot be anything other than new, by this diff.
+    printf 'introduced'
+    return
+  fi
+
+  base_version="$(printf '%s\n' "$base_lock_content" | _lockfile_version_for "$finding_name")"
+  if [ -n "$base_version" ] && [ "$base_version" = "$finding_version" ]; then
+    printf 'pre-existing'
+  else
+    printf 'introduced'
+  fi
+}
 
 # Audit one dependency set. Returns 0 if clean or inconclusive, 1 on a real
-# finding. `$1` is a human label, `$2` the extra pip-audit flags that select
-# what to audit — empty for this workspace's installed environment, or
-# `-r <file>` for a requirements file exported from a skeleton lockfile.
+# finding that this diff introduced or upgraded to. `$1` is a human label,
+# `$2` the extra pip-audit flags that select what to audit — empty for this
+# workspace's installed environment, or `-r <file>` for a requirements file
+# exported from a skeleton lockfile. `$3` is this tree's uv.lock path
+# relative to the repo root, used to look up the SAME package's version on
+# the base branch (#1673) — never empty, every caller passes one.
 audit_deps() {
   label="$1"
   extra="$2"
+  lockfile_relpath="$3"
 
   for attempt in $(seq 1 "$attempts"); do
     # shellcheck disable=SC2086
@@ -108,9 +211,36 @@ audit_deps() {
       vuln_count="$(printf '%s' "$out" | jq '[.dependencies[].vulns[]?] | length')"
       pkg_count="$(printf '%s' "$out" | jq '.dependencies | length')"
       if [ "$vuln_count" -gt 0 ]; then
-        echo "::error::${label}: ${vuln_count} vulnerability(ies)."
+        introduced_count=0
+        preexisting_count=0
+        findings_file="$(mktemp)"
+        printf '%s' "$out" | jq -r '.dependencies[] | select(.vulns | length > 0) | "\(.name)\t\(.version)"' > "$findings_file"
+        # POSIX `while read` from a file (not a pipe) so counters set inside
+        # the loop survive it — a pipeline would run the loop in a subshell
+        # and lose every update the instant it exits.
+        while IFS="$(printf '\t')" read -r finding_pkg finding_ver; do
+          [ -z "$finding_pkg" ] && continue
+          verdict="$(_classify_finding "$finding_pkg" "$finding_ver" "$lockfile_relpath")"
+          if [ "$verdict" = "pre-existing" ]; then
+            preexisting_count=$((preexisting_count + 1))
+            echo "::warning::${label}: ${finding_pkg}@${finding_ver} has an advisory but is unchanged from ${BASE_REMOTE_REF}'s lockfile — pre-existing, not introduced by this diff (#1673)."
+          else
+            introduced_count=$((introduced_count + 1))
+            echo "::error::${label}: ${finding_pkg}@${finding_ver} — new to this tree or upgraded to this version by this diff (or a base-branch comparison was not possible)."
+          fi
+        done < "$findings_file"
+        rm -f "$findings_file"
+
         printf '%s' "$out" | jq '[.dependencies[] | select(.vulns | length > 0)]' 2>/dev/null | head -c 4000
-        return 1
+
+        if [ "$introduced_count" -gt 0 ]; then
+          echo "::error::${label}: ${introduced_count} vulnerability(ies) introduced or upgraded by this diff (${preexisting_count} more pre-existing, not counted against it)."
+          return 1
+        fi
+
+        preexisting_total=$((preexisting_total + preexisting_count))
+        echo "${label}: ${preexisting_count} vulnerability(ies) found, all pre-existing on ${BASE_REMOTE_REF} and unrelated to this diff — not blocking (#1673)."
+        return 0
       fi
       # State the population and the moment, so the green is falsifiable: a
       # pass over 0 packages and a pass over 92 look identical otherwise, and
@@ -142,6 +272,22 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 
 WORKSPACE_ABS=$(pwd -P)
+
+# Decide once, for the whole run, whether a base-branch comparison is even
+# possible (#1673 — see the docstring above `set -u`). `GITHUB_BASE_REF` is
+# only ever set by a `pull_request`/`pull_request_target` event; everywhere
+# else COMPARE_MODE stays 0 and every finding blocks, unchanged from before.
+BASE_REMOTE_REF=""
+COMPARE_MODE=0
+if [ -n "${GITHUB_BASE_REF:-}" ]; then
+  candidate="origin/${GITHUB_BASE_REF}"
+  if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+    BASE_REMOTE_REF="$candidate"
+    COMPARE_MODE=1
+  else
+    echo "::warning::py-dependency-audit: base branch is '${GITHUB_BASE_REF}' but '${candidate}' does not resolve locally (shallow checkout?) — cannot tell a pre-existing finding from one this diff introduced, so every finding will block, same as before #1673."
+  fi
+fi
 
 # shellcheck disable=SC2016
 ALL_LOCKS=$(find "$REPO_ROOT" \
@@ -195,9 +341,13 @@ for lock in $ALL_LOCKS; do
     "$REPO_ROOT"/*) rel=${dir_abs#"$REPO_ROOT"/} ;;
     *) rel="$dir_abs" ;;
   esac
+  # `find` was rooted at $REPO_ROOT, so $lock is always an absolute path
+  # under it — this strip is unconditional, unlike $rel's dir_abs case
+  # above (which also has to tolerate a symlink resolving outside the root).
+  lock_rel=${lock#"$REPO_ROOT"/}
 
   if [ "$dir_abs" = "$WORKSPACE_ABS" ]; then
-    audit_deps "pip-audit (workspace: ${rel})" "" || failed=1
+    audit_deps "pip-audit (workspace: ${rel})" "" "$lock_rel" || failed=1
     continue
   fi
 
@@ -231,7 +381,7 @@ for lock in $ALL_LOCKS; do
     if [ "${local_deps:-0}" -gt 0 ]; then
       echo "  (${rel}: ${local_deps} local path dependenc$([ "$local_deps" -eq 1 ] && echo y || echo ies) excluded -- first-party, audited in their own repo; their transitive dependencies are still scanned)"
     fi
-    audit_deps "pip-audit (${rel})" "-r $reqs" || failed=1
+    audit_deps "pip-audit (${rel})" "-r $reqs" "$lock_rel" || failed=1
   else
     # An export failure is "couldn't run", not "clean" — same discipline as a
     # transient pip-audit error, and it must never read as a pass.
@@ -255,5 +405,9 @@ if [ "$inconclusive" -ne 0 ]; then
   exit 2
 fi
 
-echo "py-dependency-audit: audited ${tree_count} tree(s), 0 blocking findings."
+if [ "$preexisting_total" -gt 0 ]; then
+  echo "py-dependency-audit: audited ${tree_count} tree(s), 0 blocking findings (${preexisting_total} pre-existing on ${BASE_REMOTE_REF}, unrelated to this diff — see #1673)."
+else
+  echo "py-dependency-audit: audited ${tree_count} tree(s), 0 blocking findings."
+fi
 exit 0
