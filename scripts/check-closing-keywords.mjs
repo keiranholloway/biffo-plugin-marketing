@@ -424,8 +424,16 @@ export function deliberateClosingReferences(text, { code = true } = {}) {
  *     carried only `Refs #133`. The issue closed on merge anyway. The lesson
  *     recorded then: *keeping a denial out of the commit is not sufficient —
  *     GitHub's linker reads the PR description text on its own.*
- *   - #1238 / #1021 (2026-08-03) — `- **Does not close #1021.**` in the body,
- *     `Refs #1021` in the commit, #1021 closed by the squash-merge.
+ *   - biffo-template#1238 / biffo-template#1021 (2026-08-03) — this repo's own
+ *     issues, not an external one: `- **Does not close #1021.**` in the body,
+ *     `Refs #1021` in the commit, #1021 closed by the squash-merge. (#1872
+ *     re-checked this entry against the wrong repo — tabsii-platform, where no
+ *     such pair exists at that date — and, not finding it there, filed a
+ *     doubt. Re-verified directly against biffo-template's own #1021/#1238:
+ *     the pairing, the quoted lines and the date all check out exactly as
+ *     recorded. The two bare `#N`s were ambiguous next to the other entries'
+ *     explicit `tabsii-platform#76`/`tabsii-crm#133` qualifiers, which is the
+ *     actual defect #1872 found — now spelled out with the repo name.)
  *
  * The recorded fix each time was a *practice*: "never write a closing keyword
  * in prose". Three occurrences produced a rule and no mechanism, and the
@@ -661,9 +669,10 @@ function formatNegatedFailure({ negated }) {
     ...negated.map((n) => `  ${n.source}, line ${n.lineNumber}: ${n.line}`),
     '',
     'This has now happened four times (tabsii-platform#76, tabsii-crm#133,',
-    '#1021 via #1238 — see #1245). Keeping the denial out of the commit',
-    'message is not enough: GitHub reads the PR description on its own — and',
-    '(#1334) a commit message on its own, independent of the body.',
+    'biffo-template#1021 via biffo-template#1238 — see #1245). Keeping the',
+    'denial out of the commit message is not enough: GitHub reads the PR',
+    'description on its own — and (#1334) a commit message on its own,',
+    'independent of the body.',
     '',
     'Rewrite the line so no closing keyword sits in front of the reference:',
     ...refs.map((r) => `  - \`Refs ${r}\`, or "leaves ${r} open"`),
