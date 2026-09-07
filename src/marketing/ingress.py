@@ -8,9 +8,25 @@ franchise RBAC model of its own) gets a Surface B that 403s for everybody. The
 *group name* is an instance decision the plugin cannot know.
 
 The real fix is keiranholloway/biffo-template#1517: a plugin declares a need,
-the instance supplies the value at install. That mechanism **does not exist
-yet**, so this module does not pretend to read it. What it does is remove the
-second copy, so that landing #1517 is one edit rather than a hunt.
+the instance supplies the value at install. **That has landed** (PR#1946) — but
+host-side, not as anything this module reads: an instance overrides the group
+via the env var ``BIFFO_PLUGIN_MARKETING_USER_INGRESS_REQUIRED_GROUP``, which
+``discover.py`` resolves before the shared plugin host's own ``group_gate``
+ever authorizes a caller (``plugin_host/mount.py``) — entirely upstream of
+this plugin's own code. So the *other* half of #46 turned out to matter more:
+this plugin's user surface (``user_app.py``) used to ALSO run its own,
+plugin-owned ``require_group`` check on top of the host's, built once at
+import time from the bare literal below. Once an instance overrode the
+host-side group, the host correctly admitted the caller and this plugin's own
+stale check 403'd them anyway. That second gate is now gone — ``user_app.py``
+relies solely on the host's ``group_gate`` and no longer calls
+``user_ingress_group()`` at all. What remains here is the manifest's
+*declared default* (``biffo.plugin.json``'s ``user_ingress.required_group``),
+kept in exactly one place in this plugin's Python source so a future
+hardcoded copy has one home to be caught against
+(``tests/test_marketing_ingress_group_guard.py``) and so the manifest's
+literal is reconciled against something rather than drifting on its own
+(``tests/test_marketing_manifest.py``).
 
 ## Why ``admin`` is a bare literal and this is not
 
@@ -33,11 +49,18 @@ asymmetry is the point, and it is written down here — and beside
 ``require_admin`` in ``admin_app.py`` and ``image_routes.py`` — rather than
 left to look like an oversight somebody helpfully "fixes" later.
 
-## What lands when #1517 does
+## Nothing in this plugin's source reads the group at all, deliberately
 
-``user_ingress_group()`` is the seam. Its body is the single line that changes:
-today it returns the declared literal; then it returns the value the instance
-supplied. Nothing else in this plugin's source names the group at all —
+There is no accessor here to call — ``USER_INGRESS_GROUP`` below is data for
+the two tests that reconcile it, not a value any request path consults.
+Before #46's fix this module also exported a ``user_ingress_group()``
+function and a reserved ``USER_INGRESS_GROUP_SETTING`` name, on the theory
+that #1517 would give a plugin a settings API to call at request time. #1517
+landed differently (PR#1946): the override is resolved **host-side**, in
+``discover.py``, before this plugin's ASGI app is ever invoked — so there was
+never going to be a call site here, and carrying an unused "reserved for
+later" accessor was worse than removing it once that became clear. Nothing
+else in this plugin's source names the group at all —
 ``tests/test_marketing_ingress_group_guard.py`` enumerates every violation and
 fails on the first new one.
 
@@ -67,32 +90,3 @@ from __future__ import annotations
 #: ``tests/test_marketing_manifest.py::test_the_user_surface_gates_on_the_one_declared_group``,
 #: so the two cannot drift the way #119's class does.
 USER_INGRESS_GROUP = "founder"
-
-#: The setting name this plugin will read once keiranholloway/biffo-template#1517
-#: gives instances a way to supply one. **Reserved, not declared** — see the
-#: module docstring for why the manifest carries no ``config`` block today. It
-#: lives here so that whoever wires #1517 up has one string to move rather than
-#: inventing a second, and so the name is reviewable now rather than chosen in
-#: a hurry later.
-USER_INGRESS_GROUP_SETTING = "user_ingress_group"
-
-
-def user_ingress_group() -> str:
-    """Which group may reach the user-facing surface on this installation.
-
-    **This is the one line keiranholloway/biffo-template#1517 changes.** Today
-    it returns the group this plugin declares in its manifest. Once an instance
-    can supply a value for the ``user_ingress_group`` setting, this returns
-    that instead, and ``USER_INGRESS_GROUP`` above stops being a value the
-    plugin decides.
-
-    A function rather than a bare constant *deliberately*: #1517 has not
-    specified how a plugin reads a resolved setting, and whatever that turns
-    out to be will be a call, not a module-level string. Call sites depending
-    on a callable now means the accessor lands inside this body and nowhere
-    else. See this module's docstring for what that assumption does and does
-    not cover — if #1517's resolution turns out to be **per-request** rather
-    than per-process, the change is larger than this body, because
-    ``user_app.require_user_ingress`` is built once at import time.
-    """
-    return USER_INGRESS_GROUP

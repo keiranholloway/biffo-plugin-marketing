@@ -74,16 +74,21 @@ from .fan_in_workflow import definition as fan_in_definition
 from .image_routes import router as image_router
 from .links import destination_with_utms, mint_token, tracked_url
 
-#: A bare literal ON PURPOSE, and not the same shape as
-#: `user_app.require_user_ingress` (#46) — do not "make these consistent".
+#: A bare literal ON PURPOSE — do not "make this consistent" with the user
+#: surface (#46).
 #:
 #: `admin` is a universal Biffo role: every platform has one by construction,
 #: which is what every `required_role: ["admin"]` write permission in
-#: `biffo.plugin.json` already assumes on every table. `founder` — the group the
-#: USER surface gated on — exists only on biffo-platform, and that is the whole
-#: defect #46 records. Only the second is instance vocabulary, so only the
-#: second is declared in the manifest's `config` block and routed through
-#: `ingress.py`.
+#: `biffo.plugin.json` already assumes on every table. `founder` — the group
+#: `user_app.py` used to also gate on, via its own now-removed plugin-side
+#: check — exists only on biffo-platform, and that mismatch was the whole
+#: defect #46 records. `user_app.py` no longer runs any plugin-owned group
+#: check at all (#46's fix): it relies solely on the shared plugin host's own
+#: `group_gate`, which resolves the group from `biffo.plugin.json`'s
+#: `user_ingress.required_group` (`ingress.USER_INGRESS_GROUP`), optionally
+#: overridden per instance (keiranholloway/biffo-template#1517/#1946). Nothing
+#: about that changes `admin_ingress`: it is universal vocabulary, so it stays
+#: a bare literal here, gated the same way it always was.
 #:
 #: Parameterising this one too would mint an instance setting every instance
 #: must set to the same value, and an unset required setting fails the install

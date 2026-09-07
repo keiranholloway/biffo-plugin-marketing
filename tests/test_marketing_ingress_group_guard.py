@@ -83,14 +83,21 @@ _MANIFEST = _ROOT / "biffo.plugin.json"
 #: reshaping the walk.
 _BANNED = {ingress.USER_INGRESS_GROUP}
 
-#: The one module allowed to spell the name out. Everything else must reach it
-#: through `ingress.user_ingress_group()`.
+#: The one module allowed to spell the name out. Nothing in this plugin's own
+#: source reaches it any other way any more — `user_app.py` used to, via a
+#: now-removed `ingress.user_ingress_group()` call (#46's fix); today only
+#: `test_marketing_manifest.py`/this file's own reconciliation read the
+#: constant.
 _HOME = "ingress.py"
 
 #: The one path in the manifest allowed to carry the value. The shared plugin
-#: host reads the gate from here, so this copy cannot simply be deleted today;
-#: `test_marketing_manifest.py` asserts it equals `ingress.USER_INGRESS_GROUP`
-#: so the two cannot drift, and #1517 is what removes the need for it.
+#: host reads the gate from here — this is the manifest's declared *default*,
+#: which an instance may override at the host level
+#: (`BIFFO_PLUGIN_MARKETING_USER_INGRESS_REQUIRED_GROUP`,
+#: keiranholloway/biffo-template#1517/#1946) without this repo changing at
+#: all, so this copy is permanent, not a placeholder #1517 removes the need
+#: for. `test_marketing_manifest.py` asserts it equals
+#: `ingress.USER_INGRESS_GROUP` so the two cannot drift.
 _MANIFEST_HOME = "user_ingress.required_group"
 
 

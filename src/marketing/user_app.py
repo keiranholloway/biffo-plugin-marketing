@@ -4,15 +4,25 @@ Mounted by the shared plugin host at ``/api/v1/plugins/marketing``, gated on a
 Cognito group before this app sees a request (ADR-0011 — authorization is a
 core concern, never plugin code).
 
-**Which group is an instance decision, not this plugin's (issue #46).** The
-name lives in exactly one place — ``ingress.USER_INGRESS_GROUP``, read through
-``ingress.user_ingress_group()`` — and ``biffo.plugin.json`` declares the need
-for it in its ``config`` block so an instance can supply its own once
-keiranholloway/biffo-template#1517 lands. Read ``ingress.py``'s module
-docstring before touching any of this; in particular it records **why
-``admin`` is deliberately still a bare literal** and must not be given the same
-treatment. What that file does not do, and this one must not either, is guess
-#1517's runtime accessor: the value below is still the declared literal.
+**Which group is an instance decision, not this plugin's (issue #46) — and
+this app does not gate on it at all.** ``ingress.py``'s ``USER_INGRESS_GROUP``
+still names the manifest's *declared default* (``biffo.plugin.json``'s
+``user_ingress.required_group``); keiranholloway/biffo-template#1517 landed
+(PR#1946) as a **host-side** mechanism — an instance overrides the default via
+``BIFFO_PLUGIN_MARKETING_USER_INGRESS_REQUIRED_GROUP``, resolved by
+``discover.py`` before the shared host's own ``group_gate`` ever authorizes a
+caller (``plugin_host/mount.py``). This app used to run a **second**,
+plugin-owned gate on top of that — ``require_group(ingress.user_ingress_group())``,
+built once at import time from the bare manifest default — which meant an
+instance that overrode the group away from ``founder`` was correctly admitted
+by the host and then 403'd by this app's own stale check anyway. That second
+gate is gone: this app now relies solely on the host's ``group_gate``, exactly
+as its own docstring already claimed authorization "is a core concern, never
+plugin code". ``biffo_plugin_sdk.user_serving``'s own module docstring says
+the same thing independently — ``require_group`` is for an ``isolated: true``
+plugin's own Lambda, not one mounted in the shared host. ``_forwarded_token``
+below only extracts the already-authorized caller's raw bearer token to
+forward to Core, which re-verifies it independently (ADR-0017 §3/§5).
 
 The declared value today is the estate's existing name for "an approved,
 ordinary product user" — both ``idea-scout`` and ``ideation`` gate their own
@@ -82,8 +92,10 @@ a bespoke choice: idea-scout's own ``idea_scout_build_types``/
 reason.
 
 **A real, accepted limitation this creates, broader than just this
-surface.** The routes in *this file* run behind ``require_user_ingress``, but the
-table permission itself does not know that — Core's manifest-declared
+surface.** The routes in *this file* are reachable only once the shared host's
+``group_gate`` has already admitted the caller into whichever group this
+installation's ``user_ingress`` resolves to, but the table permission itself
+does not know that — Core's manifest-declared
 ``api_routes`` (``GET /api/v1/plugins/marketing/campaigns`` etc.) are
 forwarded by the shared host **outside any group gate at all**
 (``plugin_host/forward.py``'s own docstring: placed there deliberately so an
@@ -134,24 +146,12 @@ from __future__ import annotations
 from typing import Any
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
-from biffo_plugin_sdk.user_serving import require_group
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
+from biffo_plugin_sdk.user_serving import FOUNDER_TOKEN_HEADER
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
 
-from . import admin_app, ingress, pipeline, principal_client
+from . import admin_app, pipeline, principal_client
 from .config import public_base_url_for
 from .links import tracked_url
-
-#: The user surface's group gate. The group NAME comes from `ingress`, which is
-#: the only place in this plugin's source that spells it out (#46) — never a
-#: literal here. Contrast `admin_app.require_admin`/`image_routes.require_admin`,
-#: which stay bare `require_group("admin")` on purpose; `ingress.py`'s module
-#: docstring has the full reasoning for why the two are treated differently.
-#:
-#: Built once at import time, as it always was. If keiranholloway/biffo-template#1517
-#: resolves settings per request rather than per process, this line has to move
-#: inside a dependency — noted in `ingress.user_ingress_group`'s docstring too,
-#: since that is the assumption most likely to be wrong.
-require_user_ingress = require_group(ingress.user_ingress_group())
 
 #: Every `_core`-shaped call site below must carry this literal prefix — see
 #: `tests/test_marketing_core_paths_guard.py`'s module docstring for why it
@@ -176,7 +176,35 @@ _LIST_PAGE_SIZE = 200
 #: never see `draft`/`researching`/`planned`/`generating` work in progress.
 _AVAILABLE_STATUSES = frozenset({"ready", "live"})
 
-router = APIRouter(dependencies=[Depends(require_user_ingress)])
+router = APIRouter()
+
+
+def _forwarded_token(
+    x_biffo_founder_token: str | None = Header(default=None, alias=FOUNDER_TOKEN_HEADER),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> str:
+    """The caller's raw bearer token, to forward to Core as `X-Biffo-User-Token`.
+
+    Deliberately **not** a `require_group`/`authorize` call (issue #46). This
+    app is mounted in the shared plugin host, not `isolated: true`
+    (`biffo_plugin_sdk.user_serving`'s own module docstring says a
+    host-mounted plugin must not run `require_group` at all — it would be a
+    second, plugin-owned authorization path). By the time a request reaches
+    this dependency, the host's `group_gate` has already verified the token
+    against Cognito and checked it against whichever group this installation's
+    `user_ingress` resolves to (`plugin_host/mount.py`, ADR-0011) — this only
+    extracts the already-authorized token, mirroring
+    `plugin_host/mount.py::_founder_token`'s own extraction shape (prefer the
+    raw `X-Biffo-Founder-Token`, fall back to a strict `Authorization: Bearer`).
+    Core re-verifies independently once this token is forwarded (ADR-0017
+    §3/§5) — this app never trusts it on the strength of the header alone.
+    """
+    token = (x_biffo_founder_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token.split(" ", 1)[1].strip()
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    return token
 
 
 def get_core_client() -> BiffoAPIClient:
@@ -188,13 +216,13 @@ def get_core_client() -> BiffoAPIClient:
 
 
 def get_campaign_client(
-    user: Any = Depends(require_user_ingress),
+    token: str = Depends(_forwarded_token),
 ) -> principal_client.PrincipalCoreClient:
     """Dual-auth client for this plugin's own generated-CRUD tables, carrying
     THIS caller's own forwarded token — same mechanism as `admin_app._core`
-    and `image_routes.get_campaign_client` (issue #27's fix), just built from
-    the user-ingress gate instead of the admin one."""
-    return principal_client.PrincipalCoreClient(user.token)
+    and `image_routes.get_campaign_client` (issue #27's fix), just sourced
+    from the already-host-authorized request instead of a plugin-owned gate."""
+    return principal_client.PrincipalCoreClient(token)
 
 
 def _core_error(exc: BiffoAPIError) -> HTTPException:
@@ -276,7 +304,7 @@ async def get_pack_route(
     request: Request,
     core_client: BiffoAPIClient = Depends(get_core_client),
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
-    user: Any = Depends(require_user_ingress),
+    token: str = Depends(_forwarded_token),
 ) -> dict[str, Any]:
     """The material a unit needs to actually publish this campaign: its
     guidance text, the latest **approved** copy, every existing asset
@@ -290,7 +318,7 @@ async def get_pack_route(
     campaign_id = admin_app._validated_campaign_id(campaign_id)
 
     campaign_resp = await admin_app._core(
-        "GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", user.token
+        "GET", f"{_INTERNAL_PREFIX}/campaigns/{campaign_id}", token
     )
     if campaign_resp.status_code == status.HTTP_404_NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found.")
@@ -307,7 +335,7 @@ async def get_pack_route(
     # serving fine start 404ing the moment an admin starts an edit — the
     # previously-approved copy is still sitting one row back and this is
     # exactly what a unit should still be served.
-    copy_artefact = await admin_app._latest_approved_artefact(campaign_id, "copy", user.token)
+    copy_artefact = await admin_app._latest_approved_artefact(campaign_id, "copy", token)
     if copy_artefact is None:
         # Collapsed to one outcome rather than admin_app's 409-for-proposed:
         # this surface cannot approve anything, so "exists but not approved yet"
