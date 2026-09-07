@@ -170,10 +170,18 @@ because `--auto` waits for ever on a check that cannot re-evaluate itself (a
 
 ## 6. Push honestly, and verify the remote has your commit
 
-- **Push with the exit status visible:** `git push origin HEAD; echo $?`. A pipe
-  (`git push | tail`) reports the pipe's status, not git's — a rejected push then
-  reads as success and the commit is silently lost. Never trust a "pushed"
-  message printed unconditionally after a pipe.
+- **Push with the exit status visible, and record the upstream:**
+  `git push -u origin HEAD; echo $?`. A pipe (`git push | tail`) reports the
+  pipe's status, not git's — a rejected push then reads as success and the
+  commit is silently lost. Never trust a "pushed" message printed
+  unconditionally after a pipe.
+- **The `-u` is not optional (biffo-template#1954).** `git worktree add -b
+<branch> <path> origin/dev` sets the new branch's upstream to `origin/dev`
+  by default — a plain `git push origin HEAD`, with no `-u`, never corrects
+  it. A branch left tracking `origin/dev` can be pushed, merged, and have its
+  own remote copy deleted, while `git branch -vv` never reports it `[gone]`
+  (the ref it is actually tracking never goes anywhere) — so `doctor --fix`
+  and every other tool reading that marker stays permanently blind to it.
 - **Confirm the remote actually has the commit before relying on it,** especially
   before merge: `git log origin/<branch> -1`. A green PR page is not proof your
   latest local commit reached it.

@@ -50,6 +50,35 @@ export BIFFO_ORIGINAL_CWD
 
 cd "$root"
 
+# `claim` never depends on the TypeScript CLI's own logic -- it is a pure
+# passthrough (`cli/src/commands/claim.ts`: `packagedScriptCommand({ script:
+# 'scripts/claim.sh' })`, raw argv forwarded unchanged) to a POSIX shell
+# script that needs only `gh` and `git`. Routing it through `tsx` anyway made
+# RELEASING a claim depend on a toolchain the release itself has nothing to
+# do with: in a worktree where `pnpm install` never completed in `cli/`, the
+# final `exec` below hits a missing `tsx` binary, exits 127 with no
+# reconciling action, and the caller sees a bare "not found" -- the claim/
+# label is left stale, silently blocking re-dispatch of the same issue. Five
+# confirmed instances since 2026-08-31 (biffo-fleet#1231), one costing ~1.25M
+# tokens for zero progress.
+#
+# `scripts/claim.sh` only ships in the template checkout (satellites and
+# instances get it via the published `@biffo/cli` package, never a root
+# copy -- see the claim.ts doc comment), so this dispatches to it directly,
+# unconditionally, whenever it is present at the repo root: eliminate the
+# dependency for this command entirely rather than merely detecting its
+# absence and failing louder. `sh` runs it explicitly rather than a bare
+# `exec` on the path, so the script's own executable bit is irrelevant here
+# too (`ensureExecutable` in packagedScriptCommand.ts exists to paper over
+# exactly that on the tsx path; this path never needs it).
+if [ "${1:-}" = "claim" ] && [ -f "$root/scripts/claim.sh" ]; then
+  shift
+  # Bare relative path, not "$root/scripts/claim.sh" -- interpreter-audit.sh
+  # can only statically resolve a literal `sh scripts/<name>.sh` target, and
+  # `cd "$root"` above already guarantees cwd is the repo root by this point.
+  exec sh scripts/claim.sh "$@"
+fi
+
 # Satellites (sibling apps, plugin repos, runner fleets) carry neither
 # `biffo.core.json` nor `cli/`. They DO carry `.biffo-shared-version`, written
 # by `scripts/shared-sync.sh` and naming the template core version their shared
