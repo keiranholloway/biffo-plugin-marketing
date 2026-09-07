@@ -330,6 +330,24 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --all-groups
+      # A distributed *.test.sh with no caller anywhere in this file is only
+      # half a guard: it ships, sits in the tree, and never runs, so CI is
+      # green because the check never executed rather than because it passed
+      # (biffo-plugin-marketing issue 193). Wired explicitly here, the same
+      # way biffo-template wires each self-test by name in its own workflow,
+      # because this repo does not yet carry template's `scripts/*.test.sh`
+      # auto-discovery step (`scripts/guard-self-test-wiring.sh`) — that
+      # reaches this repo via the ordinary shared-sync channel and should be
+      # wired in behind it once it does, so this class is caught
+      # automatically rather than one file at a time.
+      #
+      # Proves py-dependency-audit.sh distinguishes a finding this PR's diff
+      # actually introduced from one that was already present on the base
+      # branch unrelated to the diff — run before the real audit below, using
+      # the same `sh` interpreter that invokes it in production, with a
+      # stubbed `uv`/pip-audit so it needs no network access.
+      - name: py-dependency-audit classification — self-test
+        run: sh scripts/py-dependency-audit-classification.test.sh
       # Fails on a real advisory, but treats an unreachable PyPI/OSV as
       # INCONCLUSIVE rather than reddening a required check for an
       # infrastructure hiccup (#591, #743). The raw `uv run pip-audit` this
