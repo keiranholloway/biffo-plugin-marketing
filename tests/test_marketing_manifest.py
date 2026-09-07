@@ -68,19 +68,19 @@ def test_the_user_surface_is_declared_and_points_at_a_real_app() -> None:
 
 
 def test_the_user_surface_gates_on_the_one_declared_group() -> None:
-    """The manifest's copy and the code's copy must agree.
+    """The manifest's declared default and `ingress.py`'s copy must agree.
 
-    The shared plugin host reads the gate from the manifest; `user_app.py`
-    builds its FastAPI dependency from `ingress.user_ingress_group()`. Those
-    are two different readers of one decision, and #46 is what happens when
-    they are two independent literals instead — the same "adopted at some call
-    sites, not all" shape as this repo's #119.
-
-    So `ingress.py` holds the name and this reconciles the manifest against it.
-    Once keiranholloway/biffo-template#1517 lands, the instance supplies the
-    value for the `user_ingress_group` setting declared below and this
-    assertion is what tells whoever makes that change that the manifest key has
-    to move too.
+    The shared plugin host is the ONLY thing that gates on this value —
+    `user_app.py` used to also build its own FastAPI dependency from it
+    (`ingress.user_ingress_group()`), and #46 was what happened when an
+    instance overrode the host-side group and this plugin's own stale second
+    copy kept rejecting the now-correctly-admitted caller anyway. That second
+    reader is gone (`user_app.py` no longer calls into `ingress.py` at all);
+    this assertion remains because `ingress.py`'s `USER_INGRESS_GROUP` is still
+    the one place a future hardcoded copy in this plugin's Python source would
+    be caught by `test_marketing_ingress_group_guard.py`, and this is what
+    keeps THAT constant from silently drifting from the manifest key the host
+    actually reads.
     """
     assert _raw()["user_ingress"]["required_group"] == ingress.USER_INGRESS_GROUP
 

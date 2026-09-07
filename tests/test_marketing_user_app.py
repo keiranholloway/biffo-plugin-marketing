@@ -33,7 +33,7 @@ from biffo_plugin_sdk import BiffoAPIError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from marketing import admin_app, ingress, principal_client, user_app
+from marketing import admin_app, principal_client, user_app
 
 _CAMPAIGN = "b3f1c0de-0000-4000-8000-0000000000a1"
 _CORE_API_URL = "https://core.invalid"
@@ -41,22 +41,12 @@ _BASE_URL = "https://dev.tabsii.com"
 
 #: The forwarded token the fake caller carries. Deliberately not named after
 #: any group (#46) — what matters is that THIS token reaches Core, not who it
-#: belongs to.
+#: belongs to. This app no longer runs any plugin-owned group check at all
+#: (#46's fix): the shared plugin host's own `group_gate` is the only
+#: authorization this token has been through by the time `user_app.py` sees
+#: it, so the fixtures below carry a bare token, never a fake caller shaped
+#: like a verified, group-checked identity.
 _USER_JWT = "user-ingress-jwt"
-
-
-def _ingress_user() -> Any:
-    """A caller carrying whatever group the user surface gates on.
-
-    `ingress.USER_INGRESS_GROUP`, not a literal (#46): a fixture that names the
-    group itself would keep passing against a stale gate the moment
-    keiranholloway/biffo-template#1517 moves the real value, and
-    `test_marketing_ingress_group_guard` fails on the literal for that reason."""
-    return type(
-        "U",
-        (),
-        {"sub": "unit-1", "groups": [ingress.USER_INGRESS_GROUP], "token": _USER_JWT},
-    )()
 
 
 class _FakeCoreClient:
@@ -105,7 +95,7 @@ class _FakeCampaignClient:
 def _app(*, core_client: Any, campaign_client: _FakeCampaignClient) -> FastAPI:
     app = FastAPI()
     app.include_router(user_app.router)
-    app.dependency_overrides[user_app.require_user_ingress] = _ingress_user
+    app.dependency_overrides[user_app._forwarded_token] = lambda: _USER_JWT
     app.dependency_overrides[user_app.get_core_client] = lambda: core_client
     app.dependency_overrides[user_app.get_campaign_client] = lambda: campaign_client
     return app
@@ -209,6 +199,73 @@ def test_lists_only_ready_and_live_campaigns() -> None:
     assert resp.status_code == 200
     ids = {c["id"] for c in resp.json()}
     assert ids == {"c-ready", "c-live"}
+
+
+def test_router_declares_no_group_dependency() -> None:
+    """#46: `router = APIRouter()`, not `APIRouter(dependencies=[Depends(...)])`.
+
+    The removed `require_user_ingress` gate lived exactly there — a
+    router-level dependency built once at import time from a hardcoded group.
+    This guards against that shape quietly coming back, independent of
+    whether any individual route happens to exercise it."""
+    assert user_app.router.dependencies == []
+
+
+def test_a_request_reaches_the_route_with_no_group_claim_at_all() -> None:
+    """#46's actual bug: this app used to run its OWN `require_group` check —
+    built once at import time from the hardcoded literal `founder` — on top of
+    the shared plugin host's own group_gate. An instance that overrode the
+    host-side group away from `founder` (`BIFFO_PLUGIN_MARKETING_USER_INGRESS_REQUIRED_GROUP`,
+    biffo-template#1517/#1946) was correctly admitted by the host and then
+    403'd by this app's stale internal check anyway.
+
+    Proven here by calling a route directly, `_forwarded_token` deliberately
+    NOT overridden (every other test in this file overrides it) and no
+    `cognito:groups` claim anywhere in the request — just a bare
+    `X-Biffo-Founder-Token` header value. If `user_app.py` still verified that
+    header against Cognito and checked a group, this would 401 (no real JWT)
+    or 403 (no matching group). It succeeds instead, because this app no
+    longer authorizes at all — that is now solely the shared plugin host's
+    job, upstream of this ASGI app ever running."""
+    campaign_client = _FakeCampaignClient()
+    campaign_client.get = _paged_campaigns([_campaign_row(id="c-live", status="live")])  # type: ignore[method-assign]
+    app = FastAPI()
+    app.include_router(user_app.router)
+    app.dependency_overrides[user_app.get_campaign_client] = lambda: campaign_client
+    client = TestClient(app)
+
+    resp = client.get("/campaigns", headers={"X-Biffo-Founder-Token": _USER_JWT})
+
+    assert resp.status_code == 200
+    assert [c["id"] for c in resp.json()] == ["c-live"]
+
+
+@pytest.mark.parametrize(
+    ("founder_header", "authorization_header", "expected"),
+    [
+        # The raw custom header, bare — the shape `plugin_host/mount.py::_founder_token`
+        # prefers on the host side, which this mirrors.
+        (_USER_JWT, None, _USER_JWT),
+        # The custom header, "Bearer "-prefixed.
+        (f"Bearer {_USER_JWT}", None, _USER_JWT),
+        # No custom header: falls back to a strict `Authorization: Bearer`.
+        (None, f"Bearer {_USER_JWT}", _USER_JWT),
+        # The custom header wins when both are present.
+        (_USER_JWT, "Bearer someone-elses-token", _USER_JWT),
+        # `Authorization` with a non-Bearer scheme is not a fallback (matches
+        # `require_group`'s own SDK behaviour this replaces).
+        (None, "Basic dXNlcjpwYXNz", ""),
+        # Neither header present.
+        (None, None, ""),
+    ],
+)
+def test_forwarded_token_extraction(
+    founder_header: str | None, authorization_header: str | None, expected: str
+) -> None:
+    """`_forwarded_token` (#46) only extracts the header value — it never
+    verifies the token or checks a group, since the shared plugin host's own
+    `group_gate` has already done both before this app sees the request."""
+    assert user_app._forwarded_token(founder_header, authorization_header) == expected
 
 
 def _paged_campaigns(rows: list[dict[str, Any]]):
