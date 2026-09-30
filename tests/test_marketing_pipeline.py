@@ -1190,3 +1190,17 @@ def test_channel_key_motions_and_the_map_agree_on_a_healthy_plan() -> None:
     }
 
     assert channel_key_motions(plan) == channel_plan_channel_map(plan)
+
+
+def test_tool_call_arguments_survives_pathologically_nested_json():
+    from marketing.pipeline import _tool_call_arguments
+
+    messages = [
+        {
+            "tool_calls": [
+                {"function": {"name": "emit", "arguments": "[" * 100_000}},
+            ]
+        }
+    ]
+
+    assert _tool_call_arguments(messages, "emit") is None

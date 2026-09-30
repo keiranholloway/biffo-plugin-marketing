@@ -379,7 +379,7 @@ def _tool_call_arguments(messages: list[dict[str, Any]], tool_name: str) -> Any:
             if isinstance(arguments, str):
                 try:
                     found = json.loads(arguments)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, RecursionError):
                     continue
             else:
                 found = arguments
