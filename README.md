@@ -264,21 +264,15 @@ with nothing anywhere reporting a problem. The registry sync re-derives
 whatever the manifest says, so it propagates the stale value rather than
 catching it. Bump both.
 
-Note that the registry entry is published by `publish-registry.yml` when
-`biffo.plugin.json` changes on `dev`, not by this workflow on a tag — the
-marketplace reflects `dev`, and tagging is an independent decision.
+Note that the registry picks the version up from `biffo.plugin.json` via its
+own hourly pull sync, not from this workflow or the tag.
 
 ### Getting into the plugin store
 
-`publish-registry.yml` publishes your entry to the Biffo plugin registry, which
-is what the portal's plugin store reads. It needs a `REGISTRY_PUBLISH_TOKEN`
-secret (a fine-grained PAT with `contents: write` on the registry repo) and
-warns-and-skips without one, so check its header comment before assuming your
-plugin will appear.
-
-If your repo is public you may not need the token: the registry also runs a
-credential-free pull-based sync over the repos listed in its `sources.json`.
-Adding yours there is enough.
+Nothing in this repo publishes to the plugin registry. The registry runs an
+hourly, credential-free pull sync (`sync-plugins.yml`) over the repos listed in
+its `sources.json`; adding your repo there is enough. A version bump reaches the
+store on the next sync.
 
 ### PyPI publishing is opt-in
 

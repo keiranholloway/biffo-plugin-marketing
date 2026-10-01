@@ -43,10 +43,9 @@ name: Release
 # "biffo-plugin-sdk dependency" section for what that means for `uv sync`
 # before the SDK's first release lands.
 #
-# Registry publishing is NOT done here. `publish-registry.yml` owns that,
-# triggered by `biffo.plugin.json` changing on `dev` — i.e. when the version is
-# merged, not when it is tagged. The marketplace should reflect `dev`, and
-# tagging is an independent decision.
+# Registry publishing is NOT done here. The plugin registry pulls from this
+# repo on its own hourly sync (its `sync-plugins.yml`), so nothing in this repo
+# pushes to it and no registry credential is needed.
 #
 # Prefer PyPI Trusted Publishing (OIDC) over a long-lived PYPI_API_TOKEN
 # when you set this up: it needs no stored secret to rotate or leak. The
