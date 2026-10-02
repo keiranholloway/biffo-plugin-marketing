@@ -83,7 +83,7 @@ line-length = 100
 # place: ANN401 rejects the `Any` in a Pydantic mode="before" validator, which
 # is the one signature where `Any` is genuinely correct.
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "B", "S", "UP"]
+select = ["E", "F", "I", "N", "W", "B", "S", "UP", "TID251"]
 ignore = [
   "S101", # allow assert in tests
 ]
@@ -103,6 +103,11 @@ extend-immutable-calls = [
   "fastapi.Form",
   "fastapi.File",
 ]
+
+# Plugin code must import by package name: a `src.` import resolves here but
+# fails once vendored into an instance, where services/api's `src` claims the name.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"src".msg = "Import by package name (`from <pkg>.<mod> import x`), not through `src.`: it fails once the plugin is vendored into an instance."
 
 [tool.ruff.lint.per-file-ignores]
 # S101: assert is the normal pytest idiom. S106: fakes.py's mock
