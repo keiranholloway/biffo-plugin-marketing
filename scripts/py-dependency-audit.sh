@@ -171,7 +171,14 @@ _classify_finding() {
     return
   fi
 
-  base_version="$(printf '%s\n' "$base_lock_content" | _lockfile_version_for "$finding_name")"
+  # Read from a regular file, not a pipe: `_lockfile_version_for`'s awk `exit`s
+  # on its first match and closes its stdin, so a pipe with `printf` still
+  # writing into it gets SIGPIPE and dash reports a stray "printf: I/O error"
+  # into the log (#2120 -- the same mechanism #1995 removed from the dump path).
+  base_lock_file="$(mktemp)"
+  printf '%s\n' "$base_lock_content" > "$base_lock_file"
+  base_version="$(_lockfile_version_for "$finding_name" < "$base_lock_file")"
+  rm -f "$base_lock_file"
   if [ -n "$base_version" ] && [ "$base_version" = "$finding_version" ]; then
     printf 'pre-existing'
   else
@@ -231,7 +238,20 @@ audit_deps() {
         done < "$findings_file"
         rm -f "$findings_file"
 
-        printf '%s' "$out" | jq '[.dependencies[] | select(.vulns | length > 0)]' 2>/dev/null | head -c 4000
+        # Written to a regular file first, then truncated with `head -c` from
+        # that file rather than from a live pipe -- the same reason
+        # `findings_file` above does it. `head -c 4000` piped directly onto
+        # `jq`'s output closes its read end the instant it has enough bytes;
+        # if the filtered JSON exceeds 4000 bytes, jq (and on a big enough
+        # payload, the upstream `printf` still writing into jq's now-closed
+        # stdin) can get SIGPIPE and dash's builtin `printf` reports that as a
+        # stray "printf: I/O error" line into an otherwise-clean, passing log
+        # (#1995). Reading a finished, regular file has no concurrent writer
+        # to break, so there is no pipe left for `head` to close early on.
+        dump_file="$(mktemp)"
+        printf '%s' "$out" | jq '[.dependencies[] | select(.vulns | length > 0)]' 2>/dev/null > "$dump_file"
+        head -c 4000 "$dump_file"
+        rm -f "$dump_file"
 
         if [ "$introduced_count" -gt 0 ]; then
           echo "::error::${label}: ${introduced_count} vulnerability(ies) introduced or upgraded by this diff (${preexisting_count} more pre-existing, not counted against it)."
@@ -327,6 +347,49 @@ for lock in $ALL_LOCKS; do
   fi
 done
 
+# ## Export the lockfile that is classified (#2120)
+#
+# `_classify_finding` compares a flagged version against `<tree>/uv.lock` on
+# the base branch, so the export MUST read `<tree>/uv.lock` too. It did not for
+# a tree that is a uv WORKSPACE MEMBER: `uv export` run inside a member walks
+# up to the workspace root and exports the ROOT's `uv.lock`. The audit then
+# scanned one lockfile and classified against another -- a pre-existing root
+# advisory read as "introduced by this diff" for every member tree, and the
+# member's own lock was never audited at all (biffo-platform PR 197).
+#
+# The cause is removed rather than detected: the tree's `pyproject.toml` and
+# `uv.lock` are staged ALONE in a scratch directory outside the repository, so
+# there is no workspace above them for uv to find. The bytes exported are then
+# the bytes at the path the classifier reads, by construction -- no membership
+# detection, no second lookup that could disagree. `--frozen` reads the lock
+# without re-resolving, so `[tool.uv.sources]` entries (path, workspace) need
+# not resolve from the scratch directory; verified against uv 0.11.
+#
+# `$1` is the tree directory, the remaining arguments are `uv export` flags.
+# Returns non-zero -- never a partial success -- if the tree has no
+# pyproject.toml/uv.lock to stage or the scratch directory cannot be made or
+# sits inside the repository (a TMPDIR under the repo would put the workspace
+# back above the copy and silently restore the defect).
+_export_own_lock() {
+  eo_dir="$1"
+  shift
+  eo_scratch="$(mktemp -d)" || return 1
+  case "$(cd "$eo_scratch" && pwd -P)/" in
+    "${REPO_ROOT}"/*)
+      rm -rf "$eo_scratch"
+      return 1
+      ;;
+  esac
+  if ! cp "$eo_dir/pyproject.toml" "$eo_dir/uv.lock" "$eo_scratch/" 2>/dev/null; then
+    rm -rf "$eo_scratch"
+    return 1
+  fi
+  (cd "$eo_scratch" && uv export --frozen "$@")
+  eo_rc=$?
+  rm -rf "$eo_scratch"
+  return "$eo_rc"
+}
+
 # Audit each discovered tree. The workspace's own lockfile is audited via the
 # INSTALLED environment `uv sync` already produced (unchanged from before —
 # `uv run pip-audit` with no `-r`). Every other discovered lockfile is not an
@@ -370,13 +433,13 @@ for lock in $ALL_LOCKS; do
   # audited -- verified on `services/ideation`, where the export keeps 25
   # packages including three carried `via biffo-plugin-sdk`. So the answer this
   # gate gives is unchanged for every package an advisory can actually be about.
-  if (cd "$dir" && uv export --frozen --no-dev --no-emit-project --no-emit-local) >"$reqs" 2>/dev/null && [ -s "$reqs" ]; then
+  if _export_own_lock "$dir" --no-dev --no-emit-project --no-emit-local >"$reqs" 2>/dev/null && [ -s "$reqs" ]; then
     # Report what was skipped rather than skipping it quietly: "audited
     # everything except the bits we could not" must never read the same as
     # "audited everything", which is the failure this whole file exists to
     # fight. Counted from the same lockfile, so the number is the tree's, not
     # a guess.
-    local_deps=$( (cd "$dir" && uv export --frozen --no-dev --no-emit-project) 2>/dev/null \
+    local_deps=$(_export_own_lock "$dir" --no-dev --no-emit-project 2>/dev/null \
       | grep -cE '^-e |@ file://' || true )
     if [ "${local_deps:-0}" -gt 0 ]; then
       echo "  (${rel}: ${local_deps} local path dependenc$([ "$local_deps" -eq 1 ] && echo y || echo ies) excluded -- first-party, audited in their own repo; their transitive dependencies are still scanned)"

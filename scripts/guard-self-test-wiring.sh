@@ -131,4 +131,40 @@ if [ "$total_accounted" -ne "$guard_count" ]; then
   exit 1
 fi
 
+# ## Plugin-verify lane (#1926)
+#
+# `biffo plugin verify` (cli/src/commands/plugin-verify.ts) is a real-
+# execution conformance harness that raises a real Postgres and runs every
+# implemented biffo_plugin_sdk.conformance check against it — see
+# cli/src/lib/plugin-verify/run-plugin-verify.ts's own doc comment: "CI's own
+# step is `sh scripts/biffo.sh plugin verify` and contains no logic of its
+# own." It is not a ${GUARD_DIR}/*.test.sh file, so the glob-and-run logic
+# above never sees it: deleting that one `run:` line from a plugin repo's CI
+# would leave the lane with zero callers and nothing above would notice —
+# the exact #1705 shape, for a CLI-subcommand lane rather than a shell-script
+# guard.
+#
+# Scoped to repos that actually ship the lane: only a repo carrying
+# biffo.plugin.json (a plugin repo, or the plugin-template skeleton itself)
+# is expected to invoke it, so this check is a no-op everywhere else
+# (biffo-template's own root, every sibling app and its skeleton) rather
+# than a false failure there.
+if [ -f biffo.plugin.json ]; then
+  plugin_verify_wired=0
+  for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
+    [ -f "$wf" ] || continue
+    if grep -v '^[[:space:]]*#' "$wf" | grep -qF 'scripts/biffo.sh plugin verify'; then
+      plugin_verify_wired=1
+      break
+    fi
+  done
+
+  if [ "$plugin_verify_wired" -eq 0 ]; then
+    echo "FAIL: this repo carries biffo.plugin.json (a plugin repo) but no ${WORKFLOW_DIR}/*.yml file invokes 'scripts/biffo.sh plugin verify' in a real (non-comment) line — the real-execution conformance harness (biffo-template#1523/#1924) would run with zero callers. Add back a 'run: sh scripts/biffo.sh plugin verify' step to this repo's CI (biffo-template#1926)." >&2
+    exit 1
+  fi
+
+  echo "Plugin-verify wiring: biffo.plugin.json present, and 'scripts/biffo.sh plugin verify' is invoked in ${WORKFLOW_DIR}."
+fi
+
 exit 0
