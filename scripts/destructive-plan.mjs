@@ -66,6 +66,11 @@ export const STATEFUL_RESOURCE_TYPES = [
   // it passes the same test that keeps this list small — Terraform rebuilds
   // it from this repo, unattended.
   'aws_route53_zone',
+  // Keys. Destroying a KMS key only SCHEDULES deletion, so it reads as harmless
+  // in a plan — but once the window passes, everything the key encrypts (e.g.
+  // a 365-day CloudWatch log group) is permanently undecryptable. Nothing in
+  // this repo can recreate the key material.
+  'aws_kms_key',
 ]
 
 /**
