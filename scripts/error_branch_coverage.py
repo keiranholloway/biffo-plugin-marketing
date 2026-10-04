@@ -204,7 +204,57 @@ class Branch:
     label: str
 
     def key(self) -> str:
-        return f"{self.path}:{self.kind}:{self.label}"
+        """The ratchet's identity for this branch. Must not collide (#2026).
+
+        Two textually-identical branches in one file — two different
+        functions each with a bare `except ValueError:` — are common: the
+        vocabulary of exception type names is finite and heavily reused, and
+        `label` for a `fallback` is truncated to 50 chars on top of that. A
+        key of `path:kind:label` alone collapses both onto one entry, so a
+        second, genuinely new, never-executed branch sharing a label with an
+        already-baselined one in the same file was silently absorbed into
+        that entry: it was printed (the analyser saw it) but never marked
+        NEW, and `--check` exited 0 over an unverified branch nobody had
+        looked at. Confirmed live: a second unexecuted `except ValueError`
+        added in the same file as an already-baselined one produced no NEW
+        marker and exit 0, while a distinctly-labeled addition in the same
+        run was correctly flagged — isolating the cause to the missing
+        position, not to anything else about the change.
+
+        `line` is included to close that gap, chosen deliberately over an
+        occurrence ordinal among same-labeled branches in the file (e.g.
+        "2nd `except ValueError` in this file"). Both carry a cost and
+        neither is free:
+
+        - **Line number** (chosen): a new branch cannot collide with an
+          existing key at all, short of landing on the exact line number a
+          deleted branch used to occupy — vanishingly unlikely, since that
+          requires a line-count-preserving edit that puts an unrelated new
+          branch at that exact spot. The cost is churn: an unrelated edit
+          that shifts a baselined branch down a few lines (an import added
+          above it, a docstring reflowed) makes its key change too, so it
+          reads as NEW and the gate cries wolf until `--write` re-accepts
+          it. `unexecuted()`'s own docstring already documents that this
+          script's line-based coverage join is shift-sensitive in exactly
+          this way, so this does not introduce a new fragility, only extends
+          an existing one from the coverage join into the baseline key.
+        - **Occurrence ordinal** (rejected): stable under a line shift
+          elsewhere in the file, but ambiguous under reordering. If a
+          baselined branch is removed and an unrelated new same-labeled
+          branch appears earlier in the file than a survivor, the survivor's
+          ordinal shifts onto the new branch's — reproducing this exact
+          issue by a different route, because an ordinal is still a
+          position, just a fragile relative one instead of a stable
+          absolute one.
+
+        Level reached: 3 (fail-closed) rather than 4 (detect-only) — a
+        distinct line number for every distinct AST node means a genuinely
+        new branch cannot be absorbed into an existing entry at all, not
+        merely flagged more often. Changing this format means every
+        instance's committed baseline must be regenerated; see the PR that
+        introduced this comment for the exact command.
+        """
+        return f"{self.path}:{self.line}:{self.kind}:{self.label}"
 
 
 def _handler_label(node: ast.ExceptHandler) -> str:
@@ -351,6 +401,91 @@ def load_baseline(baseline: Path) -> dict | None:
     return json.loads(baseline.read_text())
 
 
+def _legacy_key(k: str) -> str:
+    """A v2 `path:line:kind:label` key rendered in v1 `path:kind:label` form.
+
+    Migration shim for #2037: the trusted script that computes `keys` is
+    always fetched from the default branch, but `--baseline` is read from the
+    checkout under test, so a PR that changes `Branch.key()`'s shape (#2026,
+    #2031) is comparing keys the trusted script emits in the OLD format
+    against a baseline it wrote in the NEW format — every baselined branch
+    then reads NEW and the gate deadlocks structurally, not on anything wrong
+    in the PR's diff. Normalising each already-baselined key to its v1 form
+    lets a v1-computing script recognise a v2-shaped baseline entry.
+
+    `split(":", 2)` rather than a regex: `label` legitimately contains colons
+    (a bare handler's label is `except:`) while `kind` is never numeric and a
+    repo-relative `path` carries no colon, so "is the second field all
+    digits" is an unambiguous discriminator between the two shapes. A v1 key
+    is returned unchanged (its second field is `except`/`fallback`, never a
+    digit), so this is a no-op for every baseline still in v1 form.
+
+    Retire this — and the union in `main()` that calls it — once every
+    inheriting repo's baseline has been regenerated as v2. Kept only for the
+    duration of that migration: while it is in effect, a genuinely new v2
+    branch that collides on `path:kind:label` with an already-baselined
+    branch at a different line is absorbed as "known" rather than flagged —
+    reintroducing #2026's collision bug for exactly as long as this shim
+    lives.
+
+    EXPIRY: tracked by keiranholloway/biffo-template#2056 (the original
+    tracking issue, #2037, was auto-closed by the shim's own landing PR
+    before Milestones 2/3 were done — #2056 is its replacement). A repo
+    still carrying this shim after that issue closes is exposed to the
+    collision above and should be flagged by any doctor/sweep check that
+    reads this docstring — grep for "EXPIRY" in this function.
+    """
+    parts = k.split(":", 2)
+    if len(parts) == 3 and parts[1].isdigit():
+        return f"{parts[0]}:{parts[2]}"
+    return k
+
+
+def _is_v2_key(k: str) -> bool:
+    """True when `k` is a v2 `path:line:kind:label` key (second field all digits)."""
+    return _legacy_key(k) != k
+
+
+def _known(keys: list[str], recorded: set[str]) -> tuple[set[str], bool]:
+    """Which of this script's v2 `keys` the baseline already accepts.
+
+    Returns `(known, used_v1)`. `used_v1` is True when the baseline holds ANY
+    entry still in v1 form — the caller announces that, so accepting a v1
+    baseline is never silent.
+
+    Three routes to "known", each a deliberate, separate rule:
+
+    - the exact key, always (a v2 baseline's full collision-proof match, #2026);
+    - the key's v1 form, ONLY against baseline entries that are themselves v1
+      (#2102). This is the mirror of #2037's shim, which lets a v1-computing
+      script accept a v2 baseline. `shared-sync` ships this v2 script into
+      satellites whose own baseline is still v1, and it cannot regenerate that
+      baseline (it needs a coverage run inside the satellite), so without this
+      every baselined branch read NEW and the sync PR failed. Restricting it to
+      v1 entries means a v2 baseline never gains the looser match: a genuinely
+      new same-labeled branch in a v2 baseline is still NEW;
+    - `_legacy_key` of a recorded v2 entry, for #2037's opposite direction
+      (unchanged here; it is a no-op for a script that computes v2 keys).
+
+    While a v1 baseline is accepted, every branch sharing a `path:kind:label`
+    with one v1 entry is absorbed by it — #2026's collision bug, for exactly as
+    long as that baseline stays v1. That is why the acceptance is announced.
+
+    Retire the v1 route (`v1_entries` and the notice in `main()`) once every
+    inheriting repo's baseline has been regenerated as v2 (`--write`).
+
+    EXPIRY: same as `_legacy_key` above — tracked by
+    keiranholloway/biffo-template#2056 (retire once every inheriting repo's
+    baseline is v2). #2102 added the v1-baseline half of this shim; a repo
+    still carrying it after #2056 closes is exposed to the collision above.
+    Grep for "EXPIRY" in this function.
+    """
+    v1_entries = {r for r in recorded if not _is_v2_key(r)}
+    known = set(recorded) | {_legacy_key(r) for r in recorded}
+    known |= {k for k in keys if _legacy_key(k) in v1_entries}
+    return known, bool(v1_entries)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true", help="record the current set as baseline")
@@ -481,8 +616,28 @@ def main() -> int:
         print(f"unexecuted error branches: {len(keys)}  (no baseline yet; {coverage_note})")
         return 0
 
-    known = set(baseline.get("branches", []))
+    # `keys` (above) comes from THIS script, always fetched from the trusted
+    # default branch. `recorded` comes from --baseline, read from the
+    # checkout under test — which may already be in the newer key format
+    # this script does not compute yet. Widen membership with each
+    # baselined key's legacy-normalised form so a v1-computing script still
+    # recognises a v2-shaped baseline entry (#2037 migration shim; see
+    # `_legacy_key`). `keys` itself is left untouched.
+    recorded = set(baseline.get("branches", []))
+    known, used_v1 = _known(keys, recorded)
     new = [k for k in keys if k not in known]
+    if used_v1:
+        # #2102: accepted, but never silently — a v1 entry cannot tell two
+        # same-labeled branches in one file apart, so the ratchet is weaker
+        # until the baseline is regenerated.
+        print(
+            "::warning::error-branch coverage: baseline holds v1 keys "
+            "(path:kind:label) — accepted for now, but same-labeled branches "
+            "in one file are indistinguishable until it is migrated. "
+            "Run: python scripts/error_branch_coverage.py --write "
+            "(after a coverage run) and commit the baseline.",
+            file=sys.stderr,
+        )
 
     print(
         f"unexecuted error branches: {len(keys)}  "

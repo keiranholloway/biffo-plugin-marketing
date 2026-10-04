@@ -93,10 +93,13 @@ fi
 # BIFFO_SKIP_CLAIM_GUARD -- narrow, claim-only escape hatch (#1327). Before
 # this, the only documented way past a false positive here was
 # BIFFO_SKIP_VERIFY at the top of this file, which does not target the claim
-# guard: it skips the WHOLE gate -- ruff, pyright, bandit, gitleaks,
-# rewrite-scope, this guard, everything. An agent reading "skip the claim
-# guard" reasonably reaches for the only hatch documented and gets "skip
-# everything" instead; one did, in the session #1327 was filed from. This
+# guard: it skips the WHOLE gate -- ruff, pyright, bandit, rewrite-scope,
+# this guard, everything. gitleaks is deliberately not named here: verify.sh
+# only runs it when the binary is installed locally and reports "APPLICABLE
+# BUT NOT RUN" otherwise, so it is not a member of the gate this variable
+# reliably skips (#2038). An agent reading "skip the claim guard" reasonably
+# reaches for the only hatch documented and gets "skip everything" instead;
+# one did, in the session #1327 was filed from. This
 # variable bypasses exactly the `claim --guard` call below and nothing else --
 # rewrite-scope-check, the pg-test block gate and `verify` all still run.
 branch=$(git symbolic-ref --quiet --short HEAD) || branch=""
@@ -166,4 +169,22 @@ fi
 # without the file passed its pre-push having checked nothing, which is the
 # same defect one level up from the one #855 recorded. A gate that cannot run
 # is not a gate that passed.
-exec sh scripts/biffo.sh verify
+#
+# Not a bare `exec` (biffo-template#1985): git's own generic
+# "error: failed to push some refs" line is printed by git itself, after this
+# hook exits, and is the literal last thing in a truncated-tail read of a long
+# agent transcript. Nothing distinguished it from a real auth/network
+# rejection -- three same-day dispatches on tabsii-platform#1403 diagnosed and
+# "fixed" a token before noticing the real cause was a local gate. verify.sh's
+# own failure text (above) already names the cause; this adds one more line,
+# deliberately placed as close as this hook can get to git's trailing output,
+# so a reader who only sees the last few lines still sees it.
+sh scripts/biffo.sh verify
+verify_status=$?
+if [ "$verify_status" -ne 0 ]; then
+  printf '\n\033[31m>>> pre-push: BLOCKED BY THE LOCAL GATE ABOVE, not by git or GitHub.\033[0m\n' >&2
+  printf '    See "verify failed:" above for which check(s) and why. Any\n' >&2
+  printf '    "failed to push some refs" line below this is git relaying that\n' >&2
+  printf '    same exit code -- it is not a separate rejection.\n' >&2
+fi
+exit "$verify_status"
