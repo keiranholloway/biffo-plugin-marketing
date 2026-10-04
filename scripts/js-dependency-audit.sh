@@ -62,6 +62,50 @@
 # or the copies stop being interchangeable and `shared-sync.sh --check` starts
 # reporting drift that is really divergence.
 #
+# ## Pre-existing vs introduced (#2040)
+#
+# Every check above answers "can this audit be trusted" (network flake vs a
+# real finding). None of them answer WHEN the vulnerable version got there —
+# so a genuine high/critical advisory published overnight against a package
+# already sitting on `dev`, untouched by this diff, used to read identically
+# to a PR that actually introduced the vulnerable version. #1880 (2026-09-04)
+# tried to paper over exactly that by moving this whole check to a
+# `continue-on-error`, non-required job — which stopped a real per-PR finding
+# from blocking too, and produced ten separate biffo-fleet tickets and $86.72
+# of dispatch spend for two routine advisories that no PR under test could
+# have fixed (#2040's own cost accounting). `py-dependency-audit.sh` closed
+# this same gap for Python in #1673; this is the JS side of the same fix.
+#
+# The fix compares the ADVISORY IDS found against the SAME tree's pnpm audit
+# run against the PR's BASE branch, not against the diff itself: a PR can
+# leave pnpm-lock.yaml untouched while a sibling change moves a transitive
+# version, or the base branch may already carry the flagged version. An
+# advisory ID present in both base and head is pre-existing and does not
+# block; an advisory ID present only in head is introduced by this diff (a
+# new dependency, or an upgrade/downgrade into a vulnerable version) and
+# blocks exactly as before. This mirrors the issue's own "run against base
+# and head, diff the advisory IDs, fail on head-only" design rather than
+# hand-parsing pnpm-lock.yaml's YAML — `pnpm audit` already works against a
+# bare copy of just the lockfile with no install (verified directly against
+# this repo's own pnpm 9.15.9), so the base side is a second real audit
+# call, not a reimplementation of what `pnpm audit` already does.
+#
+# `GITHUB_BASE_REF` is the base branch name and is set ONLY for a
+# `pull_request`/`pull_request_target` event — empty on `push`,
+# `workflow_dispatch` and `merge_group`. That is deliberate, not a gap:
+# outside a PR there is no "diff" to attribute a finding to, so every finding
+# blocks exactly as before (the correct behaviour for `dev` itself, and for
+# the scheduled base-branch scan added alongside this file in #2040, which
+# wants every current finding reported, not just new ones).
+#
+# `origin/$GITHUB_BASE_REF` must already be a resolvable local ref for the
+# comparison to run at all — the `js` job's checkout uses `fetch-depth: 0`
+# precisely so it is (see that job's own comment). If it is NOT resolvable
+# (a shallow checkout, or a distributed copy of this script running
+# somewhere that checkout is missing), comparison fails CLOSED: every
+# finding blocks, same as before this fix, rather than silently waving a
+# real regression through because the check could not be performed.
+#
 # POSIX sh (the CI step runs `sh scripts/...`, i.e. dash) — no `pipefail`.
 set -u
 
@@ -118,12 +162,60 @@ failed=0
 # invocation has finished.
 #
 # `$1` is the directory, `$2` a human label, `$3` extra pnpm flags, `$4` the
-# result file this invocation must write its verdict to.
+# result file this invocation must write its verdict to, `$5` this tree's
+# pnpm-lock.yaml path relative to the repo root — used to look up the SAME
+# lockfile's advisories on the base branch (#2040) — never empty, every
+# caller passes one.
+#
+# Returns (on stdout) the set of advisory IDs recorded against the SAME
+# lockfile path on the PR's base branch, one per line — any severity, not
+# just high/critical, because presence is all classification needs. Prints
+# nothing and returns non-zero when a comparison genuinely cannot be made
+# (network/parse failure, a temp-dir failure) — the caller then treats every
+# finding as introduced, the same fail-closed default #1673 established for
+# Python. An empty base lockfile (the path did not exist on the base branch
+# at all — a brand-new lockfile or a brand-new vendored tree this diff
+# itself introduced) is NOT a failure: it prints nothing and returns 0,
+# because an empty set is the correct answer — there is nothing to be
+# pre-existing against, so every finding in a tree the base never had is
+# introduced by definition.
+_base_advisory_ids() {
+  lock_rel="$1"
+
+  base_content="$(git show "${BASE_REMOTE_REF}:${lock_rel}" 2>/dev/null)"
+  if [ -z "$base_content" ]; then
+    return 0
+  fi
+
+  workdir=$(mktemp -d "${TMPDIR:-/tmp}/js-dependency-audit-base.XXXXXX") || return 1
+  printf '%s' "$base_content" >"$workdir/pnpm-lock.yaml"
+
+  for attempt in $(seq 1 "$attempts"); do
+    # shellcheck disable=SC2086
+    base_out="$(cd "$workdir" && timeout "$AUDIT_TIMEOUT_SECS" pnpm audit --json --ignore-workspace 2>/dev/null)"
+    base_status=$?
+    if [ "$base_status" -eq 124 ]; then
+      [ "$attempt" -lt "$attempts" ] && sleep "$((attempt * 2))"
+      continue
+    fi
+    if printf '%s' "$base_out" | jq -e '.metadata.vulnerabilities' >/dev/null 2>&1; then
+      printf '%s' "$base_out" | jq -r '.advisories[]? | (.github_advisory_id // (.id|tostring))' 2>/dev/null
+      rm -rf "$workdir"
+      return 0
+    fi
+    [ "$attempt" -lt "$attempts" ] && sleep "$((attempt * 2))"
+  done
+
+  rm -rf "$workdir"
+  return 1
+}
+
 audit_dir() {
   dir="$1"
   label="$2"
   extra="$3"
   resultfile="$4"
+  lock_rel="$5"
 
   for attempt in $(seq 1 "$attempts"); do
     # printf, never echo: the CI step runs `sh scripts/...` i.e. dash, whose
@@ -166,16 +258,66 @@ audit_dir() {
     fi
 
     if printf '%s' "$out" | jq -e '.metadata.vulnerabilities' >/dev/null 2>&1; then
-      high="$(printf '%s' "$out" | jq '.metadata.vulnerabilities.high // 0')"
-      crit="$(printf '%s' "$out" | jq '.metadata.vulnerabilities.critical // 0')"
-      mod="$(printf '%s' "$out" | jq '.metadata.vulnerabilities.moderate // 0')"
-      low="$(printf '%s' "$out" | jq '.metadata.vulnerabilities.low // 0')"
+      # Tally from the advisories that REMAIN in the output when present:
+      # pnpm applies `auditConfig.ignoreGhsas` to `.advisories` but leaves
+      # `.metadata.vulnerabilities` counting the ignored ones, so trusting the
+      # metadata reports suppressed (unfixable) advisories as blocking.
+      # Fall back to the metadata when no advisories object is emitted.
+      _cnt() { printf '%s' "$out" | jq --arg s "$1" 'if (.advisories|type)=="object" then [.advisories[]|select(.severity==$s)]|length else (.metadata.vulnerabilities[$s] // 0) end'; }
+      high="$(_cnt high)"
+      crit="$(_cnt critical)"
+      mod="$(_cnt moderate)"
+      low="$(_cnt low)"
       total="$(printf '%s' "$out" | jq '.metadata.totalDependencies // 0')"
       if [ "$((high + crit))" -gt 0 ]; then
-        echo "::error::${label}: ${crit} critical + ${high} high advisory(ies) across ${total} package(s); registry answered ${seen_at}."
+        # Classify each qualifying (high/critical) advisory against the base
+        # branch's SAME lockfile before deciding to block (#2040). Written to
+        # a regular file, not a pipe, and read with `while read ... done <
+        # file` rather than `| while read`, for the same reason
+        # py-dependency-audit.sh's findings loop does: a pipeline runs the
+        # loop in a subshell, and a subshell's counter updates vanish the
+        # instant it exits.
+        findings_file="$(mktemp)"
+        printf '%s' "$out" | jq -r '.advisories[]? | select(.severity=="high" or .severity=="critical") | "\(.github_advisory_id // (.id|tostring))\t\(.severity)\t\(.module_name)"' >"$findings_file"
+
+        base_ids_file=""
+        base_available=0
+        if [ "$COMPARE_MODE" -eq 1 ]; then
+          candidate_ids="$(mktemp)"
+          if _base_advisory_ids "$lock_rel" >"$candidate_ids" 2>/dev/null; then
+            base_ids_file="$candidate_ids"
+            base_available=1
+          else
+            rm -f "$candidate_ids"
+          fi
+        fi
+
+        introduced_count=0
+        preexisting_count=0
+        while IFS="$(printf '\t')" read -r f_id f_sev f_mod; do
+          [ -z "$f_id" ] && continue
+          if [ "$base_available" -eq 1 ] && grep -qxF "$f_id" "$base_ids_file" 2>/dev/null; then
+            preexisting_count=$((preexisting_count + 1))
+            echo "::warning::${label}: ${f_mod} advisory ${f_id} (${f_sev}) is already present in ${BASE_REMOTE_REF}'s lockfile — pre-existing, not introduced by this diff (#2040)."
+          else
+            introduced_count=$((introduced_count + 1))
+            echo "::error::${label}: ${f_mod} advisory ${f_id} (${f_sev}) — new to this tree, or a version this diff introduced/upgraded (or a base-branch comparison was not possible)."
+          fi
+        done <"$findings_file"
+        rm -f "$findings_file"
+        [ -n "$base_ids_file" ] && rm -f "$base_ids_file"
+
         printf '%s' "$out" | jq '.advisories // .metadata.vulnerabilities' 2>/dev/null | head -c 4000
-        echo "fail" >"$resultfile"
-        return 1
+
+        if [ "$introduced_count" -gt 0 ]; then
+          echo "::error::${label}: ${introduced_count} critical/high advisory(ies) introduced or upgraded by this diff across ${total} package(s) (${preexisting_count} more pre-existing, not counted against it); registry answered ${seen_at}."
+          echo "fail" >"$resultfile"
+          return 1
+        fi
+
+        echo "${label}: ${preexisting_count} critical/high advisory(ies) found, all pre-existing on ${BASE_REMOTE_REF:-the base branch} and unrelated to this diff — not blocking (#2040); registry answered ${seen_at}."
+        echo "ok" >"$resultfile"
+        return 0
       fi
       # A bare "no advisories" is not falsifiable. State the population, the
       # severities that did NOT block, and when the registry was asked, so a
@@ -209,6 +351,23 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 
 WORKSPACE_ABS=$(pwd -P)
+
+# Decide once, for the whole run, whether a base-branch comparison is even
+# possible (#2040 — see the "Pre-existing vs introduced" docstring above
+# `set -u`). `GITHUB_BASE_REF` is only ever set by a
+# `pull_request`/`pull_request_target` event; everywhere else COMPARE_MODE
+# stays 0 and every finding blocks, unchanged from before this fix.
+BASE_REMOTE_REF=""
+COMPARE_MODE=0
+if [ -n "${GITHUB_BASE_REF:-}" ]; then
+  candidate="origin/${GITHUB_BASE_REF}"
+  if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+    BASE_REMOTE_REF="$candidate"
+    COMPARE_MODE=1
+  else
+    echo "::warning::js-dependency-audit: base branch is '${GITHUB_BASE_REF}' but '${candidate}' does not resolve locally (shallow checkout?) — cannot tell a pre-existing finding from one this diff introduced, so every finding will block, same as before #2040."
+  fi
+fi
 
 # shellcheck disable=SC2016
 ALL_LOCKS=$(find "$REPO_ROOT" \
@@ -286,10 +445,14 @@ for lock in $ALL_LOCKS; do
   esac
   i=$((i + 1))
   resultfile="$TMP_DIR/result.$i"
+  # `find` was rooted at $REPO_ROOT, so $lock is always an absolute path
+  # under it — this strip is unconditional, unlike $rel's dir_abs case above
+  # (which also has to tolerate a symlink resolving outside the root).
+  lock_rel=${lock#"$REPO_ROOT"/}
   if [ "$dir_abs" = "$WORKSPACE_ABS" ]; then
-    audit_dir "$dir" "pnpm audit (workspace: ${rel})" "" "$resultfile" &
+    audit_dir "$dir" "pnpm audit (workspace: ${rel})" "" "$resultfile" "$lock_rel" &
   else
-    audit_dir "$dir" "pnpm audit (${rel})" "--ignore-workspace" "$resultfile" &
+    audit_dir "$dir" "pnpm audit (${rel})" "--ignore-workspace" "$resultfile" "$lock_rel" &
   fi
 done
 

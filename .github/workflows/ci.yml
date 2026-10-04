@@ -369,3 +369,20 @@ jobs:
       # here; edit it upstream.
       - name: Dependency audit
         run: sh scripts/py-dependency-audit.sh
+
+  # Real-execution conformance harness (biffo-template#1523/#1924). It has no
+  # `scripts/*.test.sh` file, so `scripts/guard-self-test-wiring.sh` checks
+  # for this invocation by name (biffo-template#1926): removing this step
+  # leaves the lane with zero callers.
+  plugin-verify:
+    name: Plugin verify
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups
+      - name: Plugin verify
+        run: sh scripts/biffo.sh plugin verify
