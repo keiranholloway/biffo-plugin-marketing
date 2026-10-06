@@ -185,9 +185,69 @@ _assert_output_contains "core behind — names required" "at least 0.250.0"
 #    CLOSED, and says the health endpoint was missing rather than that core
 #    is behind.
 _write_stub_unreachable
-_run CORE_MIN_TEMPLATE_VERSION=0.250.0 CORE_HEALTH_URL="$URL"
+_run CORE_MIN_TEMPLATE_VERSION=0.250.0 CORE_HEALTH_URL="$URL" PREFLIGHT_WAIT_SECONDS=0
 _assert_exit "health endpoint unreachable" 1
 _assert_output_contains "health endpoint unreachable — says missing, not behind" "no health response available"
+
+# 4b. 500 first, then healthy within the window — passes after retrying.
+COUNT_FILE=$STUB_DIR/count
+: > "$COUNT_FILE"
+cat > "$STUB_DIR/curl" <<STUB
+#!/usr/bin/env sh
+outfile=""
+prev=""
+for a in "\$@"; do
+  case "\$prev" in
+    -o) outfile="\$a" ;;
+  esac
+  prev="\$a"
+done
+echo x >> "$COUNT_FILE"
+if [ "\$(wc -l < "$COUNT_FILE")" -le 1 ]; then
+  printf 'oops' > "\$outfile"
+  printf '500'
+else
+  printf '{"status": "ok", "version": "0.287.12"}' > "\$outfile"
+  printf '200'
+fi
+exit 0
+STUB
+chmod +x "$STUB_DIR/curl"
+_run CORE_MIN_TEMPLATE_VERSION=0.250.0 CORE_HEALTH_URL="$URL" PREFLIGHT_WAIT_SECONDS=10 PREFLIGHT_INITIAL_DELAY=1
+_assert_exit "500 then healthy within window" 0
+_assert_output_contains "500 then healthy — logs the retry" "retrying in"
+_assert_output_contains "500 then healthy — OK" "core is at version 0.287.12"
+
+# 4c. 500 for the whole window — refuses after retrying.
+cat > "$STUB_DIR/curl" <<'STUB'
+#!/usr/bin/env sh
+outfile=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -o) outfile="$a" ;;
+  esac
+  prev="$a"
+done
+printf 'oops' > "$outfile"
+printf '500'
+exit 0
+STUB
+chmod +x "$STUB_DIR/curl"
+_run CORE_MIN_TEMPLATE_VERSION=0.250.0 CORE_HEALTH_URL="$URL" PREFLIGHT_WAIT_SECONDS=2 PREFLIGHT_INITIAL_DELAY=1 PREFLIGHT_MAX_DELAY=1
+_assert_exit "500 for the whole window" 1
+_assert_output_contains "500 whole window — logs retries" "retrying in"
+_assert_output_contains "500 whole window — says missing" "no health response available"
+
+# 4d. Healthy but below the minimum version — refuses immediately, no retry.
+_write_stub_ok "0.208.1"
+_run CORE_MIN_TEMPLATE_VERSION=0.250.0 CORE_HEALTH_URL="$URL" PREFLIGHT_WAIT_SECONDS=600 PREFLIGHT_INITIAL_DELAY=100
+_assert_exit "below-minimum version refuses immediately" 1
+if grep -qF "retrying in" "$OUT_FILE"; then
+  echo "FAIL: below-minimum version must not retry"; FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: below-minimum version did not retry"
+fi
 
 # 5. Health endpoint 404s — fails CLOSED, same "missing" message as
 #    scenario 4, never "core is behind".
