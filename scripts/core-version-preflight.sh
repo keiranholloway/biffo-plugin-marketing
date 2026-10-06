@@ -83,6 +83,10 @@
 # CORE_HEALTH_URL           — where to fetch the instance's health document,
 #                              typically "${CORE_API_URL}/api/v1/health".
 #                              Required whenever a minimum is declared.
+# PREFLIGHT_WAIT_SECONDS     — how long to keep retrying an unreachable/5xx
+#                              health endpoint (default 600).
+# PREFLIGHT_INITIAL_DELAY / PREFLIGHT_MAX_DELAY — backoff bounds in seconds
+#                              (default 5 doubling up to 60).
 # PREFLIGHT_CURL             — override the curl binary/wrapper (tests use
 #                              this to point at a stub).
 #
@@ -124,15 +128,49 @@ BODY_FILE=/tmp/core-version-preflight-body.$$
 ERR_FILE=/tmp/core-version-preflight-err.$$
 trap 'rm -f "$BODY_FILE" "$ERR_FILE"' EXIT
 
-HTTP_CODE=$("$CURL" -sS --max-time 15 --retry 2 --retry-delay 2 \
-  -o "$BODY_FILE" -w '%{http_code}' "$URL" 2>"$ERR_FILE")
-RC=$?
-ERR=$(cat "$ERR_FILE" 2>/dev/null)
+# A core deploy replaces the API over several minutes, and a health check in
+# that window can return 5xx or fail to connect. Only a MISSING answer
+# (transport failure or 5xx) is retried, with exponential backoff, for up to
+# PREFLIGHT_WAIT_SECONDS (default 600); every attempt is logged. Any other
+# answer (a 200 with a wrong version, a 404, ...) is final and never waits.
+WAIT_SECONDS=${PREFLIGHT_WAIT_SECONDS:-600}
+DELAY=${PREFLIGHT_INITIAL_DELAY:-5}
+MAX_DELAY=${PREFLIGHT_MAX_DELAY:-60}
+START=$(date +%s)
+ATTEMPT=0
 
-if [ "$RC" -ne 0 ] || [ "$HTTP_CODE" != "200" ]; then
-  echo "::error::core-version-preflight: no health response available at $URL (curl exit $RC, http ${HTTP_CODE:-none}${ERR:+, $ERR}). An absent or unreachable health endpoint is treated as NOT satisfied — this is expected on a down instance, a network issue, or a not-yet-deployed core — and is a DIFFERENT fact from 'core is behind version $MIN'. Refusing to deploy rather than assuming core is ready." >&2
+while :; do
+  ATTEMPT=$((ATTEMPT + 1))
+  HTTP_CODE=$("$CURL" -sS --max-time 15 \
+    -o "$BODY_FILE" -w '%{http_code}' "$URL" 2>"$ERR_FILE")
+  RC=$?
+  ERR=$(cat "$ERR_FILE" 2>/dev/null)
+
+  RETRYABLE=0
+  if [ "$RC" -ne 0 ]; then
+    RETRYABLE=1
+  else
+    case "$HTTP_CODE" in
+      5[0-9][0-9]) RETRYABLE=1 ;;
+    esac
+  fi
+
+  if [ "$RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+    break
+  fi
+
+  ELAPSED=$(($(date +%s) - START))
+  if [ "$RETRYABLE" -eq 1 ] && [ $((ELAPSED + DELAY)) -le "$WAIT_SECONDS" ]; then
+    echo "core-version-preflight: attempt $ATTEMPT got no healthy answer from $URL (curl exit $RC, http ${HTTP_CODE:-none}${ERR:+, $ERR}); core may be redeploying — retrying in ${DELAY}s (${ELAPSED}s of ${WAIT_SECONDS}s elapsed)."
+    sleep "$DELAY"
+    DELAY=$((DELAY * 2))
+    [ "$DELAY" -gt "$MAX_DELAY" ] && DELAY=$MAX_DELAY
+    continue
+  fi
+
+  echo "::error::core-version-preflight: no health response available at $URL after $ATTEMPT attempt(s) over ${ELAPSED}s (curl exit $RC, http ${HTTP_CODE:-none}${ERR:+, $ERR}). An absent or unreachable health endpoint is treated as NOT satisfied — this is expected on a down instance, a network issue, or a not-yet-deployed core — and is a DIFFERENT fact from 'core is behind version $MIN'. Refusing to deploy rather than assuming core is ready." >&2
   exit 1
-fi
+done
 
 ACTUAL=$(command -v jq >/dev/null 2>&1 && jq -r 'if (.version | type) == "string" then .version else empty end' "$BODY_FILE" 2>/dev/null)
 
