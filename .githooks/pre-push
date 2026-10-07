@@ -154,10 +154,26 @@ fi
 # deliberate escape hatch AGENTS.md section 7 requires for loosening a gate --
 # in the open, not by reaching for `--no-verify` and skipping every other check
 # too.
+#
+# Pre-push ONLY, the lane is also SCOPED to the diff (see verify.sh): the full
+# suite outgrew the fleet's 900s push timeout, and CI still runs all of it as
+# the required check. `BIFFO_PGTEST_PREPUSH=1` marks this as a pre-push run
+# (smaller budget); `BIFFO_PGTEST_CHANGED_FILES` names the changed paths;
+# `BIFFO_PGTEST_SCOPE=none` means the diff is provably irrelevant, so the lane
+# is not run. A hand-run `biffo verify` sets none of these and runs everything.
 if [ -z "${BIFFO_SKIP_PGTEST:-}" ] && [ -n "$REFS_FILE" ]; then
-  if sh scripts/biffo.sh pgtest-diff-check <"$REFS_FILE"; then
-    export BIFFO_PGTEST_DIFF_RELEVANT=1
-  fi
+  PGTEST_LIST_FILE=$(mktemp) || PGTEST_LIST_FILE=""
+  trap 'rm -f "$REFS_FILE" "$PGTEST_LIST_FILE"' EXIT HUP INT TERM
+  export BIFFO_PGTEST_PREPUSH=1
+  BIFFO_PGTEST_DIFF_LIST_FILE="$PGTEST_LIST_FILE" sh scripts/biffo.sh pgtest-diff-check <"$REFS_FILE"
+  pgtest_status=$?
+  case "$pgtest_status" in
+    0)
+      export BIFFO_PGTEST_DIFF_RELEVANT=1
+      [ -n "$PGTEST_LIST_FILE" ] && export BIFFO_PGTEST_CHANGED_FILES="$PGTEST_LIST_FILE"
+      ;;
+    1) export BIFFO_PGTEST_SCOPE=none ;;
+  esac
 fi
 
 # Through the version-pinned CLI since #1109, so a repo cannot run a gate two
@@ -179,6 +195,8 @@ fi
 # own failure text (above) already names the cause; this adds one more line,
 # deliberately placed as close as this hook can get to git's trailing output,
 # so a reader who only sees the last few lines still sees it.
+# Lets vitest configs retry once, for this gate only (#EPIPE flake).
+export BIFFO_PRE_PUSH=1
 sh scripts/biffo.sh verify
 verify_status=$?
 if [ "$verify_status" -ne 0 ]; then
