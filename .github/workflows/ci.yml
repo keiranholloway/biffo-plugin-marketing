@@ -347,6 +347,16 @@ jobs:
       # stubbed `uv`/pip-audit so it needs no network access.
       - name: py-dependency-audit classification — self-test
         run: sh scripts/py-dependency-audit-classification.test.sh
+      - name: py-dependency-audit truncation — self-test
+        run: sh scripts/py-dependency-audit-truncation.test.sh
+      - name: js-dependency-audit classification — self-test
+        run: sh scripts/js-dependency-audit-classification.test.sh
+      - name: core-revision-preflight — self-test
+        run: sh scripts/core-revision-preflight.test.sh
+      - name: core-version-preflight — self-test
+        run: sh scripts/core-version-preflight.test.sh
+      - name: routing-smoke-test — self-test
+        run: sh scripts/routing-smoke-test.test.sh
       # template's `scripts/*.test.sh` auto-discovery step
       # (scripts/guard-self-test-wiring.sh) has now reached this repo via the
       # ordinary shared-sync channel (biffo-plugin-marketing issue 196, filed
