@@ -110,6 +110,11 @@ def test_user_surface_readable_tables_stay_read_only() -> None:
         assert perms["list"]["required_role"] == [], f"{name}.list should be open"
         assert perms["read"]["required_role"] == [], f"{name}.read should be open"
         for op in ("create", "update", "delete"):
+            if (name, op) == ("marketing_campaign", "create"):
+                # The founder UI's draft-create (user_app.create_campaign_route)
+                # writes with the caller's own token; Core authorises on it.
+                assert perms[op]["required_role"] == []
+                continue
             assert perms[op]["required_role"] == ["admin"], f"{name}.{op} must stay admin-only"
 
     click_perms = tables["marketing_click"]["permissions"]

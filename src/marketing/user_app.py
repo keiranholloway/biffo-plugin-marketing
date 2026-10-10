@@ -63,14 +63,23 @@ Unlike ``admin_ingress``, the shared plugin host does not bake a
 
 The founder UI (``web/``, declared as ``user_frontend``) lets a founder start
 a campaign. That is the only write on this surface, and it is deliberately
-narrow rather than a relaxation of ``marketing_campaign``'s ``create``
-permission, which stays ``admin``-only (so the generic CRUD path is no more
-open than it was). ``create_campaign_route`` accepts only a name, brief,
-destination URL, media kinds and motion, **forces** ``status="draft"``
-server-side (any ``status`` the caller sends is dropped, never read), and
-writes through this plugin's own service-level Core client
-(``get_core_client``, ``system:marketing``), not the caller's token. Non-founders
-never reach it: the host's ``group_gate`` refuses them before this app runs.
+narrow: ``create_campaign_route`` accepts only a name, brief, destination
+URL, media kinds and motion, **forces** ``status="draft"`` server-side (any
+``status`` the caller sends is dropped, never read), and writes through
+``get_campaign_client`` — the dual-auth mount carrying the founder's own
+forwarded token. Core's per-plugin CRUD guard
+(``require_principal_crud_permission``) cannot act on the plugin's own
+authority: a SigV4-only call is 401, and ``create`` is authorised against the
+*user's* roles. So ``marketing_campaign.create`` is declared ``[]`` ("any authenticated
+caller", as ``list``/``read`` already are) in the manifest —
+``marketing_campaign`` only; every other table's writes stay admin-only. The
+instance's founder group cannot be named in a table permission (issue #46;
+``tests/test_marketing_ingress_group_guard.py``). Known limitation, same
+class as #40: the generic manifest ``POST /campaigns`` route does not force
+``draft``, so any authenticated tenant caller could create a non-draft row
+through it directly; ``update``/``delete`` stay admin-only. Non-founders
+never reach this route: the host's ``group_gate`` refuses them before this
+app runs.
 Everything past ``draft`` stays an admin action.
 
 ## Read-only reads, and why two tables' permissions had to change
@@ -348,12 +357,13 @@ class CampaignCreate(BaseModel):
 @router.post("/campaigns", status_code=status.HTTP_201_CREATED)
 async def create_campaign_route(
     body: CampaignCreate,
-    core_client: BiffoAPIClient = Depends(get_core_client),
+    campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
 ) -> dict[str, Any]:
     """Start a **draft** campaign. See the module docstring's "One write"
     section: ``status`` is forced to ``draft`` here and cannot be supplied by
-    the caller, and the write goes through the plugin's own service-level
-    client because ``marketing_campaign`` ``create`` stays admin-only."""
+    the caller, and the write carries THIS founder's forwarded token (Core's
+    per-plugin CRUD mount refuses a tokenless, SigV4-only call with 401 and
+    authorises ``create`` on the *user's* roles)."""
     payload: dict[str, Any] = {"name": body.name, "status": "draft"}
     if body.brief is not None:
         payload["brief"] = body.brief
@@ -364,7 +374,7 @@ async def create_campaign_route(
     if body.motion is not None:
         payload["motion"] = body.motion
     try:
-        created = await core_client.post(f"{_INTERNAL_PREFIX}/campaigns", json=payload)
+        created = await campaign_client.post(f"{_INTERNAL_PREFIX}/campaigns", json=payload)
     except BiffoAPIError as exc:
         raise _core_error(exc) from exc
     row = created or {}

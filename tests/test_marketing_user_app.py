@@ -643,7 +643,8 @@ def test_the_manifest_app_path_resolves() -> None:
 
 
 class _RecordingCoreClient:
-    """Stands in for `get_core_client()` on the create route."""
+    """Stands in for `get_campaign_client()` on the create route — the
+    dual-auth client carrying the founder's own token."""
 
     def __init__(self, *, error_status: int | None = None) -> None:
         self.posts: list[tuple[str, dict[str, Any]]] = []
@@ -657,7 +658,7 @@ class _RecordingCoreClient:
 
 
 def _create_client(core: Any) -> TestClient:
-    return TestClient(_app(core_client=core, campaign_client=_FakeCampaignClient()))
+    return TestClient(_app(core_client=_FakeCoreClient(), campaign_client=core))
 
 
 def test_create_forces_draft_and_forwards_only_allowed_fields() -> None:
@@ -739,7 +740,7 @@ def test_non_founders_are_refused_by_the_host_gate_not_this_app() -> None:
     gate that sits in front of the app — a refused caller never reaches the
     route, so Core is never written to."""
     core = _RecordingCoreClient()
-    inner = _app(core_client=core, campaign_client=_FakeCampaignClient())
+    inner = _app(core_client=_FakeCoreClient(), campaign_client=core)
     gated = FastAPI()
 
     @gated.middleware("http")
@@ -762,14 +763,16 @@ def test_non_founders_are_refused_by_the_host_gate_not_this_app() -> None:
     assert [p[1]["name"] for p in core.posts] == ["Yes"]
 
 
-def test_the_admin_create_permission_is_untouched() -> None:
+def test_create_permission_lets_the_forwarded_user_through_core_and_only_that_table() -> None:
     import pathlib
 
     manifest = json.loads(
         (pathlib.Path(__file__).resolve().parents[1] / "biffo.plugin.json").read_text("utf-8")
     )
     table = next(t for t in manifest["tables"] if t["name"] == "marketing_campaign")
-    assert table["permissions"]["create"]["required_role"] == ["admin"]
+    assert table["permissions"]["create"]["required_role"] == []
+    for op in ("update", "delete"):
+        assert table["permissions"][op]["required_role"] == ["admin"]
 
 
 @pytest.mark.parametrize(

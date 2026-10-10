@@ -79,7 +79,7 @@
         },
         "create": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "update": {
           "allowed": true,
