@@ -60,9 +60,9 @@ export function createApi(getIdToken = getFreshIdToken) {
 
   return {
     createCampaign: (body: NewCampaign) =>
-      request<CreatedCampaign>('POST', '/campaigns', body, undefined, 'creating a campaign'),
+      request<CreatedCampaign>('POST', '/campaign-drafts', body, undefined, 'creating a campaign'),
     listCampaigns: () =>
-      request<CampaignSummary[]>('GET', '/campaigns', undefined, undefined, 'campaigns'),
+      request<CampaignSummary[]>('GET', '/promotable-campaigns', undefined, undefined, 'campaigns'),
   }
 }
 

@@ -290,7 +290,10 @@ def _campaign_summary(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@router.get("/campaigns")
+# NOTE: this and `POST /campaign-drafts` deliberately avoid `/campaigns`: GET/POST
+# `/campaigns` are declared `api_routes`, which the shared host forwards to
+# Core generic CRUD before this app is consulted.
+@router.get("/promotable-campaigns")
 async def list_campaigns_route(
     client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),
 ) -> list[dict[str, Any]]:
@@ -354,7 +357,7 @@ class CampaignCreate(BaseModel):
         return value
 
 
-@router.post("/campaigns", status_code=status.HTTP_201_CREATED)
+@router.post("/campaign-drafts", status_code=status.HTTP_201_CREATED)
 async def create_campaign_route(
     body: CampaignCreate,
     campaign_client: principal_client.PrincipalCoreClient = Depends(get_campaign_client),

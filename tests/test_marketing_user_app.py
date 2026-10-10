@@ -92,7 +92,7 @@ class _FakeCampaignClient:
         raise AssertionError(f"unexpected GET {path}")
 
 
-def _app(*, core_client: Any, campaign_client: _FakeCampaignClient) -> FastAPI:
+def _app(*, core_client: Any, campaign_client: Any) -> FastAPI:
     app = FastAPI()
     app.include_router(user_app.router)
     app.dependency_overrides[user_app._forwarded_token] = lambda: _USER_JWT
@@ -194,7 +194,7 @@ def test_lists_only_ready_and_live_campaigns() -> None:
     )
     client = TestClient(_app(core_client=_FakeCoreClient(), campaign_client=campaign_client))
 
-    resp = client.get("/campaigns")
+    resp = client.get("/promotable-campaigns")
 
     assert resp.status_code == 200
     ids = {c["id"] for c in resp.json()}
@@ -234,7 +234,7 @@ def test_a_request_reaches_the_route_with_no_group_claim_at_all() -> None:
     app.dependency_overrides[user_app.get_campaign_client] = lambda: campaign_client
     client = TestClient(app)
 
-    resp = client.get("/campaigns", headers={"X-Biffo-Founder-Token": _USER_JWT})
+    resp = client.get("/promotable-campaigns", headers={"X-Biffo-Founder-Token": _USER_JWT})
 
     assert resp.status_code == 200
     assert [c["id"] for c in resp.json()] == ["c-live"]
@@ -293,7 +293,7 @@ def test_campaign_summary_omits_internal_fields() -> None:
     campaign_client.get = _paged_campaigns([internal_row])  # type: ignore[method-assign]
     client = TestClient(_app(core_client=_FakeCoreClient(), campaign_client=campaign_client))
 
-    resp = client.get("/campaigns")
+    resp = client.get("/promotable-campaigns")
 
     assert resp.status_code == 200
     body = resp.json()[0]
@@ -665,7 +665,7 @@ def test_create_forces_draft_and_forwards_only_allowed_fields() -> None:
     core = _RecordingCoreClient()
 
     resp = _create_client(core).post(
-        "/campaigns",
+        "/campaign-drafts",
         json={
             "name": "  Spring launch ",
             "brief": "Reach local cafes",
@@ -700,7 +700,7 @@ def test_create_forces_draft_and_forwards_only_allowed_fields() -> None:
 def test_create_with_only_a_name_is_a_draft() -> None:
     core = _RecordingCoreClient()
 
-    resp = _create_client(core).post("/campaigns", json={"name": "Minimal"})
+    resp = _create_client(core).post("/campaign-drafts", json={"name": "Minimal"})
 
     assert resp.status_code == 201
     assert core.posts[0][1] == {"name": "Minimal", "status": "draft"}
@@ -720,7 +720,7 @@ def test_create_with_only_a_name_is_a_draft() -> None:
 def test_create_rejects_invalid_input_without_calling_core(body: dict[str, Any]) -> None:
     core = _RecordingCoreClient()
 
-    resp = _create_client(core).post("/campaigns", json=body)
+    resp = _create_client(core).post("/campaign-drafts", json=body)
 
     assert resp.status_code == 422
     assert core.posts == []
@@ -728,7 +728,7 @@ def test_create_rejects_invalid_input_without_calling_core(body: dict[str, Any])
 
 def test_create_maps_a_core_failure_to_a_gateway_error() -> None:
     resp = _create_client(_RecordingCoreClient(error_status=403)).post(
-        "/campaigns", json={"name": "Nope"}
+        "/campaign-drafts", json={"name": "Nope"}
     )
 
     assert resp.status_code == 502
@@ -753,7 +753,7 @@ def test_non_founders_are_refused_by_the_host_gate_not_this_app() -> None:
 
     gated.mount("/api/v1/plugins/marketing", inner)
     client = TestClient(gated)
-    url = "/api/v1/plugins/marketing/campaigns"
+    url = "/api/v1/plugins/marketing/campaign-drafts"
 
     refused = client.post(url, json={"name": "Nope"})
     admitted = client.post(url, json={"name": "Yes"}, headers={"x-test-member": "yes"})
@@ -785,7 +785,29 @@ def test_create_permission_lets_the_forwarded_user_through_core_and_only_that_ta
 def test_create_treats_blank_optional_fields_as_absent(body: dict[str, Any]) -> None:
     core = _RecordingCoreClient()
 
-    resp = _create_client(core).post("/campaigns", json=body)
+    resp = _create_client(core).post("/campaign-drafts", json=body)
 
     assert resp.status_code == 201
     assert core.posts[0][1] == {"name": body["name"], "status": "draft"}
+
+
+def test_user_app_routes_are_not_shadowed_by_declared_api_routes() -> None:
+    """The shared host's forwarding gate matches every declared `api_routes`
+    method+path first and forwards it to Core's generic CRUD; only undeclared
+    paths reach this app. A user_app route on a declared (method, path) is
+    therefore dead code."""
+    import pathlib
+    import re
+
+    manifest = json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "biffo.plugin.json").read_text("utf-8")
+    )
+
+    def norm(path: str) -> str:
+        return re.sub(r"\{[^}/]+\}", "{}", path)
+
+    declared = {(r["method"].upper(), norm(r["path"])) for r in manifest["api_routes"]}
+    for route in user_app.router.routes:
+        path: str = getattr(route, "path", "")
+        for method in getattr(route, "methods", None) or ():
+            assert (method, norm(path)) not in declared, f"{method} {path} is shadowed"
