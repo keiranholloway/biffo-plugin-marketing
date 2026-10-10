@@ -770,3 +770,19 @@ def test_the_admin_create_permission_is_untouched() -> None:
     )
     table = next(t for t in manifest["tables"] if t["name"] == "marketing_campaign")
     assert table["permissions"]["create"]["required_role"] == ["admin"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "Blanks", "destination_url": "   ", "media_kinds": [], "motion": ""},
+        {"name": "Nulls", "destination_url": None, "media_kinds": None, "motion": None},
+    ],
+)
+def test_create_treats_blank_optional_fields_as_absent(body: dict[str, Any]) -> None:
+    core = _RecordingCoreClient()
+
+    resp = _create_client(core).post("/campaigns", json=body)
+
+    assert resp.status_code == 201
+    assert core.posts[0][1] == {"name": body["name"], "status": "draft"}
