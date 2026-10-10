@@ -1,6 +1,6 @@
 {
   "name": "marketing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Campaign studio \u2014 research an audience, decide the message, pick channels, generate media in the right form factors, hand the operator a pack they publish themselves, and measure what came back.",
   "author": "Biffo Team",
   "tags": ["marketing", "campaigns", "agentic", "attribution"],
@@ -79,7 +79,7 @@
         },
         "create": {
           "allowed": true,
-          "required_role": ["admin"]
+          "required_role": []
         },
         "update": {
           "allowed": true,
@@ -676,6 +676,10 @@
   "user_ingress": {
     "required_group": "founder",
     "app": "marketing.user_app:app"
+  },
+  "user_frontend": {
+    "dir": "web/dist",
+    "required_group": "founder"
   },
   "admin_ingress": {
     "required_group": "admin",

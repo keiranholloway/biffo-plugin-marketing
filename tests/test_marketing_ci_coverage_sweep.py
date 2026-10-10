@@ -238,7 +238,7 @@ def test_discovers_the_known_project_directories() -> None:
     check going silently vacuous."""
     found = discover_project_dirs()
     print(f"ci-coverage-sweep: {len(found)} project directory(s) discovered: {found}")
-    assert found == [".", "web-admin"], (
+    assert found == [".", "web", "web-admin"], (
         f"discover_project_dirs() found {found!r} — if this repo genuinely "
         "gained or lost a project directory, update this pinned list; if not, "
         "the walk or the exclusion list broke."

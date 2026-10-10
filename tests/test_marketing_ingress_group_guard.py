@@ -100,6 +100,13 @@ _HOME = "ingress.py"
 #: `ingress.USER_INGRESS_GROUP` so the two cannot drift.
 _MANIFEST_HOME = "user_ingress.required_group"
 
+#: `user_frontend.required_group` (ADR-0018 §2) — the same declared default,
+#: required by the SDK's `UserFrontend` model, which has no way to omit it. The
+#: host's ingress gate and Core remain the enforcement; this one is read by the
+#: frontend deployment. `test_marketing_manifest.py` asserts it equals
+#: `ingress.USER_INGRESS_GROUP` as well, so the two copies cannot drift.
+_MANIFEST_FRONTEND_HOME = "user_frontend.required_group"
+
 
 def _string_constants(tree: ast.AST) -> list[tuple[int, str]]:
     """Every string constant in *tree*, with its line number.
@@ -175,7 +182,7 @@ def _manifest_paths_carrying(value: str) -> list[str]:
 
 
 def test_the_manifest_carries_the_group_at_exactly_one_path() -> None:
-    """`user_ingress.required_group` and nowhere else.
+    """`user_ingress.required_group` and `user_frontend.required_group`, nowhere else.
 
     The manifest is data the host reads, so this copy is load-bearing today —
     but a second one (a chat agent's `required_group`, a table permission, a
@@ -184,10 +191,12 @@ def test_the_manifest_carries_the_group_at_exactly_one_path() -> None:
     vocabulary; until it lands, the count is one.
     """
     for banned in sorted(_BANNED):
-        assert _manifest_paths_carrying(banned) == [_MANIFEST_HOME], (
+        assert sorted(_manifest_paths_carrying(banned)) == sorted(
+            [_MANIFEST_HOME, _MANIFEST_FRONTEND_HOME]
+        ), (
             f"biffo.plugin.json carries {banned!r} at "
-            f"{_manifest_paths_carrying(banned)}; the only permitted path is "
-            f"{_MANIFEST_HOME}."
+            f"{_manifest_paths_carrying(banned)}; the only permitted paths are "
+            f"{_MANIFEST_HOME} and {_MANIFEST_FRONTEND_HOME}."
         )
 
 
