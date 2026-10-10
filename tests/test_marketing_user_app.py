@@ -637,3 +637,136 @@ def test_the_manifest_app_path_resolves() -> None:
     module_name, _, attr = "marketing.user_app:app".partition(":")
     module = __import__(module_name, fromlist=[attr])
     assert getattr(module, attr) is not None
+
+
+# ── POST /campaigns: the founder UI's draft-only create ──────────────────────
+
+
+class _RecordingCoreClient:
+    """Stands in for `get_core_client()` on the create route."""
+
+    def __init__(self, *, error_status: int | None = None) -> None:
+        self.posts: list[tuple[str, dict[str, Any]]] = []
+        self._error_status = error_status
+
+    async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
+        self.posts.append((path, json or {}))
+        if self._error_status is not None:
+            raise BiffoAPIError(self._error_status, "core said no")
+        return {"id": "new-campaign", **(json or {})}
+
+
+def _create_client(core: Any) -> TestClient:
+    return TestClient(_app(core_client=core, campaign_client=_FakeCampaignClient()))
+
+
+def test_create_forces_draft_and_forwards_only_allowed_fields() -> None:
+    core = _RecordingCoreClient()
+
+    resp = _create_client(core).post(
+        "/campaigns",
+        json={
+            "name": "  Spring launch ",
+            "brief": "Reach local cafes",
+            "destination_url": "https://example.com/start",
+            "media_kinds": ["image", "copy"],
+            "motion": "organic",
+            # Every one of these must be dropped, never forwarded.
+            "status": "live",
+            "guidance": "sneaky",
+            "id": "forged",
+        },
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "draft"
+    assert resp.json()["id"] == "new-campaign"
+    assert core.posts == [
+        (
+            f"{user_app._INTERNAL_PREFIX}/campaigns",
+            {
+                "name": "Spring launch",
+                "status": "draft",
+                "brief": "Reach local cafes",
+                "destination_url": "https://example.com/start",
+                "media_kinds": "copy,image",
+                "motion": "organic",
+            },
+        )
+    ]
+
+
+def test_create_with_only_a_name_is_a_draft() -> None:
+    core = _RecordingCoreClient()
+
+    resp = _create_client(core).post("/campaigns", json={"name": "Minimal"})
+
+    assert resp.status_code == 201
+    assert core.posts[0][1] == {"name": "Minimal", "status": "draft"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"name": "   "},
+        {"name": "x" * 201},
+        {"name": "ok", "destination_url": "javascript:alert(1)"},
+        {"name": "ok", "media_kinds": ["hologram"]},
+        {"name": "ok", "motion": "sideways"},
+    ],
+)
+def test_create_rejects_invalid_input_without_calling_core(body: dict[str, Any]) -> None:
+    core = _RecordingCoreClient()
+
+    resp = _create_client(core).post("/campaigns", json=body)
+
+    assert resp.status_code == 422
+    assert core.posts == []
+
+
+def test_create_maps_a_core_failure_to_a_gateway_error() -> None:
+    resp = _create_client(_RecordingCoreClient(error_status=403)).post(
+        "/campaigns", json={"name": "Nope"}
+    )
+
+    assert resp.status_code == 502
+
+
+def test_non_founders_are_refused_by_the_host_gate_not_this_app() -> None:
+    """This app runs no group check of its own (#46): the host's `group_gate`
+    refuses non-members before the request reaches it. Modelled here as the
+    gate that sits in front of the app — a refused caller never reaches the
+    route, so Core is never written to."""
+    core = _RecordingCoreClient()
+    inner = _app(core_client=core, campaign_client=_FakeCampaignClient())
+    gated = FastAPI()
+
+    @gated.middleware("http")
+    async def group_gate(request, call_next):  # type: ignore[no-untyped-def]
+        if request.headers.get("x-test-member") != "yes":
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({"detail": "forbidden"}, status_code=403)
+        return await call_next(request)
+
+    gated.mount("/api/v1/plugins/marketing", inner)
+    client = TestClient(gated)
+    url = "/api/v1/plugins/marketing/campaigns"
+
+    refused = client.post(url, json={"name": "Nope"})
+    admitted = client.post(url, json={"name": "Yes"}, headers={"x-test-member": "yes"})
+
+    assert refused.status_code == 403
+    assert admitted.status_code == 201
+    assert [p[1]["name"] for p in core.posts] == ["Yes"]
+
+
+def test_the_admin_create_permission_is_untouched() -> None:
+    import pathlib
+
+    manifest = json.loads(
+        (pathlib.Path(__file__).resolve().parents[1] / "biffo.plugin.json").read_text("utf-8")
+    )
+    table = next(t for t in manifest["tables"] if t["name"] == "marketing_campaign")
+    assert table["permissions"]["create"]["required_role"] == ["admin"]

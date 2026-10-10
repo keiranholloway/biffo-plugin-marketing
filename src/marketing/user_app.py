@@ -47,25 +47,33 @@ the day-0 design describes are iteration 2
 (``docs/design/marketing-plugin/campaign-studio.md`` §2, in
 ``tabsii-platform``) and are **not** built here.
 
-## No built UI in this surface
+## No static mount in this app; the UI is a ``user_frontend``
 
 Unlike ``admin_ingress``, the shared plugin host does not bake a
-``StaticFiles`` mount into a ``user_ingress`` app at all — read
+``StaticFiles`` mount into a ``user_ingress`` app — read
 ``services/_plugin-host/src/plugin_host/mount.py::build_host`` in
-``biffo-template`` directly: only the ``/<name>/admin`` mount gets the
-``_is_public_admin_asset`` exemption, and it is ``admin_app.py`` itself
-(not the host) that mounts ``StaticFiles`` inside that app. A user-facing UI
-is a separate manifest concept (``user_frontend``, hosted per ADR-0018) that
-``idea-scout`` and ``ideation`` both declare and this plugin deliberately does
-not yet: building and deploying a real SPA plus its own CloudFront
-distribution is a materially bigger commitment than "declare the surface and
-make it real", and biffo-template issue #558 (open) tracks consolidating that
-whole mechanism into ADR-0021 rather than multiplying copies of it mid-
-migration. So this surface is **JSON only** — a unit reaches it directly (or a
-future UI calls it, the way ``web-admin/src/lib/api.ts`` calls
-``admin_app.py``).
+``biffo-template`` directly. A user-facing UI is a separate manifest concept,
+``user_frontend`` (hosted per ADR-0018), which this plugin now declares like
+``idea-scout`` and ``ideation``: ``web/dist`` is served at
+``/api/v1/plugins/marketing/ui`` and calls this JSON app the way
+``web-admin/src/lib/api.ts`` calls ``admin_app.py``. This app itself stays
+**JSON only**.
 
-## Read-only, and why two tables' permissions had to change
+## One write: creating a *draft* campaign (``POST /campaigns``)
+
+The founder UI (``web/``, declared as ``user_frontend``) lets a founder start
+a campaign. That is the only write on this surface, and it is deliberately
+narrow rather than a relaxation of ``marketing_campaign``'s ``create``
+permission, which stays ``admin``-only (so the generic CRUD path is no more
+open than it was). ``create_campaign_route`` accepts only a name, brief,
+destination URL, media kinds and motion, **forces** ``status="draft"``
+server-side (any ``status`` the caller sends is dropped, never read), and
+writes through this plugin's own service-level Core client
+(``get_core_client``, ``system:marketing``), not the caller's token. Non-founders
+never reach it: the host's ``group_gate`` refuses them before this app runs.
+Everything past ``draft`` stays an admin action.
+
+## Read-only reads, and why two tables' permissions had to change
 
 Every route here reads ``marketing_campaign``, ``marketing_artefact`` (the
 ``copy`` kind only — see ``get_pack_route``) and ``marketing_asset``/
@@ -83,8 +91,9 @@ opens ``list``/``read`` to ``required_role: []`` (any authenticated caller —
 Core's ``dependencies.py``: "empty ``required_role`` authorises any
 authenticated caller") on ``marketing_campaign``, ``marketing_artefact``,
 ``marketing_asset`` and ``marketing_link``. ``create``/``update``/``delete``
-stay admin-only on every table — a unit never writes through this surface —
-and ``marketing_click`` (raw per-click analytics: user agent, referrer) is
+stay admin-only on every table — the one write here is the forced-``draft``
+create above, made with the plugin's own identity — and ``marketing_click``
+(raw per-click analytics: user agent, referrer) is
 untouched in every operation, since no route here has a legitimate reason to
 read it. ``[]`` is the established idiom for "any authenticated caller", not
 a bespoke choice: idea-scout's own ``idea_scout_build_types``/
@@ -144,13 +153,16 @@ version the admin surface builds.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from biffo_plugin_sdk import BiffoAPIClient, BiffoAPIError, create_core_client
 from biffo_plugin_sdk.user_serving import FOUNDER_TOKEN_HEADER
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
+from pydantic import BaseModel, Field, field_validator
 
 from . import admin_app, pipeline, principal_client
 from .config import public_base_url_for
+from .definitions import CAMPAIGN_MOTIONS, MEDIA_KINDS
 from .links import tracked_url
 
 #: Every `_core`-shaped call site below must carry this literal prefix — see
@@ -280,6 +292,91 @@ async def list_campaigns_route(
     return [_campaign_summary(r) for r in rows if (r.get("status") or "") in _AVAILABLE_STATUSES]
 
 
+class CampaignCreate(BaseModel):
+    """What a founder may set when starting a campaign.
+
+    Deliberately has no ``status`` field: the route forces ``draft``. Unknown
+    keys (a ``status`` included) are ignored by pydantic's default and never
+    reach Core, because the payload is built field by field below.
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    brief: str | None = Field(default=None, max_length=20000)
+    destination_url: str | None = Field(default=None, max_length=1024)
+    media_kinds: list[str] | None = None
+    motion: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("destination_url")
+    @classmethod
+    def _destination_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError("destination_url must be an http(s) URL")
+        return value
+
+    @field_validator("media_kinds")
+    @classmethod
+    def _known_media_kinds(cls, value: list[str] | None) -> list[str] | None:
+        if not value:
+            return None
+        unknown = sorted(set(value) - set(MEDIA_KINDS))
+        if unknown:
+            raise ValueError(f"unknown media kind(s): {', '.join(unknown)}")
+        return [k for k in MEDIA_KINDS if k in value]
+
+    @field_validator("motion")
+    @classmethod
+    def _known_motion(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if value not in CAMPAIGN_MOTIONS:
+            raise ValueError(f"motion must be one of: {', '.join(CAMPAIGN_MOTIONS)}")
+        return value
+
+
+@router.post("/campaigns", status_code=status.HTTP_201_CREATED)
+async def create_campaign_route(
+    body: CampaignCreate,
+    core_client: BiffoAPIClient = Depends(get_core_client),
+) -> dict[str, Any]:
+    """Start a **draft** campaign. See the module docstring's "One write"
+    section: ``status`` is forced to ``draft`` here and cannot be supplied by
+    the caller, and the write goes through the plugin's own service-level
+    client because ``marketing_campaign`` ``create`` stays admin-only."""
+    payload: dict[str, Any] = {"name": body.name, "status": "draft"}
+    if body.brief is not None:
+        payload["brief"] = body.brief
+    if body.destination_url is not None:
+        payload["destination_url"] = body.destination_url
+    if body.media_kinds:
+        payload["media_kinds"] = ",".join(body.media_kinds)
+    if body.motion is not None:
+        payload["motion"] = body.motion
+    try:
+        created = await core_client.post(f"{_INTERNAL_PREFIX}/campaigns", json=payload)
+    except BiffoAPIError as exc:
+        raise _core_error(exc) from exc
+    row = created or {}
+    return {
+        "id": row.get("id"),
+        "name": row.get("name") or body.name,
+        "status": "draft",
+        "brief": row.get("brief", payload.get("brief")),
+        "destination_url": row.get("destination_url", payload.get("destination_url")),
+    }
+
+
 async def _resolve_asset_url(core_client: BiffoAPIClient, asset: dict[str, Any]) -> dict[str, Any]:
     """One asset row plus a freshly-minted GET url — minted per request, per
     `image_routes`' own docstring on why a URL is never stored. Skips (does
@@ -384,7 +481,7 @@ async def get_pack_route(
 
 def build_app() -> FastAPI:
     """The user-ingress ASGI app — JSON only, no static mount. See the
-    module docstring's "No built UI in this surface" section for why."""
+    module docstring's "No static mount" section for why."""
     app = FastAPI(title="Marketing — campaign studio (unit)")
     app.include_router(router)
     return app
