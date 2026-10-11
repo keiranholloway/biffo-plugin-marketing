@@ -43,6 +43,13 @@ FAILURES=0
 cat > "$STUB_DIR/uv" <<'STUB'
 #!/usr/bin/env sh
 if [ "$1" = "run" ] && [ "$2" = "pip-audit" ]; then
+  # A crash scenario: nothing on stdout, a fatal error on stderr, the shell's
+  # status for a process killed by SIGSEGV -- what pip-audit did on CPython
+  # 3.15 (biffo-plugin-marketing#218).
+  if [ -n "${PIPAUDIT_STUB_CRASH:-}" ]; then
+    echo "Fatal Python error: Segmentation fault" >&2
+    exit 139
+  fi
   cat "$PIPAUDIT_STUB_OUTPUT"
   exit 0
 fi
@@ -273,6 +280,23 @@ _init_repo "26.2.1" "26.2.1" pip
 _stage_clean
 _run dev
 _assert_exit "clean run unaffected" 0
+
+# 8. pip-audit CRASHES (a segfault before any output) on every attempt. Must
+#     fail closed (INCONCLUSIVE, exit 2), and the failure must carry the exit
+#     status and the first stderr line -- with stderr and the status discarded,
+#     a crash read exactly like a registry fault and the diagnosis went looking
+#     at the network (biffo-plugin-marketing#218).
+_init_repo "26.1.2" "26.1.2" pip
+_stage_finding pip 26.1.2
+PIPAUDIT_STUB_CRASH=1
+export PIPAUDIT_STUB_CRASH
+_run dev
+unset PIPAUDIT_STUB_CRASH
+_assert_exit "pip-audit crash fails closed" 2
+_assert_output_contains "crash names the tree as unaudited" "INCONCLUSIVE"
+_assert_output_contains "crash reports pip-audit's exit status" "pip-audit last exited 139"
+_assert_output_contains "crash names it as a signal, not a network fault" "killed by signal 11"
+_assert_output_contains "crash carries the first stderr line" "Fatal Python error: Segmentation fault"
 
 # ============================================================================
 # uv WORKSPACE MEMBERS (#2120). The export and the classification must read

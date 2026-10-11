@@ -198,9 +198,21 @@ audit_deps() {
   extra="$2"
   lockfile_relpath="$3"
 
+  last_rc=""
+  last_err=""
   for attempt in $(seq 1 "$attempts"); do
+    # stderr and the exit status are kept, not discarded: with them thrown away
+    # (`2>/dev/null`), a pip-audit that segfaulted on CPython 3.15 before
+    # printing a byte read exactly like a registry that returned junk
+    # ("no parseable JSON output"), and the fix went looking at the network
+    # (biffo-plugin-marketing#218, 2026-10-10). Only the first lines of stderr
+    # are reported, and only when the JSON is unusable.
+    err_file="$(mktemp)"
     # shellcheck disable=SC2086
-    out="$(uv run pip-audit -f json $extra 2>/dev/null)"
+    out="$(uv run pip-audit -f json $extra 2>"$err_file")"
+    rc=$?
+    err_head="$(head -n 5 "$err_file" | tr '\n' ' ' | cut -c1-400)"
+    rm -f "$err_file"
     # Stamped when the advisory source answered, not when the run started —
     # pip-audit queries PyPI/OSV live, so its verdict is time-dependent in the
     # same way pnpm audit's is (#1269). Without the stamp a pass cannot be
@@ -269,11 +281,19 @@ audit_deps() {
       return 0
     fi
 
-    echo "${label}: attempt ${attempt}/${attempts} produced no parseable JSON output."
+    last_rc=$rc
+    last_err=$err_head
+    echo "${label}: attempt ${attempt}/${attempts} produced no parseable JSON output (pip-audit exited ${rc}${err_head:+; stderr: ${err_head}})."
     [ "$attempt" -lt "$attempts" ] && sleep "$((attempt * 3))"
   done
 
-  echo "::error::${label}: could not produce parseable output after ${attempts} attempts. Advisory scanning was NOT performed for this tree, so this is INCONCLUSIVE and BLOCKS — a gate that cannot see its input must not report clean (#1269, #591). If this is a missing tool rather than a network fault, the fix is to declare it: biffo-plugin-ideation rode this path on every run, permanently green while scanning nothing."
+  # An exit status above 128 is a signal: the tool crashed (139 is SIGSEGV),
+  # which is a broken interpreter or package, not a network fault -- say so,
+  # so nobody re-runs it hoping the registry recovers.
+  if [ -n "$last_rc" ] && [ "$last_rc" -gt 128 ]; then
+    echo "::error::${label}: pip-audit was killed by signal $((last_rc - 128)) (exit ${last_rc}) on every attempt -- it crashed before printing anything. Check which Python uv resolved (an unpinned setup-uv picked CPython 3.15 on 2026-10-10, where pip-audit segfaults); a .python-version or UV_PYTHON pins it.${last_err:+ stderr: ${last_err}}"
+  fi
+  echo "::error::${label}: could not produce parseable output after ${attempts} attempts (pip-audit last exited ${last_rc:-unknown}${last_err:+; stderr: ${last_err}}). Advisory scanning was NOT performed for this tree, so this is INCONCLUSIVE and BLOCKS — a gate that cannot see its input must not report clean (#1269, #591). If this is a missing tool rather than a network fault, the fix is to declare it: biffo-plugin-ideation rode this path on every run, permanently green while scanning nothing."
   inconclusive=$((inconclusive + 1))
   return 0
 }
