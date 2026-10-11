@@ -85,6 +85,16 @@ def test_the_user_surface_gates_on_the_one_declared_group() -> None:
     assert _raw()["user_ingress"]["required_group"] == ingress.USER_INGRESS_GROUP
 
 
+def test_the_user_frontend_is_declared_and_agrees_with_the_ingress_group() -> None:
+    """Same shape idea-scout and ideation declare: a built static export under
+    `web/dist`, gated on the same group as `user_ingress`."""
+    declared = _raw().get("user_frontend")
+    assert declared, "user_frontend is absent — /ui would have nothing mounted"
+    assert declared["dir"] == "web/dist"
+    assert declared["required_group"] == ingress.USER_INGRESS_GROUP
+    assert declared["required_group"] == _raw()["user_ingress"]["required_group"]
+
+
 def test_user_surface_readable_tables_stay_read_only() -> None:
     """`marketing_campaign`/`marketing_artefact`/`marketing_asset`/
     `marketing_link` open `list`/`read` to any authenticated caller (`[]`) so
@@ -100,6 +110,11 @@ def test_user_surface_readable_tables_stay_read_only() -> None:
         assert perms["list"]["required_role"] == [], f"{name}.list should be open"
         assert perms["read"]["required_role"] == [], f"{name}.read should be open"
         for op in ("create", "update", "delete"):
+            if (name, op) == ("marketing_campaign", "create"):
+                # The founder UI's draft-create (user_app.create_campaign_route)
+                # writes with the caller's own token; Core authorises on it.
+                assert perms[op]["required_role"] == []
+                continue
             assert perms[op]["required_role"] == ["admin"], f"{name}.{op} must stay admin-only"
 
     click_perms = tables["marketing_click"]["permissions"]

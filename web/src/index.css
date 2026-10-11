@@ -1,0 +1,115 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --border: #cfcfcf;
+  --text: #1a1a1a;
+  --text-muted: #64646e;
+  --accent: #2451c4;
+  --accent-contrast: #ffffff;
+  --danger-bg: #fbe0e0;
+  --danger-text: #9c1a1a;
+  --success-bg: #dcf5e3;
+  --success-text: #146c38;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14141a;
+    --surface: #1d1d26;
+    --border: #3a3a46;
+    --text: #ececf1;
+    --text-muted: #a4a4b0;
+    --accent: #7ea2ff;
+    --accent-contrast: #0b1020;
+    --danger-bg: #4a1c1c;
+    --danger-text: #ffb4b4;
+    --success-bg: #173d27;
+    --success-text: #9be3b5;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+form {
+  display: grid;
+  gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+label {
+  display: grid;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+button {
+  font: inherit;
+  padding: 0.55rem 1rem;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+.error,
+.success {
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+}
+
+.error {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+ul.campaigns {
+  padding-left: 1.2rem;
+}

@@ -195,6 +195,31 @@ jobs:
       # serves for `admin_ingress`.
       - run: pnpm run build
 
+  # The founder-facing UI (`user_frontend.dir` = `web/dist`). Same steps as
+  # `admin-frontend` and, for the same reason, no `paths:` filter.
+  user-frontend:
+    name: User frontend (lint, types, test, build)
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-workspace
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - run: pnpm run build
+
   validate-manifest:
     name: Validate biffo.plugin.json
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
