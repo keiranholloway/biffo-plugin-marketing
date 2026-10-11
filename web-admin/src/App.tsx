@@ -1,3 +1,4 @@
+import { statusBadgeClass, statusLabel } from '@biffo/design-tokens/status.mjs'
 import { useEffect, useState } from 'react'
 
 import { CampaignDetail } from './components/CampaignDetail'
@@ -142,7 +143,7 @@ export default function App() {
 
   return (
     <main>
-      <h1>Campaign studio</h1>
+      <h1 className="biffo-heading">Campaign studio</h1>
       <p className="lede">Campaigns for this tenant, and the tracked links minted from them.</p>
 
       {/* On the list rather than inside a campaign (#160). The workflow is
@@ -186,7 +187,7 @@ export default function App() {
           campaign&rsquo;s own id as <code>utm_campaign</code>.
         </p>
 
-        <button type="submit" disabled={!canSubmit}>
+        <button type="submit" className="biffo-btn-primary" disabled={!canSubmit}>
           {saving ? 'Creating…' : 'Create campaign'}
         </button>
 
@@ -217,7 +218,7 @@ export default function App() {
               <tr key={c.id}>
                 <td>{c.name}</td>
                 <td>
-                  <span className={`badge badge-${c.status}`}>{c.status}</span>
+                  <span className={statusBadgeClass(c.status)}>{statusLabel(c.status)}</span>
                 </td>
                 <td>{c.destination_url ?? '—'}</td>
                 <td>
@@ -231,7 +232,7 @@ export default function App() {
                   </details>
                 </td>
                 <td>
-                  <button type="button" onClick={() => openCampaign(c)}>
+                  <button type="button" className="biffo-btn-primary" onClick={() => openCampaign(c)}>
                     Open
                   </button>
                 </td>

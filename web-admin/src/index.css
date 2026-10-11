@@ -1,34 +1,15 @@
-/* ── Design tokens ─────────────────────────────────────────────────────────
+/* ── Local tokens ──────────────────────────────────────────────────────────
  *
- * No CSS framework, no new dependency (web-admin/package.json deliberately
- * ships only react/react-dom/amazon-cognito-identity-js). Custom properties
- * give the same leverage a framework's theme config would: colour, radius
- * and spacing are named once here and referenced everywhere below, and dark
- * mode is a single `prefers-color-scheme` block re-pointing the same names
- * rather than a second copy of every rule.
+ * The shared palette (--bg, --surface, --border, --border-strong, --text,
+ * --text-muted, --shadow-sm, --brand, …), the font stack, heading, primary
+ * button and status badge come from `@biffo/design-tokens` (tokens.css and
+ * kit.css, imported in main.tsx before this file) so this panel reads as part
+ * of the portal (#2495). Do not re-declare them here. What is below is only
+ * what this panel needs beyond the kit: the secondary-text shade, the
+ * per-status badge pairs and a few shape tokens.
  */
 :root {
-  color-scheme: light dark;
-
-  --bg: #fafafa;
-  --surface: #ffffff;
-  --border: #e2e2e2;
-  --border-strong: #cfcfcf;
-
-  --text: #1a1a1a;
-  --text-secondary: #55555f;
-  /* #767680 measured at 4.31:1 on --bg / 4.49:1 on --surface — under WCAG
-     AA's 4.5:1 for normal text (every consumer here is 0.7–0.85rem, never
-     "large text"), regressing `.empty`/`.hint`/`.platform`/`.channel-loading`
-     etc. below what their pre-token colours (#666, 5.50:1) passed at.
-     #64646e clears 5.6:1/5.85:1 in the same two contexts. */
-  --text-muted: #64646e;
-
-  --accent: #2451c4;
-  --accent-hover: #1c3f9e;
-  --accent-active: #16337f;
-  --accent-contrast: #ffffff;
-  --focus-ring: #2451c4;
+  --text-secondary: #545d72;
 
   --success-bg: #dcf5e3;
   --success-text: #146c38;
@@ -44,67 +25,27 @@
   --slate-text: #454b57;
   --neutral-bg: #ececec;
   --neutral-text: #52525a;
-  /* `.badge-unknown` only — a distinct amber from `.badge-proposed`'s
-     `--warning-*`, so an unrecognised channel and an awaiting-review stage
-     never read as the same colour. Kept as its own token pair rather than
-     inlined hex so it follows the same light/dark pattern as every other
-     colour in this file (see `.badge-unknown` below). */
+  /* `.badge-unknown` only — a distinct amber from `.badge-proposed`'s. */
   --warning-alt-bg: #fbe0c2;
   --warning-alt-text: #8a4b00;
 
+  --accent: var(--brand);
+  --accent-hover: var(--brand-strong);
+  --accent-active: var(--brand-strong);
+  --focus-ring: var(--brand);
+
   --radius-sm: 4px;
   --radius-md: 8px;
-  --radius-lg: 12px;
-  --shadow-sm: 0 1px 2px rgba(15, 15, 20, 0.06);
   --shadow-md: 0 4px 14px rgba(15, 15, 20, 0.1);
 
-  /* Two chevrons (light/dark) for the custom `<select>` arrow — see below. */
+  /* Chevron for the custom `<select>` arrow — see below. */
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23666672' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
-
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  color: var(--text);
-  background: var(--bg);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17181c;
-    --surface: #1e2025;
-    --border: #34363d;
-    --border-strong: #45474f;
-
-    --text: #eceef1;
-    --text-secondary: #b7bac2;
-    --text-muted: #8b8e97;
-
-    --accent: #7ea1ff;
-    --accent-hover: #97b3ff;
-    --accent-active: #aec2ff;
-    --accent-contrast: #10131a;
-    --focus-ring: #97b3ff;
-
-    --success-bg: #123723;
-    --success-text: #6fe3a1;
-    --warning-bg: #3a2d0c;
-    --warning-text: #f0c261;
-    --danger-bg: #3a1414;
-    --danger-text: #f29b9b;
-    --info-bg: #142a4d;
-    --info-text: #9dc0ff;
-    --violet-bg: #2c2145;
-    --violet-text: #c9b3ff;
-    --slate-bg: #2b2e35;
-    --slate-text: #c2c5cc;
-    --neutral-bg: #2a2c31;
-    --neutral-text: #c2c5cc;
-    --warning-alt-bg: #3d2a0c;
-    --warning-alt-text: #f0b46b;
-
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
-
-    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23b7bac2' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
-  }
+body {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
 }
 
 * {
@@ -116,14 +57,9 @@ body {
 }
 
 main {
-  max-width: 60rem;
+  max-width: 80rem;
   margin: 0 auto;
   padding: 2rem 1.5rem 4rem;
-}
-
-h1 {
-  font-size: 1.5rem;
-  margin: 0 0 0.25rem;
 }
 
 .lede {
@@ -279,15 +215,17 @@ textarea {
  * including why a disabled one was disabled.
  */
 
-button {
+/* Primary buttons carry the kit's `.biffo-btn-primary` class. The rules below
+ * give the secondary and quiet variants the same shape and states. */
+button.secondary,
+button.quiet,
+button.back {
   font: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  padding: 0.55rem 1.1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.375rem 0.75rem;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--accent-contrast);
+  border-radius: 0.25rem;
   cursor: pointer;
   transition:
     background-color 120ms ease,
@@ -295,25 +233,18 @@ button {
     transform 60ms ease;
 }
 
-button:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-button:active:not(:disabled) {
-  background: var(--accent-active);
-  transform: translateY(1px);
-}
-
-button:focus-visible {
+button.secondary:focus-visible,
+button.quiet:focus-visible,
+button.back:focus-visible {
   outline: none;
   box-shadow:
     0 0 0 2px var(--surface),
     0 0 0 4px var(--focus-ring);
 }
 
-button:disabled {
-  background: var(--neutral-bg);
-  color: var(--text-muted);
+button.secondary:disabled,
+button.quiet:disabled,
+button.back:disabled {
   cursor: not-allowed;
 }
 

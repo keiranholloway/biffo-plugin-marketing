@@ -115,7 +115,7 @@ export function MintLinks({
           </p>
         )}
 
-        <button type="submit" disabled={channelKey === '' || minting}>
+        <button type="submit" className="biffo-btn-primary" disabled={channelKey === '' || minting}>
           {minting ? 'Minting…' : 'Mint link'}
         </button>
       </form>
@@ -132,7 +132,7 @@ export function MintLinks({
                 {link.is_paid ? ' · paid' : ''}
               </span>
               <code>{link.url}</code>
-              <button type="button" onClick={() => copy(link.url)}>
+              <button type="button" className="biffo-btn-primary" onClick={() => copy(link.url)}>
                 {copied === link.url ? 'Copied' : 'Copy'}
               </button>
             </li>

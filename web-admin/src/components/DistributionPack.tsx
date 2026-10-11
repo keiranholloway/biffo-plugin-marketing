@@ -55,7 +55,7 @@ export function DistributionPack({
 
   return (
     <section className="pack" aria-label="Distribution pack">
-      <button type="button" onClick={load} disabled={loading}>
+      <button type="button" className="biffo-btn-primary" onClick={load} disabled={loading}>
         {loading ? 'Loading…' : pack === null ? 'Load pack' : 'Reload pack'}
       </button>
 

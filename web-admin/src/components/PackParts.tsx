@@ -97,7 +97,7 @@ export function PackLinks({
             {l.url !== null ? (
               <>
                 <code>{l.url}</code>
-                <button type="button" onClick={() => onCopy(l.url as string)}>
+                <button type="button" className="biffo-btn-primary" onClick={() => onCopy(l.url as string)}>
                   {copied === l.url ? 'Copied' : 'Copy'}
                 </button>
               </>
