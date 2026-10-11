@@ -113,7 +113,7 @@ describe('PipelineStage', () => {
 
     // The badge and the reason both survive — #85/#86's requirement, which a
     // silent revert to "startable" is exactly what broke.
-    expect(screen.getByText('Running…')).toBeInTheDocument()
+    expect(screen.getByText('Pending')).toBeInTheDocument()
     expect(screen.getByText(/produced no submit_channel_plan tool call/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /check for result/i })).toBeInTheDocument()
 

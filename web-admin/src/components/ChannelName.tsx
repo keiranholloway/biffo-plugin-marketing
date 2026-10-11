@@ -1,3 +1,5 @@
+import { statusBadgeClass } from '@biffo/design-tokens/status.mjs'
+
 import type { ChannelLookup } from '../lib/useChannelTaxonomy'
 
 /** Renders a channel reference the way an operator needs to read it — never
@@ -54,7 +56,7 @@ export function ChannelName({
   if (channelKey === null) {
     return (
       <span className="channel-name channel-proposed">
-        <span className="badge badge-proposed">Proposed — outside selection</span>{' '}
+        <span className={statusBadgeClass('pending')}>Proposed — outside selection</span>{' '}
         {suggestedLabel !== null && suggestedLabel !== '' ? suggestedLabel : '(no label given)'}
       </span>
     )
@@ -66,7 +68,7 @@ export function ChannelName({
     // #77 mistake (a machine key passed off as a label) reintroduced.
     return (
       <span className="channel-name channel-proposed">
-        <span className="badge badge-proposed">Proposed — outside selection</span>{' '}
+        <span className={statusBadgeClass('pending')}>Proposed — outside selection</span>{' '}
         {lookup.loading ? 'Loading channel…' : (lookup.get(channelKey)?.label ?? channelKey)}
       </span>
     )
@@ -84,7 +86,7 @@ export function ChannelName({
   if (entry === undefined) {
     return (
       <span className="channel-name channel-unknown" title={`No taxonomy entry for channel_key "${channelKey}"`}>
-        {channelKey} <span className="badge badge-unknown">unrecognised channel</span>
+        {channelKey} <span className="biffo-badge biffo-badge--negative">unrecognised channel</span>
       </span>
     )
   }
