@@ -1,6 +1,6 @@
 {
   "name": "marketing",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Campaign studio \u2014 research an audience, decide the message, pick channels, generate media in the right form factors, hand the operator a pack they publish themselves, and measure what came back.",
   "author": "Biffo Team",
   "tags": ["marketing", "campaigns", "agentic", "attribution"],
