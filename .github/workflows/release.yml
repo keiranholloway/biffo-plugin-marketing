@@ -121,11 +121,10 @@ jobs:
           [ "$failed" -eq 0 ] || exit 1
           echo "pyproject.toml, biffo.plugin.json and the tag all agree on $TAG_VERSION"
 
-      - name: Install python-semantic-release
-        run: uv tool install python-semantic-release
-
-      - name: Generate release notes
-        run: semantic-release changelog
+      # No `semantic-release changelog` step: its output (CHANGELOG.md) is never
+      # published -- the GitHub Release below uses `generate_release_notes` --
+      # and on a tag push it exits 1 on the detached HEAD (it cannot resolve a
+      # branch), failing the whole release before anything is built.
 
       - name: Build distribution
         run: uv build
