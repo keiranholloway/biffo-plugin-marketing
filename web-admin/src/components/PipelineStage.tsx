@@ -1,14 +1,8 @@
+import { statusBadgeClass, statusLabel } from '@biffo/design-tokens/status.mjs'
 import type { ReactNode } from 'react'
 
-import type { Artefact, ArtefactKind, ArtefactStatus } from '../lib/api'
+import type { Artefact, ArtefactKind } from '../lib/api'
 import type { SelectableElement } from '../lib/elementSelection'
-
-const STATUS_LABEL: Record<ArtefactStatus, string> = {
-  pending: 'Running…',
-  proposed: 'Awaiting review',
-  approved: 'Approved',
-  rejected: 'Rejected',
-}
 
 interface PipelineStageProps {
   kind: ArtefactKind
@@ -121,7 +115,7 @@ export function PipelineStage({
     <section className="stage" aria-label={title} data-testid={`stage-${kind}`}>
       <div className="stage-head">
         <h4>{title}</h4>
-        {status !== null && <span className={`badge badge-${status}`}>{STATUS_LABEL[status]}</span>}
+        {status !== null && <span className={statusBadgeClass(status)}>{statusLabel(status)}</span>}
       </div>
 
       {loading && <p className="empty">Loading…</p>}

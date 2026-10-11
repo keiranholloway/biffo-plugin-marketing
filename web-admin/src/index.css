@@ -25,9 +25,6 @@
   --slate-text: #454b57;
   --neutral-bg: #ececec;
   --neutral-text: #52525a;
-  /* `.badge-unknown` only — a distinct amber from `.badge-proposed`'s. */
-  --warning-alt-bg: #fbe0c2;
-  --warning-alt-text: #8a4b00;
 
   --accent: var(--brand);
   --accent-hover: var(--brand-strong);
@@ -40,12 +37,6 @@
 
   /* Chevron for the custom `<select>` arrow — see below. */
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23666672' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
-}
-
-body {
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  color: var(--text);
-  background: var(--bg);
 }
 
 * {
@@ -548,76 +539,7 @@ details.mint-toggle[open] > .mint {
   font-size: 0.95rem;
 }
 
-/* ── Badges ────────────────────────────────────────────────────────────────
- *
- * One badge recipe, colour-coded by meaning, used for every state on the
- * page — pipeline-stage status, campaign status, and channel motion — so
- * "APPROVED"/"PAID"/"ORGANIC" and a campaign's plain-text "draft" stop
- * looking like two different design systems. Colour is never the only
- * signal: every badge keeps its own text.
- */
-
-.badge {
-  display: inline-block;
-  font-size: 0.7rem;
-  font-weight: 700;
-  padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  background: var(--neutral-bg);
-  color: var(--neutral-text);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
-/* Campaign status (App.tsx's campaign list). `draft` is deliberately the
- * plain neutral badge — the same visual weight as the base recipe above —
- * every other value (researching, planned, generating, ready, live,
- * archived) falls back to the same neutral badge rather than inventing an
- * unreviewed colour per pipeline status. */
-.badge-draft {
-  background: var(--neutral-bg);
-  color: var(--neutral-text);
-}
-
-/* Pipeline-stage artefact status (`PipelineStage.tsx`'s `STATUS_LABEL`).
- * Deliberately `pending` → info/blue, `proposed` → warning/amber — this is
- * not a mismatched pairing. `proposed` is "Awaiting review": the state that
- * needs a human decision, which is exactly the meaning `--warning-*` (also
- * `.badge-unknown`'s family) carries everywhere else on this page. `pending`
- * is "Running…": an agent job in flight, nobody's action needed yet, which
- * is what `--info-*` signals — the same blue `.badge-pending` alone uses. */
-.badge-pending {
-  background: var(--info-bg);
-  color: var(--info-text);
-}
-
-.badge-proposed {
-  background: var(--warning-bg);
-  color: var(--warning-text);
-}
-
-.badge-approved {
-  background: var(--success-bg);
-  color: var(--success-text);
-}
-
-.badge-rejected {
-  background: var(--danger-bg);
-  color: var(--danger-text);
-}
-
-/* An unrecognised channel_key is a problem, not a neutral state: the taxonomy
-   has no row for it, so the operator is looking at a machine identifier where a
-   channel name belongs. Without this rule it inherits `.badge`'s grey, which
-   reads as ordinary — and "looks ordinary" is the failure this whole change set
-   removed when it stopped rendering such channels blank. A distinct amber from
-   `.badge-proposed`'s, not red: the pack still assembles, so it is a warning
-   rather than a rejection. */
-.badge-unknown {
-  background: var(--warning-alt-bg);
-  color: var(--warning-alt-text);
-}
+/* Badges: the kit's `.biffo-badge` (kit.css) — no local badge recipe. */
 
 .channel-name {
   display: inline-flex;
@@ -641,7 +563,7 @@ details.mint-toggle[open] > .mint {
  * distinct — a separate field or flag, not merely a note in the rationale".
  * The structural half is `ChannelPlanBody.proposals`, a list of its own; this
  * is the visual half, and it deliberately does more than the per-item
- * `.badge-proposed` alone. A badge on each heading is easy to skim past in a
+ * the proposed badge alone. A badge on each heading is easy to skim past in a
  * list of eight ranked channels that otherwise look identical, and the cost
  * of skimming past it is an operator believing a channel they never selected
  * is in the plan.
