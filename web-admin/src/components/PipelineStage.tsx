@@ -147,7 +147,7 @@ export function PipelineStage({
           {(status === null || status === 'rejected') && (
             <>
               {blockedReason !== null && <p className="hint">{blockedReason}</p>}
-              <button type="button" onClick={onStart} disabled={!canStart || busy}>
+              <button type="button" className="biffo-btn-primary" onClick={onStart} disabled={!canStart || busy}>
                 {busy
                   ? 'Starting…'
                   : status === 'rejected'
@@ -159,7 +159,7 @@ export function PipelineStage({
 
           {status === 'pending' && (
             <>
-              <button type="button" onClick={onRefresh} disabled={busy}>
+              <button type="button" className="biffo-btn-primary" onClick={onRefresh} disabled={busy}>
                 {busy ? 'Checking…' : 'Check for result'}
               </button>
               {/* Issue #159. A `pending` artefact whose run has already
@@ -183,7 +183,7 @@ export function PipelineStage({
               {failed && (
                 <>
                   {blockedReason !== null && <p className="hint">{blockedReason}</p>}
-                  <button type="button" onClick={onStart} disabled={!canStart || busy}>
+                  <button type="button" className="biffo-btn-primary" onClick={onStart} disabled={!canStart || busy}>
                     {busy ? 'Starting…' : `Run ${title.toLowerCase()} again`}
                   </button>
                 </>
@@ -218,7 +218,7 @@ export function PipelineStage({
                 </div>
               )}
               <div className="stage-actions">
-                <button type="button" onClick={handleApprove} disabled={busy || noneSelected}>
+                <button type="button" className="biffo-btn-primary" onClick={handleApprove} disabled={busy || noneSelected}>
                   {busy
                     ? 'Approving…'
                     : hasDeselection

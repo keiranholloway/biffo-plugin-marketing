@@ -113,7 +113,7 @@ export function ImageGenerator({ campaignId }: { campaignId: string }) {
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="A bright, welcoming photo of a small business storefront…"
         />
-        <button type="submit" disabled={prompt.trim() === '' || generating}>
+        <button type="submit" className="biffo-btn-primary" disabled={prompt.trim() === '' || generating}>
           {generating ? 'Generating…' : 'Generate still'}
         </button>
       </form>

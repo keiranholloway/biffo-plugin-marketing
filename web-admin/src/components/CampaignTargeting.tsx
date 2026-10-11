@@ -199,7 +199,7 @@ export function CampaignTargeting({
           </p>
         )}
 
-        <button type="submit" disabled={saving || motion === null || keepable.length === 0}>
+        <button type="submit" className="biffo-btn-primary" disabled={saving || motion === null || keepable.length === 0}>
           {saving ? 'Saving…' : 'Save targeting'}
         </button>
         {motion !== null && keepable.length === 0 && !channelLookup.loading && (

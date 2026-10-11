@@ -95,7 +95,7 @@ function RecordSpend({ campaignId, onRecorded }: { campaignId: string; onRecorde
       />
       <label htmlFor="spend-notes">Note (optional)</label>
       <input id="spend-notes" type="text" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      <button type="submit" disabled={saving}>
+      <button type="submit" className="biffo-btn-primary" disabled={saving}>
         {saving ? 'Recording…' : 'Record spend'}
       </button>
       {error !== null && <p className="error">{error}</p>}
@@ -154,7 +154,7 @@ export function PaidPack({
 
   return (
     <section className="paid-pack" aria-label="Paid brief pack">
-      <button type="button" onClick={load} disabled={loading}>
+      <button type="button" className="biffo-btn-primary" onClick={load} disabled={loading}>
         {loading ? 'Loading…' : pack === null ? 'Load paid pack' : 'Reload paid pack'}
       </button>
 

@@ -72,7 +72,7 @@ export function CampaignDetail({
             onChange={(e) => setBrief(e.target.value)}
             placeholder="Who this campaign is for, what it's promoting, and why now."
           />
-          <button type="submit" disabled={savingBrief || brief.trim() === campaignBrief}>
+          <button type="submit" className="biffo-btn-primary" disabled={savingBrief || brief.trim() === campaignBrief}>
             {savingBrief ? 'Saving…' : 'Save brief'}
           </button>
           {briefError !== null && <p className="error">{briefError}</p>}

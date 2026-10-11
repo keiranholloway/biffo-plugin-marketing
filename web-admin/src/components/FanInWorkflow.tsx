@@ -120,7 +120,7 @@ export function FanInWorkflow() {
       <section className="fan-in-workflow">
         <h2>Research fan-in workflow</h2>
         <p className="error">Could not check the deployed workflow: {error}</p>
-        <button type="button" onClick={() => void load()}>
+        <button type="button" className="biffo-btn-primary" onClick={() => void load()}>
           Try again
         </button>
       </section>
@@ -186,7 +186,7 @@ export function FanInWorkflow() {
       )}
 
       {(deployed == null || drift.length > 0) && (
-        <button type="button" onClick={() => void reseed()} disabled={seeding}>
+        <button type="button" className="biffo-btn-primary" onClick={() => void reseed()} disabled={seeding}>
           {seeding ? 'Seeding…' : deployed == null ? 'Seed it now' : 'Re-seed it now'}
         </button>
       )}
