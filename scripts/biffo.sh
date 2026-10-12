@@ -107,8 +107,22 @@ if [ -f biffo.core.json ]; then
   # The committed record first. Falls through to the working tree when there is
   # no HEAD yet (a fresh `biffo init`, before the first commit) or when the file
   # is newly added and not yet in any commit.
-  version=$(git show HEAD:biffo.core.json 2>/dev/null |
-    node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '')
+  #
+  # While a merge is in progress HEAD is the branch being merged INTO, so its
+  # pin is the old branch's. Read the index instead so the merged-in pin runs;
+  # otherwise a conflict resolution on an older PR is judged by a CLI that
+  # predates the merge-aware ownership guard and refuses every merged-in file.
+  # Empty when the index carries no biffo.core.json, then HEAD's is used.
+  version=''
+  if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    version=$(git show :biffo.core.json 2>/dev/null |
+      node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '')
+    [ "$version" = 'undefined' ] && version=''
+  fi
+  if [ -z "$version" ]; then
+    version=$(git show HEAD:biffo.core.json 2>/dev/null |
+      node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '')
+  fi
   if [ -z "$version" ] || [ "$version" = 'undefined' ]; then
     version=$(node -p "require('./biffo.core.json').version" 2>/dev/null || echo '')
   fi
