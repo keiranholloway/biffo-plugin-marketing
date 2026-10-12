@@ -16,8 +16,8 @@ importers:
   .:
     dependencies:
       '@biffo/design-tokens':
-        specifier: ^0.428.0
-        version: 0.428.0
+        specifier: ^0.433.0
+        version: 0.433.0
       amazon-cognito-identity-js:
         specifier: ^6.3.12
         version: 6.3.20
@@ -182,8 +182,8 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@biffo/design-tokens@0.428.0':
-    resolution: {integrity: sha512-sbcQWPS/u/lmM7ESO/69gpWIeVGEE6gbZ8zjrvBQfWvs2cl1d7RwEj/jMx0IHAkc1qYrPZpSFh/hMfFd9Hxcbw==}
+  '@biffo/design-tokens@0.433.0':
+    resolution: {integrity: sha512-zeVvJbKzQDmllcl45Iz8m04ZwdNeZNiUSXbvFNRmPxyvfHKF8X2L50nUzMRcDYDod1Z8mqXK/NKz9kSelGgiiw==}
     hasBin: true
 
   '@csstools/color-helpers@5.1.0':
@@ -1715,7 +1715,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@biffo/design-tokens@0.428.0': {}
+  '@biffo/design-tokens@0.433.0': {}
 
   '@csstools/color-helpers@5.1.0': {}
 
