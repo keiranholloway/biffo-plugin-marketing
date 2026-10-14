@@ -168,7 +168,7 @@ export default function App() {
           id="destination"
           value={destination}
           onChange={(e) => setDestination(e.target.value)}
-          placeholder="https://dev.tabsii.com/intake/demo"
+          placeholder="https://example.com/landing"
           list="destination-suggestions"
         />
         {/* A <datalist> keeps the field free text — nothing here restricts
